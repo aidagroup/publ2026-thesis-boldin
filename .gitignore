@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- AIDA: ML / RL artifacts ---
+# Experiment outputs, logs, checkpoints
+outputs/
+runs/
+logs/
+wandb/
+multirun/
+.hydra/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+# Datasets / demonstrations / renders
+data/
+datasets/
+demos/
+*.mp4
+*.gif
+# ManiSkill / SAPIEN caches & downloaded assets
+.maniskill/
+*.h5

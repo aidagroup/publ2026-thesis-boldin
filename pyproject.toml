@@ -1,0 +1,49 @@
+[project]
+name = "aida"
+version = "0.1.0"
+description = "AIDA — two SO-100 arms cooperatively solve a Rubik's cube via decentralized Bi-JEPA (MARL)"
+readme = "README.md"
+# SAPIEN (ManiSkill's engine) has no wheels for Python 3.13+, so cap at 3.12.
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "numpy",
+    "gymnasium",
+]
+
+[project.optional-dependencies]
+# GPU simulation — Linux + NVIDIA/CUDA only (ManiSkill / SAPIEN).
+sim = [
+    "mani-skill ; sys_platform == 'linux'",
+    "pettingzoo",
+]
+# RL training stack (TorchRL + BenchMARL on PyTorch).
+train = [
+    "torch",
+    "tensordict",
+    "torchrl",
+    "benchmarl",
+]
+dev = [
+    "ruff",
+    "pytest",
+]
+
+[tool.uv]
+# This is an application (research repo), not a distributable package — don't build/install `aida`.
+package = false
+
+# PyTorch wheels: CUDA 12.8 build on the Linux server (RTX 5090 / Blackwell needs cu128+);
+# on macOS (dev, no GPU sim) torch resolves from PyPI as the CPU/MPS build.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
