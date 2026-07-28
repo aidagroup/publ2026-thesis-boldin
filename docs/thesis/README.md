@@ -12,6 +12,7 @@
 | [05 – Стек и окружение](05-stack-environment.md) | ManiSkill/TorchRL/BenchMARL/V-JEPA/LeRobot, железо |
 
 Инженерный сетап и деплой на сервер: [`../setup.md`](../setup.md).
+Пошаговое ТЗ для кодера (по нему пишется код): [`../implementation-plan.md`](../implementation-plan.md).
 
 ---
 
