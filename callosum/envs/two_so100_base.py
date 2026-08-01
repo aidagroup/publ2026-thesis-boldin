@@ -8,6 +8,7 @@ stub that always reports failure.
 
 from typing import Any, ClassVar
 
+import numpy as np
 import sapien
 import torch
 from mani_skill.agents.multi_agent import MultiAgent
@@ -18,6 +19,7 @@ from mani_skill.utils.building import actors
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.pose import Pose
+from transforms3d.euler import euler2quat
 
 # ~5.7 cm real Rubik's cube edge length.
 CUBE_HALF_SIZE = 0.0285
@@ -61,16 +63,22 @@ class TwoSO100Base(BaseEnv):
         return self.agent.agents[1]
 
     def _load_agent(self, options: dict):
-        # TODO(review): poses copied verbatim from the plan (identity
-        # rotation, y=-0.3/y=+0.3). SO-100's own keyframes and every reference
-        # task that places it always pair the placement with a +90deg yaw
-        # (euler2quat(0, 0, pi/2)) to orient the arm's reach direction; the
-        # two-panda reference task also mirrors +/-90deg yaws between the two
-        # arms so they face each other. Whether identity rotation here still
-        # lets both arms reach a cube at the table center is unverified --
-        # cannot run GPU sim on macOS. Please check via scripts/smoke_env.py
-        # on the server; may need q=euler2quat(0, 0, +-pi/2) per arm instead.
-        super()._load_agent(options, [sapien.Pose(p=[0, -0.3, 0]), sapien.Pose(p=[0, 0.3, 0])])
+        # Mirrored yaws so both arms face the cube at the table center,
+        # matching TableSceneBuilder's panda-pair reference (agents[0] gets
+        # +pi/2, agents[1] gets -pi/2). Identity rotation (as originally
+        # copied from the plan) would have both arms facing the same
+        # direction, so at most one of them could reach the cube.
+        # TODO(review): y=-0.3/y=+0.3 spacing (~60% of SO-100's ~0.5 m max
+        # reach, vs. ~88% for the panda-pair reference) is still unverified
+        # on real GPU sim -- confirm via scripts/smoke_env.py on the server
+        # that both arms actually close on the cube.
+        super()._load_agent(
+            options,
+            [
+                sapien.Pose(p=[0, -0.3, 0], q=euler2quat(0, 0, np.pi / 2)),
+                sapien.Pose(p=[0, 0.3, 0], q=euler2quat(0, 0, -np.pi / 2)),
+            ],
+        )
 
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(
@@ -142,8 +150,8 @@ class TwoSO100Base(BaseEnv):
         return -(dist_a + dist_b)
 
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        # TODO(review): 0.5 m/arm is a rough guess at the largest realistic
-        # TCP-to-cube distance for this layout (arms 0.6 m apart, cube near
-        # the table center), not an empirically measured bound.
+        # 0.5 m/arm: SO-100's own max kinematic reach, from summing the URDF
+        # joint-origin offsets from base to jaw tip (~0.498 m); used here only
+        # to keep the normalized reward roughly within [-1, 0].
         max_dist_per_arm = 0.5
         return self.compute_dense_reward(obs=obs, action=action, info=info) / (2 * max_dist_per_arm)
