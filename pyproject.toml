@@ -1,5 +1,5 @@
 [project]
-name = "aida"
+name = "callosum"
 version = "0.1.0"
 description = "AIDA — two SO-100 arms cooperatively solve a Rubik's cube via decentralized Bi-JEPA (MARL)"
 readme = "README.md"
@@ -29,8 +29,15 @@ dev = [
 ]
 
 [tool.uv]
-# This is an application (research repo), not a distributable package — don't build/install `aida`.
+# This is an application (research repo), not a distributable package — don't build/install it.
 package = false
+
+# NOTE — do NOT constrain setuptools>=83 (and do not merge Dependabot's bump of it).
+# torch 2.11.0 requires setuptools<82, so forcing 83 silently DOWNGRADES torch
+# 2.11.0 -> 2.10.0 (plus torchvision/cudnn/nccl). The advisory it would fix
+# (GHSA-h35f-9h28-mq5c, sdist MANIFEST.in bypass) does not apply to us: we never
+# build an sdist (`package = false`). Revisit when torch moves past the pin.
+# See docs/setup.md ("CUDA index") for the related torch/CUDA ceiling.
 
 # PyTorch wheels: CUDA 12.8 build on the Linux server (RTX 5090 / Blackwell needs cu128+);
 # on macOS (dev, no GPU sim) torch resolves from PyPI as the CPU/MPS build.

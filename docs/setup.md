@@ -45,3 +45,27 @@ edit locally  →  git commit  →  git push        (dev / macOS)
 - The state-based baseline needs **no rendering**, so the server only needs PhysX/CUDA – no Vulkan/EGL display setup. Add that later when vision observations come in.
 
 > Note: `uv.lock` is committed for reproducibility – the same resolved versions install on both machines.
+
+## CUDA index: why `cu128`, and when to revisit
+
+**Finding (audited 2026-07-28):** the `cu128` wheel index tops out at **torch 2.11.0**. Newer
+CUDA indexes carry newer torch:
+
+| Index | Newest torch |
+|-------|--------------|
+| `cu128` (current) | 2.11.0 ← our ceiling |
+| `cu129` | 2.13.0 |
+| `cu130` | 2.13.0 |
+
+`cu128` is the **oldest CUDA that supports Blackwell / RTX 5090** (sm_120), so it has the
+**lowest NVIDIA driver requirement**. We deliberately stay on it until the training server
+exists and its driver version is known — a newer CUDA build installs fine but fails at
+runtime on an older driver.
+
+**TODO when server access lands:** run `nvidia-smi`, check the driver version, and if it
+supports CUDA 12.9/13.0, consider moving to `cu129`/`cu130` for torch ≥2.13. That upgrade
+must move `torch` + `torchrl` + `tensordict` **together** (they are released in lockstep),
+and be verified against ManiSkill/SAPIEN on the server.
+
+Bonus: torch ≥2.13 also clears GHSA-rrmf-rvhw-rf47 (`torch.jit.script` memory corruption —
+local-only, negligible for our use since we never script untrusted input).
