@@ -32,6 +32,11 @@ class FaceTurn(TwoSO100Base):
     toward `TARGET_FACE_ANGLE`. Success additionally requires the body to
     have stayed within its initial pose's position/rotation tolerance --
     turning the face by knocking the whole cube around does not count.
+
+    Inherits TwoSO100Base's `partner_obs` flag unchanged: `compute_dense_reward`
+    and `evaluate` always read TCP poses straight off `self.agent_a`/`agent_b`
+    (privileged, CTDE-style access, not the observation dict), so they are
+    unaffected by it either way -- only the shared extra-obs dict changes.
     """
 
     def __init__(

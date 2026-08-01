@@ -21,6 +21,8 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.pose import Pose
 from transforms3d.euler import euler2quat
 
+from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner_obs
+
 # ~5.7 cm real Rubik's cube edge length.
 CUBE_HALF_SIZE = 0.0285
 
@@ -29,11 +31,18 @@ CUBE_HALF_SIZE = 0.0285
 class TwoSO100Base(BaseEnv):
     """Two SO-100 arms around a table with a single loose cube.
 
-    Both arms observe their own proprioception plus both TCP poses and the
-    cube pose (see `_get_obs_extra`); the dense reward simply pulls both TCPs
-    toward the cube. This class only wires up the plumbing -- agents,
-    observations, actions, and reward shapes -- so it can be smoke-tested
-    before the real articulated face-turn task (step 1.3) lands.
+    Both arms observe their own proprioception plus the cube pose (see
+    `_get_obs_extra`); the dense reward simply pulls both TCPs toward the
+    cube. This class only wires up the plumbing -- agents, observations,
+    actions, and reward shapes -- so it can be smoke-tested before the real
+    articulated face-turn task (step 1.3) lands.
+
+    `partner_obs` (`"full"` or `"none"`) toggles whether both agents' TCP
+    poses are included in the shared extra-obs dict -- the oracle/no-partner
+    ends of the ablation triple from docs/thesis/04-experiment-design.md
+    (`"predicted"`, from Bi-JEPA, lands in a later phase). See
+    `callosum.envs._partner_obs` for exactly what this can and can't express
+    at this stage.
     """
 
     SUPPORTED_ROBOTS: ClassVar[list[tuple[str, str]]] = [("so100", "so100")]
@@ -44,9 +53,12 @@ class TwoSO100Base(BaseEnv):
         *args,
         robot_uids=("so100", "so100"),
         robot_init_qpos_noise=0.02,
+        partner_obs="full",
         **kwargs,
     ):
+        validate_partner_obs(partner_obs)
         self.robot_init_qpos_noise = robot_init_qpos_noise
+        self.partner_obs = partner_obs
         # No explicit control_mode: SO100's first configured controller is
         # already "pd_joint_delta_pos" (SO100._controller_configs), which
         # BaseAgent picks by default whenever control_mode is None.
@@ -120,18 +132,17 @@ class TwoSO100Base(BaseEnv):
         # Own qpos/qvel per agent already come from the default
         # _get_obs_agent (MultiAgent.get_proprioception, keyed per sub-agent
         # uid) -- this only adds what BaseEnv doesn't already provide: TCP
-        # poses and cube pose.
+        # poses (gated by partner_obs) and cube pose (always present; it's
+        # task-object state, not "partner" info).
         #
-        # Both TCP poses are included unconditionally for both agents; there
-        # is no per-agent split at this level, matching how ManiSkill's own
-        # two-robot reference task exposes left_arm_tcp/right_arm_tcp to both
-        # agents alike. The partner_obs on/off toggle (step 1.4) will decide,
-        # at the policy-input level, which agent conditions on which fields;
-        # for now the partner's TCP pose is always included, per the plan.
-        obs = {
-            "agent_a_tcp_pose": self.agent_a.tcp_pose.raw_pose,
-            "agent_b_tcp_pose": self.agent_b.tcp_pose.raw_pose,
-        }
+        # obs_mode="state" flattens this whole dict into one combined tensor
+        # (mani_skill.utils.common.flatten_state_dict), so there is no
+        # per-agent split at this level either way -- see
+        # callosum.envs._partner_obs for exactly what partner_obs does and
+        # doesn't control here.
+        obs = partner_tcp_pose_fields(
+            self.partner_obs, self.agent_a.tcp_pose.raw_pose, self.agent_b.tcp_pose.raw_pose
+        )
         if "state" in self.obs_mode:
             obs["cube_pose"] = self.cube.pose.raw_pose
         return obs
