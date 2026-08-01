@@ -54,3 +54,9 @@ torch = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.pytest.ini_options]
+# `package = false` above means callosum is never installed into the venv, so
+# pytest (unlike `python -c`, which gets cwd on sys.path for free) needs an
+# explicit path to import it from the repo root.
+pythonpath = ["."]
