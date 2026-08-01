@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "callosum"
 version = "0.1.0"
@@ -29,14 +33,15 @@ dev = [
 ]
 
 [tool.uv]
-# This is an application (research repo), not a distributable package — don't build/install it.
-package = false
+# `callosum` is installed into the venv in editable mode (default for a project with a
+# build-system). That keeps `import callosum` working identically everywhere — pytest,
+# scripts/*.py, notebooks, and on the server — instead of depending on cwd/sys.path.
 
 # NOTE — do NOT constrain setuptools>=83 (and do not merge Dependabot's bump of it).
 # torch 2.11.0 requires setuptools<82, so forcing 83 silently DOWNGRADES torch
 # 2.11.0 -> 2.10.0 (plus torchvision/cudnn/nccl). The advisory it would fix
-# (GHSA-h35f-9h28-mq5c, sdist MANIFEST.in bypass) does not apply to us: we never
-# build an sdist (`package = false`). Revisit when torch moves past the pin.
+# (GHSA-h35f-9h28-mq5c) targets sdist building in setuptools; we build with hatchling
+# and never publish an sdist, so it does not apply. Revisit when torch drops the pin.
 # See docs/setup.md ("CUDA index") for the related torch/CUDA ceiling.
 
 # PyTorch wheels: CUDA 12.8 build on the Linux server (RTX 5090 / Blackwell needs cu128+);
@@ -56,7 +61,4 @@ line-length = 100
 target-version = "py312"
 
 [tool.pytest.ini_options]
-# `package = false` above means callosum is never installed into the venv, so
-# pytest (unlike `python -c`, which gets cwd on sys.path for free) needs an
-# explicit path to import it from the repo root.
-pythonpath = ["."]
+testpaths = ["tests"]

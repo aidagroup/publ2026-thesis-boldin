@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same PR/branch cancels the previous (still running) job.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Only the dev extra: the `sim`/`train` extras pull ManiSkill + a CUDA torch
+      # build (multi-GB, GPU-only). CI validates code hygiene and pure-Python tests;
+      # anything touching the simulator is verified on the training server.
+      - name: Sync environment (dev extra)
+        run: uv sync --extra dev
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check .
+
+      - name: Import smoke check
+        run: uv run python -c "import callosum, callosum.envs, callosum.agents, callosum.training, callosum.configs"
+
+      - name: Tests (pytest)
+        run: uv run pytest -q

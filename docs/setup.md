@@ -31,6 +31,20 @@ cd callosum
 bash scripts/setup_server.sh   # uv + Python 3.12 + full env + GPU sanity checks
 ```
 
+## Packaging
+
+`callosum` is a real (hatchling-built) package, installed **editable** into the venv by
+`uv sync`. That makes `import callosum` behave identically from pytest, `scripts/*.py`,
+notebooks, and on the server — no `sys.path`/cwd juggling — while edits still take effect
+immediately without reinstalling.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: `ruff check`,
+`ruff format --check`, an import smoke check, and `pytest`. It installs only the `dev`
+extra — the `sim`/`train` extras pull ManiSkill and a multi-GB CUDA torch build, so
+anything touching the simulator is verified on the training server instead.
+
 ## Deploy loop (git-based)
 
 ```
