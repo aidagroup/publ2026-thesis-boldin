@@ -44,6 +44,10 @@ class FaceTurn(TwoSO100Base):
         super().__init__(*args, **kwargs)
 
     def _load_scene(self, options: dict):
+        # Re-implements TwoSO100Base._load_scene's table setup instead of
+        # calling super() -- the parent also builds the plain loose cube,
+        # which this task replaces with the turntable-cube articulation, so
+        # there is nothing to reuse from the parent's cube-building line.
         self.table_scene = TableSceneBuilder(
             env=self, robot_init_qpos_noise=self.robot_init_qpos_noise
         )
@@ -93,12 +97,12 @@ class FaceTurn(TwoSO100Base):
         cfg = self.reward_config
 
         # (a) rotator reaches for the face, (d) holder reaches for the body.
-        # TODO(review): reach target is the face's geometric CENTER. A real
-        # parallel-jaw gripper likely can't pinch a wide, thin (8 mm) plate at
-        # its center -- it would need to grip a RIM/edge instead. Which edge
-        # (and whether reach-to-center vs reach-to-edge matters for learning)
-        # is an open task-design question, not just an API question; picking
-        # one edge arbitrarily felt more likely to mislead than to help.
+        # TODO(review): reach target is the face layer's geometric center.
+        # Now that FACE_THICKNESS is a real 3x3 layer (1.9 cm, not a thin
+        # plate), the center is a defensible grasp target -- a parallel-jaw
+        # gripper should be able to pinch the layer from its side faces.
+        # Unconfirmed without GPU sim whether the gripper actually closes on
+        # it there.
         rotator_to_face = torch.linalg.norm(self.agent_b.tcp_pos - self.face_link.pose.p, dim=1)
         rotator_reach = 1 - torch.tanh(5 * rotator_to_face)
         holder_to_body = torch.linalg.norm(self.agent_a.tcp_pos - self.cube.pose.p, dim=1)
@@ -115,17 +119,19 @@ class FaceTurn(TwoSO100Base):
         angle_remaining = (TARGET_FACE_ANGLE - info["face_angle"]).clamp(min=0)
         angle_progress = 1 - torch.tanh(2 * angle_remaining)
 
-        # (e) penalty for the body drifting from its initial pose.
+        # (e) penalty for the body drifting from its initial pose. Separate
+        # weights since position (m) and rotation (rad) drift aren't on
+        # commensurate scales.
         pos_drift = torch.linalg.norm(self.cube.pose.p - self.body_init_pos, dim=1)
         rot_drift = common.quat_diff_rad(self.cube.pose.q, self.body_init_q)
-        drift_penalty = pos_drift + rot_drift
 
         return (
             cfg.weight_rotator_reach * rotator_reach
             + cfg.weight_grasp * is_grasped
             + cfg.weight_angle_progress * angle_progress
             + cfg.weight_holder_reach * holder_reach
-            - cfg.weight_body_drift_penalty * drift_penalty
+            - cfg.weight_body_pos_drift * pos_drift
+            - cfg.weight_body_rot_drift * rot_drift
         )
 
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):

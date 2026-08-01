@@ -13,7 +13,11 @@ from mani_skill.utils.structs.articulation import Articulation
 
 # ~5.7 cm real Rubik's cube edge length (matches callosum.envs.two_so100_base).
 CUBE_HALF_SIZE = 0.0285
-FACE_THICKNESS = 0.008
+# A real 3x3 layer (one third of the cube), not an arbitrary thin plate --
+# also what makes the face actually graspable: a 1.9 cm layer can be pinched
+# from its side faces by a parallel-jaw gripper, an 8 mm plate essentially
+# can't.
+FACE_THICKNESS = 2 * CUBE_HALF_SIZE / 3
 
 # Rotates the joint's local X axis (SAPIEN's default joint-rotation axis) to
 # point along the link's own Z axis, i.e. vertical. Copied verbatim from

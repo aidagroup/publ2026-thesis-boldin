@@ -16,7 +16,10 @@ class FaceTurnRewardConfig:
     weight_grasp: float = 1.0
     weight_angle_progress: float = 3.0
     weight_holder_reach: float = 1.0
-    weight_body_drift_penalty: float = 5.0
+    # Separate weights: position (m) and rotation (rad) drift are not on
+    # commensurate scales, and neither are their tolerances below.
+    weight_body_pos_drift: float = 5.0
+    weight_body_rot_drift: float = 5.0
 
     # Success/stability tolerances.
     angle_tol: float = 0.05  # rad (~3 deg) from the pi/2 target
