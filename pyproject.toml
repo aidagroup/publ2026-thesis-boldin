@@ -26,6 +26,7 @@ train = [
     "tensordict",
     "torchrl",
     "benchmarl",
+    "tensorboard",
 ]
 dev = [
     "ruff",
