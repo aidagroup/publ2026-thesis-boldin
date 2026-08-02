@@ -23,13 +23,37 @@ uv sync                       # base only (numpy, gymnasium)
 make dev                      # + train + dev  (installs torch MPS build)
 ```
 
-### Server (Linux + CUDA) – first time
+### Server (Linux + CUDA, e.g. a RunPod pod)
 
 ```bash
 git clone git@github.com:aidagroup/callosum.git
 cd callosum
-bash scripts/setup_server.sh   # uv + Python 3.12 + full env + GPU sanity checks
+bash scripts/setup_server.sh --smoke
 ```
+
+The script is idempotent (safe to re-run on an existing pod) and never resolves
+dependencies — `uv sync --frozen` installs exactly what `uv.lock` pins. It:
+
+1. checks Linux + `nvidia-smi`, prints GPU and driver;
+2. points `UV_CACHE_DIR` / `HF_HOME` at a persistent volume (`/workspace` on
+   RunPod) and exports them into `~/.bashrc`, so multi-GB torch/CUDA wheels are
+   downloaded once rather than on every fresh pod;
+3. installs uv + Python 3.12 and syncs `sim` + `train` + `dev`;
+4. **verifies**: torch CUDA build, a real CUDA matmul (not just
+   `is_available()`), the GPU's compute capability against the torch CUDA
+   version (Blackwell/sm_120 needs ≥12.8), `mani_skill` import, the SO-100
+   agent, and that `TwoSO100-v0` / `FaceTurn-v0` actually register;
+5. with `--smoke`, runs the GPU checks that cannot run on macOS
+   (`smoke_env.py`, `smoke_face_turn.py`).
+
+**Image choice:** any CUDA ≥ 12.8 Linux image works — e.g.
+`runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`. The image's own PyTorch is
+irrelevant: `uv sync` installs our locked build into `.venv`. Only the CUDA
+runtime and driver matter.
+
+Rendering (needed later, for the vision phase, not for state-based training)
+additionally requires GL/EGL libs, e.g.
+`apt-get install -y libgl1 libglvnd0 libegl1-mesa libgles2-mesa libopengl0`.
 
 ## Packaging
 

@@ -239,3 +239,4 @@ demos/
 # ManiSkill / SAPIEN caches & downloaded assets
 .maniskill/
 *.h5
+.codegraphy/*
