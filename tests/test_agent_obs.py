@@ -1,8 +1,14 @@
-"""Unit tests for callosum.training._agent_obs (step 2.1) -- pure PyTorch,
-no mani_skill dependency, so runnable on macOS/CI.
+"""Unit tests for callosum.training._agent_obs (step 2.1) -- pure PyTorch, no
+mani_skill dependency, so runnable locally once the `train` extra is synced
+(`make dev`). Skipped (not failed) in CI, which installs only `dev` per
+.github/workflows/ci.yml -- torch is locked to the multi-GB `cu128` index on
+any Linux box regardless of which extra requests it, so CI deliberately
+never installs it.
 """
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 from callosum.training._agent_obs import (
     build_agent_obs,

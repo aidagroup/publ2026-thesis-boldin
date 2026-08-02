@@ -1,12 +1,19 @@
-"""Unit tests for callosum.training._ppo_core (step 2.1) -- pure PyTorch,
-no mani_skill dependency, so runnable on macOS/CI. These verify the RL
-algorithm itself (network shapes, GAE, the PPO update) ahead of the paid
-GPU session, where only the mani_skill-specific env glue in
-callosum/training/ippo.py remains genuinely unverified.
+"""Unit tests for callosum.training._ppo_core (step 2.1) -- pure PyTorch, no
+mani_skill dependency, so runnable locally once the `train` extra is synced
+(`make dev`). These verify the RL algorithm itself (network shapes, GAE, the
+PPO update) ahead of the paid GPU session, where only the mani_skill-specific
+env glue in callosum/training/ippo.py remains genuinely unverified.
+
+Skipped (not failed) in CI, which installs only `dev` per
+.github/workflows/ci.yml -- torch is locked to the multi-GB `cu128` index on
+any Linux box regardless of which extra requests it, so CI deliberately
+never installs it.
 """
 
 import numpy as np
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 from callosum.configs.ippo import IPPOConfig
 from callosum.training._ppo_core import Agent, compute_gae, ppo_update
