@@ -33,6 +33,18 @@ explicit plan constraint (docs/implementation-plan.md step 2.1):
   lockfile for this step, not `wandb`.
 - argparse instead of tyro (see callosum.configs.ippo) -- not an authorized
   new dependency.
+
+`args.include_partner` (default False) is a diagnostic "oracle" condition:
+if the decentralized baseline fails to learn on FaceTurn-v0, flipping it on
+isolates whether that's a task/reward-shaping problem or genuinely requires
+partner information, without spending a second paid session guessing. It is
+threaded through every build_agent_obs call site below (obs-dim sizing,
+rollout, eval, the final_observation bootstrap, and the post-rollout
+next_value) -- all of them must agree, since the value function has to see
+the same observation as the policy it is scoring, or advantage estimates
+become meaningless. See callosum.training._agent_obs's module docstring for
+why this is the env-level-impossible half of the step 1.4 partner_obs flag
+finally becoming expressible.
 """
 
 import random
@@ -107,7 +119,10 @@ def main(args: IPPOConfig) -> None:
     next_raw_obs, _ = envs.reset(seed=args.seed)
     eval_raw_obs, _ = eval_envs.reset(seed=args.seed)
 
-    obs_dims = [build_agent_obs(next_raw_obs, i, agent_uids).shape[-1] for i in range(2)]
+    obs_dims = [
+        build_agent_obs(next_raw_obs, i, agent_uids, args.include_partner).shape[-1]
+        for i in range(2)
+    ]
     action_dims = [int(np.prod(envs.single_action_space[uid].shape)) for uid in agent_uids]
     action_low = [
         torch.from_numpy(envs.single_action_space[uid].low).to(device) for uid in agent_uids
@@ -156,7 +171,8 @@ def main(args: IPPOConfig) -> None:
                 with torch.no_grad():
                     eval_actions = {
                         uid: agents[i].get_action(
-                            build_agent_obs(eval_raw_obs, i, agent_uids), deterministic=True
+                            build_agent_obs(eval_raw_obs, i, agent_uids, args.include_partner),
+                            deterministic=True,
                         )
                         for i, uid in enumerate(agent_uids)
                     }
@@ -197,7 +213,7 @@ def main(args: IPPOConfig) -> None:
             step_actions = {}
             with torch.no_grad():
                 for i, uid in enumerate(agent_uids):
-                    obs_i = build_agent_obs(next_raw_obs, i, agent_uids)
+                    obs_i = build_agent_obs(next_raw_obs, i, agent_uids, args.include_partner)
                     obs_buf[i][step] = obs_i
                     action_i, logprob_i, _, value_i = agents[i].get_action_and_value(obs_i)
                     values_buf[i][step] = value_i.flatten()
@@ -216,7 +232,9 @@ def main(args: IPPOConfig) -> None:
                     writer.add_scalar(f"train/{k}", v[done_mask].float().mean(), global_step)
                 with torch.no_grad():
                     for i in range(2):
-                        final_obs_i = build_agent_obs(infos["final_observation"], i, agent_uids)
+                        final_obs_i = build_agent_obs(
+                            infos["final_observation"], i, agent_uids, args.include_partner
+                        )
                         final_values_buf[i][
                             step, torch.arange(args.num_envs, device=device)[done_mask]
                         ] = agents[i].get_value(final_obs_i[done_mask]).view(-1)
@@ -225,7 +243,7 @@ def main(args: IPPOConfig) -> None:
         update_time = time.time()
         for i, uid in enumerate(agent_uids):
             with torch.no_grad():
-                next_obs_i = build_agent_obs(next_raw_obs, i, agent_uids)
+                next_obs_i = build_agent_obs(next_raw_obs, i, agent_uids, args.include_partner)
                 next_value_i = agents[i].get_value(next_obs_i).reshape(1, -1)
             advantages, returns = compute_gae(
                 rewards_buf,

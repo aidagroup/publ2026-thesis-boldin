@@ -49,6 +49,12 @@ def test_select_agent_extra_fields_no_prefixed_fields_untouched() -> None:
     assert select_agent_extra_fields(extra, agent_idx=1) == extra
 
 
+def test_select_agent_extra_fields_include_partner_keeps_everything() -> None:
+    extra = {"agent_a_tcp_pose": "a", "agent_b_tcp_pose": "b", "cube_pose": "cube"}
+    assert select_agent_extra_fields(extra, agent_idx=0, include_partner=True) == extra
+    assert select_agent_extra_fields(extra, agent_idx=1, include_partner=True) == extra
+
+
 def test_flatten_dict_to_tensor_concatenates_last_dim() -> None:
     fields = {"a": torch.zeros(3, 2), "b": torch.ones(3, 4)}
     flat = flatten_dict_to_tensor(fields)
@@ -92,3 +98,20 @@ def test_build_agent_obs_excludes_partner_tcp_pose_values() -> None:
     # agent_a's own proprio (12) + agent_a_tcp_pose (7) + cube_pose (7) = 26;
     # agent_b_tcp_pose must NOT be present.
     assert obs_a.shape[-1] == 6 + 6 + 7 + 7
+
+
+def test_build_agent_obs_default_is_decentralized() -> None:
+    # include_partner defaults to False -- must match passing it explicitly.
+    raw_obs = _dummy_raw_obs(num_envs=2, partner_obs="full")
+    default_call = build_agent_obs(raw_obs, 0, AGENT_UIDS)
+    explicit_false = build_agent_obs(raw_obs, 0, AGENT_UIDS, include_partner=False)
+    assert default_call.shape == explicit_false.shape
+
+
+def test_build_agent_obs_include_partner_is_strictly_wider_by_partner_field_width() -> None:
+    raw_obs = _dummy_raw_obs(num_envs=3, partner_obs="full")
+    dim_default = build_agent_obs(raw_obs, 0, AGENT_UIDS).shape[-1]
+    dim_oracle = build_agent_obs(raw_obs, 0, AGENT_UIDS, include_partner=True).shape[-1]
+    partner_field_width = raw_obs["extra"]["agent_b_tcp_pose"].shape[-1]
+    assert dim_oracle > dim_default
+    assert dim_oracle == dim_default + partner_field_width

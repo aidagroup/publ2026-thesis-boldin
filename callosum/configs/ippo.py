@@ -61,6 +61,13 @@ class IPPOConfig:
     save_model: bool = True
     exp_name: str | None = None
 
+    # Diagnostic "oracle" condition for the paid session: if False (the
+    # decentralized baseline) fails to learn on FaceTurn-v0, flip this to
+    # isolate whether that's a task/reward-shaping problem or genuinely
+    # requires partner information -- see
+    # callosum.training._agent_obs.build_agent_obs.
+    include_partner: bool = False
+
     # Computed at runtime from the fields above -- see callosum.training.ippo.
     batch_size: int = 0
     minibatch_size: int = 0

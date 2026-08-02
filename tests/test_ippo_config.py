@@ -46,3 +46,9 @@ def test_computed_fields_start_at_zero() -> None:
     assert args.batch_size == 0
     assert args.minibatch_size == 0
     assert args.num_iterations == 0
+
+
+def test_include_partner_defaults_to_false_and_is_settable() -> None:
+    assert parse_args([]).include_partner is False
+    assert parse_args(["--include-partner", "true"]).include_partner is True
+    assert parse_args(["--include-partner", "false"]).include_partner is False
