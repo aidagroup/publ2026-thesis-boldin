@@ -239,4 +239,6 @@ demos/
 # ManiSkill / SAPIEN caches & downloaded assets
 .maniskill/
 *.h5
-.codegraphy/*
+# Local code-indexing tools (two separate tools) — never commit either.
+.codegraph/
+.codegraphy/
