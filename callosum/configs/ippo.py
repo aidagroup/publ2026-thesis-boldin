@@ -20,6 +20,8 @@ import dataclasses
 import typing
 from dataclasses import dataclass
 
+from callosum.configs.bijepa import BiJEPAConfig
+
 
 @dataclass
 class IPPOConfig:
@@ -61,12 +63,20 @@ class IPPOConfig:
     save_model: bool = True
     exp_name: str | None = None
 
-    # Diagnostic "oracle" condition for the paid session: if False (the
-    # decentralized baseline) fails to learn on FaceTurn-v0, flip this to
-    # isolate whether that's a task/reward-shaping problem or genuinely
-    # requires partner information -- see
-    # callosum.training._agent_obs.build_agent_obs.
-    include_partner: bool = False
+    # --- Step 3.2: partner-input ablation (Bi-JEPA) --------------------------------    # Which partner signal is appended (as a fixed-width latent slot) to each
+    # agent's policy input -- see callosum.training._agent_obs.build_policy_input:
+    #   "none"      -> zeros (decentralized baseline; partner info absent)
+    #   "oracle"    -> true partner latent z_j = E(o_j) (CTDE, training only)
+    #   "predicted" -> Bi-JEPA prediction z_hat_j (built only from own history)
+    # Obs-dim is identical across all three (a zero slot in "none") so the SAME
+    # policy network is reused and only information content varies -- the
+    # whole point of the ablation (method doc §Фаза 1; plan step 3.2).
+    partner_input: str = "none"
+
+    # Bi-JEPA module knobs. Excluded from the CLI (see parse_args) -- defaults
+    # in callosum.configs.bijepa suffice for step 3.1; YAML overrides arrive
+    # with the ablation harness (step 3.3).
+    bijepa: BiJEPAConfig = dataclasses.field(default_factory=BiJEPAConfig)
 
     # Computed at runtime from the fields above -- see callosum.training.ippo.
     batch_size: int = 0
@@ -108,13 +118,25 @@ def parse_args(argv: list[str] | None = None) -> IPPOConfig:
         description="Train independent PPO (IPPO) policies on TwoSO100Base-derived envs."
     )
     for f in dataclasses.fields(IPPOConfig):
-        if f.name in _COMPUTED_FIELDS:
+        if f.name in _COMPUTED_FIELDS or dataclasses.is_dataclass(_cli_type(f)):
+            # Skip runtime-computed fields and nested dataclass configs (e.g.
+            # `bijepa`); the latter keep their default_factory and are mutated
+            # in code / via YAML (step 3.3), not via argparse.
             continue
         flag = f"--{f.name.replace('_', '-')}"
         default = getattr(defaults, f.name)
         field_type = _cli_type(f)
         if field_type is bool:
             parser.add_argument(flag, type=_str_to_bool, default=default, metavar="{true,false}")
+        elif f.name == "partner_input":
+            # Must match callosum.training._agent_obs.PARTNER_INPUT_MODES exactly;
+            # duplicated here (not imported) to keep this module torch-free for CI.
+            parser.add_argument(
+                flag,
+                type=str,
+                default=default,
+                choices=["oracle", "predicted", "none"],
+            )
         else:
             parser.add_argument(flag, type=field_type, default=default)
     namespace = vars(parser.parse_args(argv))

@@ -11,7 +11,9 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from callosum.training._agent_obs import (
+    PARTNER_INPUT_MODES,
     build_agent_obs,
+    build_policy_input,
     flatten_dict_to_tensor,
     select_agent_extra_fields,
 )
@@ -115,3 +117,79 @@ def test_build_agent_obs_include_partner_is_strictly_wider_by_partner_field_widt
     partner_field_width = raw_obs["extra"]["agent_b_tcp_pose"].shape[-1]
     assert dim_oracle > dim_default
     assert dim_oracle == dim_default + partner_field_width
+
+
+# --- Step 3.2: the partner_input ablation toggle (build_policy_input) ---
+
+_PARTNER_LATENT_DIM = 8
+
+
+def test_build_policy_input_shape_stable_across_modes() -> None:
+    """The SAME policy network must serve all three modes -> identical dim."""
+    raw_obs = _dummy_raw_obs(num_envs=3, partner_obs="full")
+    partner_latent = torch.full((3, _PARTNER_LATENT_DIM), 5.0)
+    dims = {
+        mode: build_policy_input(
+            raw_obs,
+            0,
+            AGENT_UIDS,
+            partner_latent if mode != "none" else None,
+            mode,
+            partner_latent_dim=_PARTNER_LATENT_DIM,
+        ).shape[-1]
+        for mode in PARTNER_INPUT_MODES
+    }
+    assert len(set(dims.values())) == 1, dims
+
+
+def test_build_policy_input_none_excludes_partner_info() -> None:
+    """Scientifically critical (method doc §Фаза 1): under 'none', agent_a's
+    input must contain NO partner (agent_b) information -- neither the raw
+    partner TCP pose nor a nonzero latent slot."""
+    raw_obs = _dummy_raw_obs(num_envs=3, partner_obs="full")
+    # Make agent_b's TCP pose unmistakably unique so any leak is detectable.
+    raw_obs["extra"]["agent_b_tcp_pose"] = torch.full((3, 7), 777.0)
+
+    none_input = build_policy_input(
+        raw_obs, 0, AGENT_UIDS, None, "none", partner_latent_dim=_PARTNER_LATENT_DIM
+    )
+    # No cell may carry the partner's distinctive value.
+    assert (none_input == 777.0).sum() == 0
+    # And the appended latent slot must be all zeros.
+    assert torch.all(none_input[:, -_PARTNER_LATENT_DIM:] == 0)
+    # Sanity: the partner field WAS present in the raw obs (we didn't test a
+    # no-op): the base decentralized input still includes agent_a's OWN pose.
+    assert (raw_obs["extra"]["agent_a_tcp_pose"] != 777.0).any()
+
+
+def test_build_policy_input_oracle_appends_true_latent() -> None:
+    raw_obs = _dummy_raw_obs(num_envs=2, partner_obs="full")
+    latent = torch.full((2, _PARTNER_LATENT_DIM), 3.0)
+    out = build_policy_input(raw_obs, 0, AGENT_UIDS, latent, "oracle", _PARTNER_LATENT_DIM)
+    assert out.shape[-1] == build_agent_obs(raw_obs, 0, AGENT_UIDS).shape[-1] + _PARTNER_LATENT_DIM
+    assert torch.all(out[:, -_PARTNER_LATENT_DIM:] == 3.0)
+
+
+def test_build_policy_input_predicted_appends_prediction() -> None:
+    raw_obs = _dummy_raw_obs(num_envs=2, partner_obs="full")
+    latent = torch.arange(_PARTNER_LATENT_DIM, dtype=torch.float32).repeat(2, 1)
+    out = build_policy_input(raw_obs, 1, AGENT_UIDS, latent, "predicted", _PARTNER_LATENT_DIM)
+    assert torch.all(out[:, -_PARTNER_LATENT_DIM:] == latent)
+
+
+def test_build_policy_input_rejects_bad_mode() -> None:
+    raw_obs = _dummy_raw_obs(num_envs=2, partner_obs="full")
+    with pytest.raises(ValueError):
+        build_policy_input(raw_obs, 0, AGENT_UIDS, None, "maybe", _PARTNER_LATENT_DIM)
+
+
+def test_build_policy_input_none_requires_latent_dim() -> None:
+    raw_obs = _dummy_raw_obs(num_envs=2, partner_obs="full")
+    with pytest.raises(ValueError):
+        build_policy_input(raw_obs, 0, AGENT_UIDS, None, "none", partner_latent_dim=0)
+
+
+def test_build_policy_input_oracle_without_latent_raises() -> None:
+    raw_obs = _dummy_raw_obs(num_envs=2, partner_obs="full")
+    with pytest.raises(ValueError):
+        build_policy_input(raw_obs, 0, AGENT_UIDS, None, "oracle", _PARTNER_LATENT_DIM)

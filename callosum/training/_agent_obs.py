@@ -59,6 +59,13 @@ def select_agent_extra_fields(extra: dict, agent_idx: int, include_partner: bool
     condition -- see build_agent_obs); default False is the decentralized
     baseline.
     """
+    # Note: `include_partner` re-includes the *other agent's raw TCP pose* in
+    # the obs dict; that is the step-2.1/1.4 low-level oracle. Step 3.2's
+    # higher-level `partner_input` toggle (build_policy_input below) instead
+    # appends a fixed-width *latent* partner slot (oracle true z_j, predicted
+    # z_hat_j, or zeros for none) -- a different axis of ablation that is not
+    # expressible in terms of include_partner, since "predicted" is by
+    # definition neither the raw pose nor the true latent.
     if include_partner:
         return dict(extra)
     other_prefix = _OTHER_AGENT_PREFIX[agent_idx]
@@ -107,3 +114,83 @@ def build_agent_obs(
     fields = {"proprio": raw_obs["agent"][agent_uids[agent_idx]]}
     fields.update(select_agent_extra_fields(raw_obs["extra"], agent_idx, include_partner))
     return flatten_dict_to_tensor(fields)
+
+
+PARTNER_INPUT_MODES = ("oracle", "predicted", "none")
+
+
+def build_policy_input(
+    raw_obs: dict,
+    agent_idx: int,
+    agent_uids: tuple[str, str],
+    partner_latent: torch.Tensor | None,
+    partner_input: str,
+    partner_latent_dim: int = 0,
+    base: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Assemble agent `agent_idx`'s policy input under the Step 3.2 partner_input toggle.
+
+    Starts from the decentralized base (`build_agent_obs` with
+    `include_partner=False` -- the other agent's raw TCP-pose fields are
+    dropped, see select_agent_extra_fields) and then appends ONE partner
+    information channel as a fixed-width latent slot:
+
+      - "oracle":     append `partner_latent` (the partner's *true* latent
+                      z_j = E(o_j); CTDE-privileged, training only).
+      - "predicted":  append `partner_latent` (the Bi-JEPA prediction z_hat_j,
+                      itself built only from this agent's own history).
+      - "none":       append zeros of width `partner_latent_dim` -- a dummy
+                      slot that keeps obs_dim identical across modes.
+
+    A fixed-width slot is appended even in "none" deliberately: the SAME
+    policy network must be reused in every ablation condition so that only the
+    *information content* varies, not the architecture/capacity. Without it,
+    changing obs_dim between "none" and "oracle" would conflate "no partner
+    information" with "a different, wider network" -- which would invalidate
+    the entire oracle/predicted/none ablation (docs/thesis/03-method-bijepa.md
+    §Фаза 1, and docs/implementation-plan.md step 3.2 warns exactly on this).
+
+    Args:
+        raw_obs: the obs_mode="state_dict" observation dict.
+        agent_idx: 0 for agent_a, 1 for agent_b.
+        agent_uids: (agent_a_uid, agent_b_uid).
+        partner_latent: (num_envs, partner_latent_dim) tensor, or None.
+            Required for "oracle"/"predicted"; ignored for "none" (a zero
+            slot of width partner_latent_dim is appended instead).
+        partner_input: one of PARTNER_INPUT_MODES.
+        partner_latent_dim: width of the partner-latent slot. Must be > 0 for
+            "none" (so a zero slot can be synthesized even though no real
+            latent was supplied).
+
+    Returns:
+        (num_envs, base_dim + partner_latent_dim) tensor.
+    """
+    if partner_input not in PARTNER_INPUT_MODES:
+        raise ValueError(
+            f"partner_input must be one of {PARTNER_INPUT_MODES}, got {partner_input!r}"
+        )
+    # Decentralized base: own proprio + own extra fields only; the partner's
+    # raw TCP pose is dropped (include_partner=False) regardless of mode. The
+    # partner signal here is the LATENT slot, not the raw pose. `base` may be
+    # passed in by callers that already computed the decentralized base (e.g.
+    # the Bi-JEPA encoder in step 3.2, which needs it to get z_i) to avoid
+    # recomputing the same obs slice.
+    if base is None:
+        base = build_agent_obs(raw_obs, agent_idx, agent_uids, include_partner=False)
+
+    num_envs = base.shape[0]
+    if partner_input == "none":
+        if partner_latent_dim <= 0:
+            raise ValueError("partner_latent_dim must be > 0 for partner_input='none'")
+        slot = torch.zeros(num_envs, partner_latent_dim, device=base.device, dtype=base.dtype)
+    else:
+        if partner_latent is None:
+            raise ValueError(f"partner_latent is required for partner_input={partner_input!r}")
+        if partner_latent.shape != (num_envs, partner_latent_dim):
+            raise ValueError(
+                f"partner_latent has shape {tuple(partner_latent.shape)}, "
+                f"expected ({num_envs}, {partner_latent_dim})"
+            )
+        slot = partner_latent.to(device=base.device, dtype=base.dtype)
+
+    return torch.cat([base, slot], dim=-1)

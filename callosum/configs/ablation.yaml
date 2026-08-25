@@ -1,0 +1,60 @@
+# Step 3.3 — Bi-JEPA partner-input ablation spec.
+#
+# Canonical launch (directional budget; raise --total-timesteps for the
+# final gate numbers):
+#   uv run python scripts/run_ablation.py --env-id FaceTurn-v0 \
+#       --total-timesteps 2000000 --seed 1
+#
+# The launcher runs ONE subprocess per `partner_input` mode below. Everything
+# that is NOT partner_input is held fixed across the triple, so any
+# reward/success-rate difference is attributable to the partner channel:
+#
+#   mode         | policy-input slot           | trains E+P via JEPA?
+#   ------------ | -------------------------- | --------------------
+#   none         | zeros (width latent_dim)   | yes (aux loss only)
+#   oracle       | true partner latent z_j    | yes (aux loss only)
+#   predicted    | Bi-JEPA prediction z_hat_j | yes (aux loss only)
+#
+# Key invariants (docs/implementation-plan.md step 3.2):
+#   - obs_dims = base_dim + latent_dim is IDENTICAL in all three modes (the
+#     "none" slot is a zero vector of width latent_dim, not absent), so the
+#     SAME policy network is reused and only information content varies.
+#   - The policy-input slot is always DETACHED (see bijepa_step), so E+P are
+#     trained ONLY by the JEPA aux loss through the shared bijepa_optimizer
+#     in every mode -- including "none". This is what makes "none" a valid
+#     decentralized ablation baseline rather than an empty-sham.
+#   - "predicted" uses ONLY the agent's own observation (z_i -> z_hat_j); no
+#     information about agent j leaks into agent i's policy input beyond the
+#     predicted latent, which is the CTDE-via-latent contract.
+
+# --- Bi-JEPA module knobs (BiJEPAConfig defaults; not CLI-exposed) ---
+bijepa:
+  latent_dim: 64        # width of the partner-latent slot + latents
+  hidden_dim: 256       # MLP width for Encoder / PartnerPredictor
+  context_len: 1        # Phase 1: current-only z_i (no rolling history)
+  aux_weight: 0.1       # JEPA aux-loss weight in the trainer
+  ema_target: false     # Phase 1: stop-grad target (no EMA target encoder)
+  ema_decay: 0.98       # only active when ema_target=true
+
+# --- Trainer knobs shared across the triple ---
+ippo:
+  env_id: FaceTurn-v0
+  num_steps: 50         # rollout length (= horizon per episode)
+  num_envs: 256         # vectorize; raise on the server if memory allows
+  gamma: 0.8
+  gae_lambda: 0.9
+  num_minibatches: 32
+  update_epochs: 4
+  learning_rate: 3.0e-4
+  anneal_lr: false   # fixed lr; the ablation is short and anneal masks early dynamics
+
+# --- Per-mode overrides (the ONLY thing that changes) ---
+# partner_input is the SOLE ablation variable (review Б1). The same seed is
+# used for all three modes within a round (see scripts/run_ablation.py --seeds).
+modes:
+  none:
+    partner_input: none      # decentralized baseline (zero-width latent slot)
+  oracle:
+    partner_input: oracle    # CTDE upper bound (training-only signal, detached slot)
+  predicted:
+    partner_input: predicted # Bi-JEPA partner model (z_hat_j, own-obs only)

@@ -125,7 +125,24 @@ for env_id in ("TwoSO100-v0", "FaceTurn-v0"):
         fail.append(f"{env_id} did not register")
     else:
         print(f"   \033[32m✓\033[0m {env_id} registered")
+
+# --- Bi-JEPA + BenchMARL wiring (fail fast on import/registration) -----------
+# callosum.training.ippo imports torch+ManiSkill at module load and wires the
+# step-3.2 Bi-JEPA encoder/predictor; a bad import here only surfaces mid-run
+# otherwise and costs paid GPU time. callosum.envs.benchmarl_task registers the
+# callosum/* tasks into BenchMARL's registry (train extra installs benchmarl).
+import callosum.training.ippo  # noqa: F401  (verifies 3.1+3.2 imports)
+print("   \033[32m✓\033[0m callosum.training.ippo imports (Bi-JEPA wiring)")
+import callosum.envs.benchmarl_task  # noqa: F401  (registers callosum tasks)
+from benchmarl.environments import task_config_registry as _tcr
+
+for task_id in ("callosum/face_turn", "callosum/two_so100"):
+    if task_id not in _tcr:
+        fail.append(f"{task_id} not registered in BenchMARL task_config_registry")
+    else:
+        print(f"   \033[32m✓\033[0m {task_id} registered for BenchMARL")
 print(f"   callosum {callosum.__version__}")
+
 
 if fail:
     print("\n\033[31mFAILED:\033[0m")

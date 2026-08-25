@@ -34,17 +34,23 @@ explicit plan constraint (docs/implementation-plan.md step 2.1):
 - argparse instead of tyro (see callosum.configs.ippo) -- not an authorized
   new dependency.
 
-`args.include_partner` (default False) is a diagnostic "oracle" condition:
-if the decentralized baseline fails to learn on FaceTurn-v0, flipping it on
-isolates whether that's a task/reward-shaping problem or genuinely requires
-partner information, without spending a second paid session guessing. It is
-threaded through every build_agent_obs call site below (obs-dim sizing,
-rollout, eval, the final_observation bootstrap, and the post-rollout
-next_value) -- all of them must agree, since the value function has to see
-the same observation as the policy it is scoring, or advantage estimates
-become meaningless. See callosum.training._agent_obs's module docstring for
-why this is the env-level-impossible half of the step 1.4 partner_obs flag
-finally becoming expressible.
+Step 3.2 (Bi-JEPA) replaces that ad-hoc flag with `args.partner_input`
+(oracle/predicted/none): a shared BiJEPA encoder+predictor produces a
+partner-latent slot that is appended to each agent's decentralized base
+(build_agent_obs, include_partner=False) via bijepa_step. The slot is
+*detached* in the policy input (the policy consumes a fixed partner signal)
+so the two policy optimizers never touch the shared encoder/predictor --
+those are trained solely by the JEPA aux loss
+(`callosum.agents.bijepa.jepa_loss`) through a dedicated `bijepa_optimizer`,
+applied once per iteration. obs_dim is identical across all three modes (a
+zero slot in "none") so the SAME network is reused and only the
+information content varies -- the whole point of the ablation
+(docs/thesis/03-method-bijepa.md §Фаза 1). The Bi-JEPA module lives in the
+torch-only `callosum.training._bijepa_policy` / `callosum.agents.bijepa`
+so the loss math is unit-tested on macOS (tests/test_bijepa*.py) before
+this server-only file runs on the paid session -- this file cannot be
+imported on macOS/CI, which has no mani_skill (docs/implementation-plan.md
+section 0).
 """
 
 import random
@@ -58,6 +64,7 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
 
+from callosum.agents.bijepa import BiJEPA, jepa_loss
 from callosum.configs.ippo import IPPOConfig, parse_args
 
 # Registers FaceTurn-v0/TwoSO100-v0 (import side effect); callosum.envs
@@ -70,6 +77,7 @@ from callosum.configs.ippo import IPPOConfig, parse_args
 from callosum.envs import face_turn as _face_turn  # noqa: F401
 from callosum.envs import two_so100_base as _two_so100_base  # noqa: F401
 from callosum.training._agent_obs import build_agent_obs
+from callosum.training._bijepa_policy import bijepa_step
 from callosum.training._ppo_core import Agent, compute_gae, ppo_update
 
 
@@ -119,10 +127,23 @@ def main(args: IPPOConfig) -> None:
     next_raw_obs, _ = envs.reset(seed=args.seed)
     eval_raw_obs, _ = eval_envs.reset(seed=args.seed)
 
-    obs_dims = [
-        build_agent_obs(next_raw_obs, i, agent_uids, args.include_partner).shape[-1]
-        for i in range(2)
-    ]
+    latent_dim = args.bijepa.latent_dim
+    # Decentralized base dim (own proprio + own extra, partner pose dropped)
+    # is shared by both arms; the partner-input latent slot is appended on top
+    # (step 3.2 -- callosum.training._bijepa_policy). build_agent_obs is
+    # evaluated once here only to size the network; the actual per-step
+    # assembly goes through bijepa_step so z_i/z_j/z_hat_j are produced for the
+    # JEPA aux loss.
+    # Decentralized base dim; both arms must share it (identical SO-100 proprio
+    # geometry) -- else the shared BiJEPA encoder would feed on mismatched
+    # inputs. Asserted so an asymmetric future env (Phase-2 asymmetric
+    # holder/rotator, method doc §Будущее) fails loud instead of silently
+    # mis-sizing one arm's policy. (Л5)
+    base_dim = build_agent_obs(next_raw_obs, 0, agent_uids, include_partner=False).shape[-1]
+    assert (
+        build_agent_obs(next_raw_obs, 1, agent_uids, include_partner=False).shape[-1] == base_dim
+    ), "asymmetric agent obs dims: partner_input toggle assumes both arms share the base"
+    obs_dims = [base_dim + latent_dim for _ in range(2)]
     action_dims = [int(np.prod(envs.single_action_space[uid].shape)) for uid in agent_uids]
     action_low = [
         torch.from_numpy(envs.single_action_space[uid].low).to(device) for uid in agent_uids
@@ -130,12 +151,27 @@ def main(args: IPPOConfig) -> None:
     action_high = [
         torch.from_numpy(envs.single_action_space[uid].high).to(device) for uid in agent_uids
     ]
-    print(f"obs_dims={obs_dims} action_dims={action_dims}")
+    print(f"obs_dims={obs_dims} (base={base_dim}+latent={latent_dim}) action_dims={action_dims}")
 
     agents = [Agent(obs_dims[i], action_dims[i]).to(device) for i in range(2)]
     optimizers = [
         optim.Adam(agents[i].parameters(), lr=args.learning_rate, eps=1e-5) for i in range(2)
     ]
+
+    # Shared Bi-JEPA encoder + partner predictor (Bi-symmetry: both arms share
+    # E and P, docs/thesis/03-method-bijepa.md §Формулировка). The policy
+    # consumes a *detached* latent slot (see bijepa_step), so the two policy
+    # optimizers above never touch these params -- they are trained solely by
+    # the JEPA aux loss through this dedicated optimizer (method doc §Решения C).
+    bijepa = BiJEPA(args.bijepa, obs_dim=base_dim).to(device)
+    bijepa_optimizer = optim.Adam(bijepa.parameters(), lr=args.learning_rate, eps=1e-5)
+    # Л1: this trainer wires the Phase-1 current-only path (context=None, k=0 --
+    # predict the partner latent from the SAME-step own latent). context_len>1
+    # would silently mis-size PartnerPredictor's input and is only valid with the
+    # LatentHistory wiring (Phase 2); fail loud here rather than in the loss.
+    assert args.bijepa.context_len == 1, (
+        "Phase-1 trainer uses context=None (k=0); set context_len=1 or wire LatentHistory"
+    )
 
     def clip_action(i: int, action: torch.Tensor) -> torch.Tensor:
         return torch.clamp(action.detach(), action_low[i], action_high[i])
@@ -162,7 +198,7 @@ def main(args: IPPOConfig) -> None:
         for agent in agents:
             agent.eval()
 
-        if iteration % args.eval_freq == 1:
+        if args.eval_freq == 1 or iteration % args.eval_freq == 1:
             print(f"iteration={iteration}: evaluating")
             eval_raw_obs, _ = eval_envs.reset()
             eval_metrics = defaultdict(list)
@@ -171,7 +207,15 @@ def main(args: IPPOConfig) -> None:
                 with torch.no_grad():
                     eval_actions = {
                         uid: agents[i].get_action(
-                            build_agent_obs(eval_raw_obs, i, agent_uids, args.include_partner),
+                            bijepa_step(
+                                bijepa.encoder,
+                                bijepa.predictor,
+                                eval_raw_obs,
+                                i,
+                                agent_uids,
+                                args.partner_input,
+                                latent_dim,
+                            )[0],
                             deterministic=True,
                         )
                         for i, uid in enumerate(agent_uids)
@@ -190,20 +234,34 @@ def main(args: IPPOConfig) -> None:
                 f" {num_episodes} episodes"
             )
 
-        if args.save_model and iteration % args.eval_freq == 1:
+        if args.save_model and (args.eval_freq == 1 or iteration % args.eval_freq == 1):
             for i, uid in enumerate(agent_uids):
                 torch.save(
                     agents[i].state_dict(), f"runs/{run_name}/agent_{uid}_ckpt_{iteration}.pt"
                 )
+            torch.save(bijepa.state_dict(), f"runs/{run_name}/bijepa_ckpt_{iteration}.pt")
 
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            for optimizer in optimizers:
+            for optimizer in (*optimizers, bijepa_optimizer):
                 optimizer.param_groups[0]["lr"] = frac * args.learning_rate
 
         final_values_buf = [
             torch.zeros((args.num_steps, args.num_envs), device=device) for _ in range(2)
         ]
+        # JEPA aux-loss buffers per iteration. IMPORTANT: these are LISTS, not
+        # pre-allocated zeros tensors, because assigning a grad-bearing tensor
+        # into a slice (`buf[step] = z_hat`) is an in-place data copy that SEVERS
+        # the computation graph -- so z_hat's grad could never reach E/P and the
+        # aux loss would train nothing. Appending the tensor itself and
+        # torch.stack-ing it at update time preserves the graph. z_j is the
+        # detached target; z_hat keeps grad (trains shared E+P).
+        z_j_list = [[], []]
+        z_hat_list = [[], []]
+        # z_i buffered DETACHED for diagnostics only (runbook §3.1 collapse
+        # gate: a shrinking z_std alongside a falling jepa_loss flags encoder
+        # collapse that the loss alone cannot show -- review Б3).
+        z_i_list = [[], []]
 
         rollout_time = time.time()
         for step in range(args.num_steps):
@@ -211,11 +269,38 @@ def main(args: IPPOConfig) -> None:
             dones_buf[step] = next_done
 
             step_actions = {}
+            # Bi-JEPA encoding lives OUTSIDE no_grad: the predicted partner
+            # latent z_hat must keep its graph so the JEPA aux loss can train
+            # the shared encoder/predictor later in this iteration. The
+            # policy-input slot is detached inside bijepa_step, so obs_i
+            # carries no graph and is safe to store / feed the actor-critic
+            # under no_grad below. (method doc §Решения C: Bi-JEPA is an
+            # auxiliary task alongside RL, trained via its own optimizer.)
+            bijepa_pi = []
+            for i, uid in enumerate(agent_uids):
+                # target_encoder routes z_j through the EMA copy when
+                # ema_target=True (Б6: the toggle now genuinely drives the JEPA
+                # target). With ema_target=False (Phase-1 default) it is None
+                # and z_j comes from the online encoder then is detached in the
+                # loss -- behaviour unchanged.
+                obs_i, z_i_i, z_j_i, z_hat_i = bijepa_step(
+                    bijepa.encoder,
+                    bijepa.predictor,
+                    next_raw_obs,
+                    i,
+                    agent_uids,
+                    args.partner_input,
+                    latent_dim,
+                    target_encoder=bijepa.target_encoder,
+                )
+                obs_buf[i][step] = obs_i
+                z_i_list[i].append(z_i_i.detach())
+                z_j_list[i].append(z_j_i.detach())
+                z_hat_list[i].append(z_hat_i)
+                bijepa_pi.append(obs_i)
             with torch.no_grad():
                 for i, uid in enumerate(agent_uids):
-                    obs_i = build_agent_obs(next_raw_obs, i, agent_uids, args.include_partner)
-                    obs_buf[i][step] = obs_i
-                    action_i, logprob_i, _, value_i = agents[i].get_action_and_value(obs_i)
+                    action_i, logprob_i, _, value_i = agents[i].get_action_and_value(bijepa_pi[i])
                     values_buf[i][step] = value_i.flatten()
                     actions_buf[i][step] = action_i
                     logprobs_buf[i][step] = logprob_i
@@ -232,9 +317,15 @@ def main(args: IPPOConfig) -> None:
                     writer.add_scalar(f"train/{k}", v[done_mask].float().mean(), global_step)
                 with torch.no_grad():
                     for i in range(2):
-                        final_obs_i = build_agent_obs(
-                            infos["final_observation"], i, agent_uids, args.include_partner
-                        )
+                        final_obs_i = bijepa_step(
+                            bijepa.encoder,
+                            bijepa.predictor,
+                            infos["final_observation"],
+                            i,
+                            agent_uids,
+                            args.partner_input,
+                            latent_dim,
+                        )[0]
                         final_values_buf[i][
                             step, torch.arange(args.num_envs, device=device)[done_mask]
                         ] = agents[i].get_value(final_obs_i[done_mask]).view(-1)
@@ -243,7 +334,15 @@ def main(args: IPPOConfig) -> None:
         update_time = time.time()
         for i, uid in enumerate(agent_uids):
             with torch.no_grad():
-                next_obs_i = build_agent_obs(next_raw_obs, i, agent_uids, args.include_partner)
+                next_obs_i = bijepa_step(
+                    bijepa.encoder,
+                    bijepa.predictor,
+                    next_raw_obs,
+                    i,
+                    agent_uids,
+                    args.partner_input,
+                    latent_dim,
+                )[0]
                 next_value_i = agents[i].get_value(next_obs_i).reshape(1, -1)
             advantages, returns = compute_gae(
                 rewards_buf,
@@ -275,6 +374,41 @@ def main(args: IPPOConfig) -> None:
             )
             for k, v in metrics.items():
                 writer.add_scalar(f"losses/{uid}/{k}", v, global_step)
+
+        # Bi-JEPA auxiliary update: train the shared encoder+predictor on the
+        # JEPA aux loss (predict z_j from the agent's own latent), separate
+        # from the two policy optimizers -- which never see these params
+        # because the policy-input slot is detached (see bijepa_step). z_j is
+        # already detached in z_j_list; z_hat retains its graph to the shared
+        # encoder/predictor (stacked, not slice-assigned, so the graph survives).
+        # Applied in ALL partner_input modes so the partner model still learns
+        # under the decentralized 'none' ablation arm too.
+        # (method doc §Решения C / §Фаза 1.)
+        bijepa_optimizer.zero_grad()
+        jepa_aux_loss = jepa_loss(torch.stack(z_j_list[0]), torch.stack(z_hat_list[0])) + jepa_loss(
+            torch.stack(z_j_list[1]), torch.stack(z_hat_list[1])
+        )
+        (jepa_aux_loss * args.bijepa.aux_weight).backward()
+        bijepa_optimizer.step()
+        # Б6: advance the EMA target encoder IF ema_target=True. ema_update is
+        # a no-op when target_encoder is None (Phase-1 default), so this is safe
+        # to call unconditionally; guarded for clarity/skip when disabled.
+        if args.bijepa.ema_target:
+            bijepa.ema_update()
+        jepa_loss_val = (jepa_aux_loss / 2).item()
+        writer.add_scalar("losses/jepa_loss", jepa_loss_val, global_step)
+        # Б3 collapse diagnostics: alongside the JEPA loss, log the per-latent
+        # std of z_i (current) and z_j (CTDE target) and the mean |z_hat| of
+        # the predictor output. A jepa_loss that "decreases" while z_std -> 0
+        # is encoder collapse, not partner modelling (runbook §3.1 gate).
+        with torch.no_grad():
+            for i, uid in enumerate(agent_uids):
+                z_i_std = torch.stack(z_i_list[i]).std(0).mean().item()
+                z_j_std = torch.stack(z_j_list[i]).std(0).mean().item()
+                z_hat_abs = torch.stack(z_hat_list[i]).abs().mean().item()
+                writer.add_scalar(f"bijepa/{uid}/z_i_std", z_i_std, global_step)
+                writer.add_scalar(f"bijepa/{uid}/z_j_std", z_j_std, global_step)
+                writer.add_scalar(f"bijepa/{uid}/z_hat_abs", z_hat_abs, global_step)
         update_time = time.time() - update_time
 
         sps = int(global_step / (time.time() - start_time))
@@ -286,6 +420,7 @@ def main(args: IPPOConfig) -> None:
     if args.save_model:
         for i, uid in enumerate(agent_uids):
             torch.save(agents[i].state_dict(), f"runs/{run_name}/agent_{uid}_final_ckpt.pt")
+        torch.save(bijepa.state_dict(), f"runs/{run_name}/bijepa_final_ckpt.pt")
     writer.close()
     envs.close()
     eval_envs.close()

@@ -46,6 +46,14 @@ tests/                   # pytest (то, что проверяемо на мак
 scripts/                 # smoke-скрипты запуска (сервер)
 ```
 
+### Ревью: где искать замечания
+
+Разборы работы кодер-моделей лежат в [reviews/](reviews/) — один файл на ревью.
+**Перед началом работы над шагом прочитай последнее ревью:** там и найденные
+дефекты с `файл:строка`, и упорядоченный план исправлений с критериями приёмки,
+и открытые вопросы, которые решает человек. Конвенция канала (тяжесть находок,
+статус проверки, как отвечать) — в [reviews/README.md](reviews/README.md).
+
 ---
 
 ## Git-процесс (как работать с ветками)
@@ -183,6 +191,13 @@ scripts/                 # smoke-скрипты запуска (сервер)
 - ⚠️ **КРИТИЧНО (вскрылось на шаге 1.4): вход политики надо СОБИРАТЬ ПОАГЕНТНО, нарезая общий вектор наблюдения.** ManiSkill при `obs_mode="state"` отдаёт **один плоский общий** вектор обеим рукам, поэтому env-флаг `partner_obs` физически не может скрыть данные партнёра от конкретного агента. Если подать этот вектор обеим политикам как есть, режим `partner_input="none"` окажется **пустышкой** (данные партнёра всё равно внутри), и **вся ablation-тройка станет недействительной** — а это ядро научной части диплома. Значит: явно построить для агента *i* его входной вектор (своя проприоцепция + своё + предсказанное/истинное/отсутствующее по партнёру) и **написать тест**, что при `none` данные партнёра действительно отсутствуют во входе политики.
 **Критерий готовности (СЕРВЕР):** обучение идёт во всех трёх режимах; вспомогательный лосс логируется и убывает.
 **Что проверю я:** stop-grad и веса лосса; что в `oracle` не течёт инфа в инференс сверх задуманного; что `predicted` использует **только** своё наблюдение на входе политики.
+
+**Статус (локально завершено, ruff + py_compile + 59 pytest зелёные; server-валидация — runbook §3):**
+- `callosum/training/_agent_obs.py` — `partner_input ∈ {oracle, predicted, none}` через `build_policy_input(..., base=None)`: «none» гарантированно **исключает** партнёра (свежий тест `test_build_policy_input_none_excludes_partner_info`), но ширина слота = `latent_dim` во всех режимах → `obs_dims` стабильен.
+- `callosum/configs/ippo.py` — `partner_input: str = "none"` + вложенный `bijepa: BiJEPAConfig` (не попадает в CLI).
+- `callosum/training/_bijepa_policy.py` — `bijepa_step(encoder, predictor, raw_obs, i, uids, partner_input, latent_dim, context=None)` → `(policy_input, z_i, z_j, z_hat_j)`. **Фаза 1: `context=None`** — текущий `z_i` (length-1), **без** rolling-буфера истории → нет креста-эпизодного/cross-iteration состояния для reset (продуманный слепой failure mode). `LatentHistory` осталась как протестированная утилита для фазы 2 (не провязана в тренер).
+- `callosum/training/ippo.py` — shared `BiJEPA` + `bijepa_optimizer` (params E+P disjoint с `Agent`). Кодирование `z_i/z_j/z_hat` в rollout — **вне** `no_grad` (чтобы `z_hat` держал graph); семплинг action/value — внутри `no_grad`. `z_j` буферится **detach()-нутым** (target), `z_hat` — как есть в `list`+`torch.stack` (⚠️ назначение в `buf[step] = z_hat` рвёт graph и бы вынудило enc/p предсказателя никогда не учиться — поймано на этапе ревью, исправлено). Policy-input slot **detach()** внутри `bijepa_step` → `ppo_update` backward не трогает E+P; E+P учатся **только** JEPA aux loss через `bijepa_optimizer` (вес `aux_weight=0.1`), один раз в итерацию, после per-agent PPO updates. Все 5 obs-сайта согласованы (eval, rollout, final_observation, next_value, sizing).
+- **Отказ:** EMA-таргет/общий `target_encoder` отложен на Фазу 2 (3.1 uses stop-grad, как специфицировано); rolling latent history — на Фазу 2.
 
 ### Шаг 3.3 – Харнесс ablation (oracle / predicted / none)
 **Файлы:** `scripts/run_ablation.py`, `callosum/configs/ablation.yaml`.

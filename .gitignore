@@ -242,3 +242,8 @@ demos/
 # Local code-indexing tools (two separate tools) — never commit either.
 .codegraph/
 .codegraphy/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/
+.claude/
+.mcp.json

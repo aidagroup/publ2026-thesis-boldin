@@ -2,6 +2,9 @@
 no mani_skill/torch dependency, so runnable on macOS/CI.
 """
 
+import pytest
+
+from callosum.configs.bijepa import BiJEPAConfig
 from callosum.configs.ippo import IPPOConfig, parse_args
 
 
@@ -48,7 +51,27 @@ def test_computed_fields_start_at_zero() -> None:
     assert args.num_iterations == 0
 
 
-def test_include_partner_defaults_to_false_and_is_settable() -> None:
-    assert parse_args([]).include_partner is False
-    assert parse_args(["--include-partner", "true"]).include_partner is True
-    assert parse_args(["--include-partner", "false"]).include_partner is False
+def test_partner_input_defaults_to_none_and_is_settable() -> None:
+    args = parse_args([])
+    assert args.partner_input == "none"
+    assert parse_args(["--partner-input", "oracle"]).partner_input == "oracle"
+    assert parse_args(["--partner-input", "predicted"]).partner_input == "predicted"
+
+
+def test_partner_input_rejects_unknown_value() -> None:
+    # choices guard (Л2): a typo like "predicated" must fail at parse time,
+    # not leak into build_policy_input and crash on the paid server.
+    with pytest.raises(SystemExit):
+        parse_args(["--partner-input", "predicated"])
+
+
+def test_bijepa_default_is_bijepa_config() -> None:
+    args = parse_args([])
+    assert isinstance(args.bijepa, BiJEPAConfig)
+    assert args.bijepa.latent_dim == BiJEPAConfig().latent_dim
+
+
+def test_bijepa_field_is_excluded_from_cli() -> None:
+    # The nested dataclass config must not be a CLI flag (see parse_args).
+    args = parse_args([])  # no --bijepa flag exists; defaults are untouched
+    assert args.bijepa.latent_dim == 64
