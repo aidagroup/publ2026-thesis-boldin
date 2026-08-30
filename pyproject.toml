@@ -22,7 +22,14 @@ sim = [
 ]
 # RL training stack (TorchRL + BenchMARL on PyTorch).
 train = [
-    "torch",
+    # Upper bound is the LAB SERVER'S DRIVER, not a preference: driver
+    # 570.172.08 supports CUDA up to 12.8, and PyPI ships CUDA 13 builds
+    # from torch 2.11.0 onward (their deps switch from nvidia-*-cu12 to
+    # nvidia-*-cu13), which refuse to initialise with "driver is too old".
+    # 2.10.0 is the newest PyPI release still built against CUDA 12.
+    # Raise this only after confirming the target machine's driver, or
+    # after restoring a pinned CUDA index (see the note further down).
+    "torch<2.11",
     "tensordict",
     "torchrl",
     "benchmarl",
@@ -76,6 +83,11 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# notebooks/ holds diagnostic scaffolding, not project code. The environment
+# probe must survive ANY machine it is dropped onto, so it catches broad
+# exceptions and shells out defensively on purpose — rules that are right for
+# callosum/ are wrong for it, and reformatting hand-built cells only adds churn.
+extend-exclude = ["notebooks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

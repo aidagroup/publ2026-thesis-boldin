@@ -240,7 +240,8 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 import glob
 
 for d in sorted(glob.glob("runs/*/")):
-    ea = EventAccumulator(d); ea.Reload()
+    ea = EventAccumulator(d)
+    ea.Reload()
     tags = ea.Tags()["scalars"]
     print("\n", d, "\n  теги:", tags[:12])
     for tag in ["losses/jepa_loss", "eval/success_once", "train/return"]:

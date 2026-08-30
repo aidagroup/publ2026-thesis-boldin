@@ -90,21 +90,49 @@ ok "synced into $UV_PROJECT_ENVIRONMENT"
 # ── 5. Verification — behaviour, not imports ──────────────────────────────────
 say "GPU"
 uv run python - <<'PY'
+import re
+import subprocess
+import sys
+
 import torch
-assert torch.cuda.is_available(), "torch cannot see the GPU"
+
+print(f"   torch         : {torch.__version__} (built against CUDA {torch.version.cuda})")
+
+if not torch.cuda.is_available():
+    # The usual cause is a CUDA build newer than the driver supports. Say so
+    # explicitly with both numbers rather than leaving a bare assertion: PyPI
+    # ships CUDA 13 builds from torch 2.11.0 onward, and a 5xx driver caps at 12.8.
+    drv_cuda = "unknown"
+    try:
+        out = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=30).stdout
+        m = re.search(r"CUDA Version:\s*([0-9.]+)", out)
+        if m:
+            drv_cuda = m.group(1)
+    except Exception:
+        pass
+    print(f"   driver supports CUDA up to : {drv_cuda}")
+    print()
+    print("   ✗ torch cannot use the GPU.")
+    if drv_cuda != "unknown" and torch.version.cuda:
+        if tuple(map(int, torch.version.cuda.split(".")[:2])) > tuple(map(int, drv_cuda.split(".")[:2])):
+            print(f"     torch is built for CUDA {torch.version.cuda}, but the driver only")
+            print(f"     supports up to CUDA {drv_cuda}. Lower the torch pin in pyproject.toml")
+            print("     ('torch<2.11' already caps it at the newest CUDA 12 build on PyPI)")
+            print("     and re-run `uv lock` on the dev machine, then re-upload.")
+    sys.exit(1)
+
 name = torch.cuda.get_device_name(0)
 cc = torch.cuda.get_device_capability(0)
 built = torch.cuda.get_arch_list()
 print(f"   device        : {name}")
 print(f"   capability    : sm_{cc[0]}{cc[1]}")
-print(f"   torch         : {torch.__version__} (CUDA {torch.version.cuda})")
 print(f"   built for     : {', '.join(built)}")
-# is_available() can be True on a build that cannot actually run on this card.
+if f"sm_{cc[0]}{cc[1]}" not in built:
+    sys.exit(f"   ✗ this torch build has no kernels for sm_{cc[0]}{cc[1]}")
+# is_available() can be True on a build that still cannot run on this card.
 x = torch.randn(2048, 2048, device="cuda")
 torch.cuda.synchronize()
 print(f"   real matmul   : ok ({float((x @ x).sum()):.1f})")
-if f"sm_{cc[0]}{cc[1]}" not in built:
-    raise SystemExit(f"   ✗ torch has no kernels for sm_{cc[0]}{cc[1]}")
 PY
 ok "CUDA verified by a real matmul, not just is_available()"
 
