@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Bootstrap callosum inside a JupyterHub single-user container (no SSH, no sudo).
+#
+#   bash scripts/setup_jupyterhub.sh            # set up + verify
+#   bash scripts/setup_jupyterhub.sh --smoke    # ... and run the GPU smoke scripts
+#
+# Differs from setup_server.sh (RunPod + SSH) in three ways this environment forces:
+#   * $HOME is tiny (a few GB) -> venv, caches and assets all go to a scratch dir.
+#   * github.com is unreachable -> uv is installed from PyPI, not astral.sh
+#     (the astral.sh installer pulls its binary from GitHub releases).
+#   * /tmp is usually wiped when the pod restarts -> this script is idempotent
+#     and cheap to re-run; only the sources in $HOME survive.
+set -euo pipefail
+
+say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+ok()   { printf '   \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '   \033[33m!\033[0m %s\n' "$*"; }
+die()  { printf '   \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# ── 1. Pick a scratch directory with real space ───────────────────────────────
+say "Scratch directory"
+need_gb=40
+WORK=""
+for d in /tmp /scratch /data /workspace; do
+    [ -d "$d" ] && [ -w "$d" ] || continue
+    free_gb=$(df -BG --output=avail "$d" 2>/dev/null | tail -1 | tr -dc '0-9')
+    [ -n "${free_gb:-}" ] || continue
+    printf '   %-12s %s GB free\n' "$d" "$free_gb"
+    if [ -z "$WORK" ] && [ "$free_gb" -ge "$need_gb" ]; then
+        WORK="$d/callosum-work"
+    fi
+done
+[ -n "$WORK" ] || die "no directory with >= ${need_gb} GB free; ask the lab admin for scratch space"
+mkdir -p "$WORK"/{venv,uv-cache,hf,maniskill}
+ok "using $WORK"
+
+home_free=$(df -BG --output=avail "$HOME" 2>/dev/null | tail -1 | tr -dc '0-9')
+[ "${home_free:-99}" -lt 5 ] && warn "\$HOME has only ${home_free} GB free — keep runs/ small, checkpoints add up"
+
+# ── 2. Environment: everything heavy points at scratch ────────────────────────
+say "Environment variables"
+export UV_PROJECT_ENVIRONMENT="$WORK/venv"   # venv OUTSIDE the repo ($HOME is tiny)
+export UV_CACHE_DIR="$WORK/uv-cache"
+export HF_HOME="$WORK/hf"
+export PATH="$HOME/.local/bin:$PATH"
+
+# ManiSkill downloads assets to ~/.maniskill; symlink rather than trusting an
+# env-var name, so this holds regardless of the version's config knob.
+if [ ! -L "$HOME/.maniskill" ]; then
+    [ -d "$HOME/.maniskill" ] && mv "$HOME/.maniskill" "$WORK/maniskill-existing"
+    ln -sfn "$WORK/maniskill" "$HOME/.maniskill"
+fi
+ok "UV_PROJECT_ENVIRONMENT=$UV_PROJECT_ENVIRONMENT"
+ok "UV_CACHE_DIR=$UV_CACHE_DIR"
+ok "~/.maniskill -> $WORK/maniskill"
+
+# Persist for future terminals / kernels. Idempotent.
+PROFILE="$HOME/.bashrc"
+if ! grep -q 'callosum-work' "$PROFILE" 2>/dev/null; then
+    {
+        echo ""
+        echo "# callosum (added by scripts/setup_jupyterhub.sh)"
+        echo "export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo "export UV_PROJECT_ENVIRONMENT=$UV_PROJECT_ENVIRONMENT"
+        echo "export UV_CACHE_DIR=$UV_CACHE_DIR"
+        echo "export HF_HOME=$HF_HOME"
+    } >> "$PROFILE"
+    ok "exported into $PROFILE"
+fi
+
+# ── 3. uv, from PyPI (astral.sh installer needs GitHub, which is blocked) ─────
+say "uv"
+if command -v uv > /dev/null 2>&1; then
+    ok "already present: $(uv --version)"
+else
+    pip install --user --quiet uv || pip install --quiet uv || die "could not install uv from PyPI"
+    command -v uv > /dev/null 2>&1 || die "uv installed but not on PATH — check ~/.local/bin"
+    ok "installed: $(uv --version)"
+fi
+
+# ── 4. Dependencies, exactly as locked ────────────────────────────────────────
+say "Dependencies (uv sync --frozen)"
+warn "first run downloads several GB of torch + CUDA wheels; expect a few minutes"
+uv sync --frozen --extra sim --extra train --extra dev
+ok "synced into $UV_PROJECT_ENVIRONMENT"
+
+# ── 5. Verification — behaviour, not imports ──────────────────────────────────
+say "GPU"
+uv run python - <<'PY'
+import torch
+assert torch.cuda.is_available(), "torch cannot see the GPU"
+name = torch.cuda.get_device_name(0)
+cc = torch.cuda.get_device_capability(0)
+built = torch.cuda.get_arch_list()
+print(f"   device        : {name}")
+print(f"   capability    : sm_{cc[0]}{cc[1]}")
+print(f"   torch         : {torch.__version__} (CUDA {torch.version.cuda})")
+print(f"   built for     : {', '.join(built)}")
+# is_available() can be True on a build that cannot actually run on this card.
+x = torch.randn(2048, 2048, device="cuda")
+torch.cuda.synchronize()
+print(f"   real matmul   : ok ({float((x @ x).sum()):.1f})")
+if f"sm_{cc[0]}{cc[1]}" not in built:
+    raise SystemExit(f"   ✗ torch has no kernels for sm_{cc[0]}{cc[1]}")
+PY
+ok "CUDA verified by a real matmul, not just is_available()"
+
+say "Simulator"
+uv run python - <<'PY'
+# SAPIEN historically needs libvulkan present even when nothing is rendered.
+# State-based training does no rendering, so an import failure here is about
+# missing system libraries, not about the GPU.
+import sapien
+print(f"   sapien        : {sapien.__version__}")
+import mani_skill
+print(f"   mani_skill    : {mani_skill.__version__}")
+from mani_skill.envs.sapien_env import BaseEnv  # noqa: F401
+from mani_skill.utils.registration import REGISTERED_ENVS
+import callosum.envs.face_turn      # noqa: F401  (registers FaceTurn-v0)
+import callosum.envs.two_so100_base # noqa: F401  (registers TwoSO100-v0)
+for env_id in ("TwoSO100-v0", "FaceTurn-v0"):
+    assert env_id in REGISTERED_ENVS, f"{env_id} did not register"
+    print(f"   registered    : {env_id}")
+PY
+ok "simulator and both environments are importable and registered"
+
+# ── 6. Optional smoke ─────────────────────────────────────────────────────────
+if [ "${1:-}" = "--smoke" ]; then
+    say "Phase-1 smoke (the checks that cannot run on macOS)"
+    uv run python scripts/smoke_env.py
+    uv run python scripts/smoke_face_turn.py
+    ok "smoke scripts finished — read the output against docs/server-runbook.md section 2"
+fi
+
+say "Ready"
+cat <<TXT
+   Scratch : $WORK   (wiped on pod restart -> re-run this script)
+   Sources : $REPO_ROOT   (survives; keep runs/ here)
+
+   Next, in a TERMINAL (File -> New -> Terminal), not a notebook cell:
+
+     cd $REPO_ROOT
+     bash scripts/setup_jupyterhub.sh --smoke      # if not done yet
+
+     nohup uv run python -m callosum.training.ippo \\
+         --env-id TwoSO100-v0 --total-timesteps 50000 \\
+         > runs/sanity.log 2>&1 &
+
+   nohup detaches the run so it survives closing the browser tab.
+   Watch it with:  tail -f runs/sanity.log
+TXT
