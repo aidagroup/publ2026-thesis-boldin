@@ -163,6 +163,53 @@ warn "LD_LIBRARY_PATH is read by the loader at process start: run training from 
 warn "TERMINAL (it sources ~/.bashrc). A notebook kernel started earlier will NOT"
 warn "see it, and setting os.environ inside the kernel is too late to help."
 
+# ── 4d. Vulkan ICD ───────────────────────────────────────────────────────────
+# SAPIEN's renderer is Vulkan-only, and its URDF loader builds RenderMaterial
+# objects unconditionally — so ManiSkill cannot create ANY environment without a
+# Vulkan device, even with render_backend="none" and state-only observations.
+# The container has the NVIDIA graphics libraries but no ICD manifest telling the
+# Vulkan loader about them, so vkCreateInstance fails with ErrorIncompatibleDriver.
+# Write our own manifest pointing straight at the library.
+say "Vulkan ICD"
+if [ -n "${VK_ICD_FILENAMES:-}" ] && [ -f "${VK_ICD_FILENAMES%%:*}" ]; then
+    ok "already configured: $VK_ICD_FILENAMES"
+elif [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
+    ok "system ICD present"
+else
+    ICD=$(find /usr/share /etc /opt -name 'nvidia_icd*.json' 2>/dev/null | head -1)
+    if [ -z "$ICD" ]; then
+        LIBGLX=$(ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ {print $NF; exit}')
+        if [ -z "$LIBGLX" ] || [ ! -e "$LIBGLX" ]; then
+            LIBGLX=$(find /usr/lib /usr/lib64 /usr/local -maxdepth 4 \
+                          -name 'libGLX_nvidia.so.0' 2>/dev/null | head -1)
+        fi
+        [ -n "$LIBGLX" ] || die "libGLX_nvidia.so.0 not found — the pod needs NVIDIA_DRIVER_CAPABILITIES to include 'graphics' (see scripts/diagnose_vulkan.sh)"
+        mkdir -p "$WORK/vulkan/icd.d"
+        ICD="$WORK/vulkan/icd.d/nvidia_icd.json"
+        # Absolute path rather than the bare soname: it does not depend on the
+        # loader's search path being right inside every child process.
+        cat > "$ICD" <<JSON
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "$LIBGLX",
+        "api_version": "1.3.242"
+    }
+}
+JSON
+        ok "wrote $ICD -> $LIBGLX"
+    else
+        ok "found existing manifest: $ICD"
+    fi
+    export VK_ICD_FILENAMES="$ICD"
+    # SAPIEN's _ensure_vulkan_icd() returns early when this is set, so ours wins
+    # over its bundled fallback (which points at a library that is not here).
+    if ! grep -q 'VK_ICD_FILENAMES' "$PROFILE" 2>/dev/null; then
+        echo "export VK_ICD_FILENAMES=$ICD" >> "$PROFILE"
+        ok "exported into $PROFILE"
+    fi
+fi
+
 say "GPU"
 uv run python - <<'PY'
 import re
@@ -218,6 +265,12 @@ uv run python - <<'PY'
 # missing system libraries, not about the GPU.
 import sapien
 print(f"   sapien        : {sapien.__version__}")
+# A render device is required even for state-only observations (SAPIEN's URDF
+# loader builds RenderMaterial unconditionally), so prove one exists now
+# rather than three stack frames deep inside the first gym.make().
+from sapien.render import RenderMaterial
+RenderMaterial()
+print("   render device : ok (RenderMaterial constructed)")
 import mani_skill
 print(f"   mani_skill    : {mani_skill.__version__}")
 from mani_skill.envs.sapien_env import BaseEnv  # noqa: F401
