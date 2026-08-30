@@ -21,12 +21,6 @@ CUBE_HALF_SIZE = 0.0285
 # A real 3x3 layer (one third of the cube), not an arbitrary thin plate.
 FACE_THICKNESS = 2 * CUBE_HALF_SIZE / 3
 
-# Half-thickness of an SO-100 finger blade, from the collision meshes
-# (Fixed_Jaw_part2.ply spans +-0.0139 m across the blade, Moving_Jaw_part2/3
-# +-0.0115 m). Used to place grasp points far enough from obstacles that the
-# whole blade, not just its centreline, has clearance.
-JAW_BLADE_HALF_THICKNESS = 0.014
-
 # Half-width of both grasp handles, i.e. 2.0 cm across the jaws.
 #
 # WHY handles exist at all. The SO-100's jaw is a hinged pincer, not a
@@ -54,33 +48,55 @@ JAW_BLADE_HALF_THICKNESS = 0.014
 # open before the grasp and to squeeze after it.
 HANDLE_HALF_WIDTH = 0.010
 
-# The face handle is a square post standing on the layer, centred on the
-# rotation axis. Square, not round, so the pinch is form-closed against the
-# reaction torque instead of relying on finger friction alone. 3.5 cm tall so
-# that when the jaws pinch its mid-height the blade tips (~1 cm past the
-# pinch) still clear the cube's top face by ~7 mm.
+# Height of the graspable section of BOTH posts. 3.5 cm: with the jaws closed
+# on a 2 cm handle the tool centre point sits 9.72 cm straight down the blade
+# from the Fixed_Jaw origin and the lowest point of the gripper mesh is only
+# 9.2 mm below it, so pinching a post at its mid-height leaves 8.3 mm of
+# clearance under the jaws -- enough for the face post to clear the cube's top
+# face and for the body post to clear its own bridge.
 FACE_HANDLE_HEIGHT = 0.035
 
-# The body handle is a horizontal bar out of the body's -y side (the holder's
-# side). Its far end sits at this radius from the cube axis. The rotating face
-# sweeps a circle of radius CUBE_HALF_SIZE*sqrt(2) = 4.03 cm, so a holder
-# blade centred at BODY_HANDLE_TIP - JAW_BLADE_HALF_THICKNESS = 6.6 cm spans
-# 5.2-8.0 cm and never enters the face's swept volume.
-BODY_HANDLE_TIP = 0.080
-# Vertical gap between the top of the body handle and the underside of the
-# rotating face, so the two never rub.
+# The body handle is a bridge out of the body's -y side (the holder's side)
+# carrying a vertical post whose axis sits at this radius from the cube axis.
+#
+# A post rather than a plain horizontal bar, for two measured reasons.
+# (1) A 2x2 cm post is graspable at ANY wrist_roll; the bar it replaced was
+#     2 cm across x but 5.15 cm along y, so it could only be pinched if the
+#     closing direction happened to be world x -- a knife edge on one joint
+#     that the policy has no reason to respect.
+# (2) It raises the grasp from 2.6 cm to 5.35 cm above the table, so the
+#     holder's jaws have 4.4 cm of clearance instead of 1.7 cm.
+#
+# 8.0 cm radius, from three clearances measured on the gripper meshes -- note
+# a finger blade is 2.8 cm across (Fixed_Jaw_part2.ply spans +-0.0139 m), so
+# the blade, not its centreline, is what has to clear things. The
+# rotating face sweeps a circle of radius CUBE_HALF_SIZE*sqrt(2) = 4.03 cm and
+# the holder's gripper comes no closer than 7.35 cm to the axis inside that
+# height band. The two grippers stay 3.3 cm apart at their grasp poses, and
+# 1.47 cm apart at the worst point of the rotator's quarter turn, during which
+# its gripper sweeps a 4.26 cm circle about the axis. And the radius is the
+# holder's lever arm: resisting the 0.0835 N*m reaction torque (see
+# FACE_JOINT_DAMPING) takes 1.04 N here against 2.93 N at the bare body's own
+# 2.85 cm half-width.
+BODY_HANDLE_RADIUS = 0.080
+# Vertical gap between the top of the body handle's bridge and the underside
+# of the rotating face, so the two never rub.
 BODY_HANDLE_GAP = 0.002
 
 
-def _body_handle_centre_z(cube_half_size: float, face_thickness: float) -> float:
-    """Centre height of the body's grasp bar, in the body link's own frame.
+def _bridge_top(cube_half_size: float, face_thickness: float) -> float:
+    """Top of the body handle's bridge, in the body link's own frame.
 
-    The body link's origin is the cube's rotation centre, `face_thickness / 2`
-    above the body box's centre, so the face's underside sits at
-    `cube_half_size - face_thickness` in this frame. The bar hangs
-    `BODY_HANDLE_GAP` below that and is `2 * HANDLE_HALF_WIDTH` tall.
+    The body link's origin is the cube's rotation centre, so the underside of
+    the rotating face sits at `cube_half_size - face_thickness` in this frame
+    and the bridge stops `BODY_HANDLE_GAP` below it.
     """
-    return cube_half_size - face_thickness - BODY_HANDLE_GAP - HANDLE_HALF_WIDTH
+    return cube_half_size - face_thickness - BODY_HANDLE_GAP
+
+
+def _body_post_top(cube_half_size: float, face_thickness: float) -> float:
+    """Top of the body handle's vertical post, in the body link's own frame."""
+    return _bridge_top(cube_half_size, face_thickness) + FACE_HANDLE_HEIGHT
 
 
 # Grasp points, as offsets in each link's own frame, for the reward's reach
@@ -89,15 +105,14 @@ def _body_handle_centre_z(cube_half_size: float, face_thickness: float) -> float
 # geometry, which is what the reach reward used to aim at). Both assume the
 # default cube dimensions, as build_turntable_cube's callers all use them.
 #
-# In world coordinates for a cube resting at the table centre that puts the
-# rotator's target at (0, 0, 0.0745) -- the mid-height of the face post -- and
-# the holder's at (0, -0.066, 0.026), one jaw-blade half-thickness in from the
-# body bar's far end.
+# In world coordinates for a cube resting at the table centre this puts the
+# rotator's target at (0, 0, 0.0745) and the holder's at (0, -0.080, 0.0535) --
+# in both cases the mid-height of the post's 3.5 cm graspable section.
 FACE_GRASP_OFFSET = (0.0, 0.0, FACE_THICKNESS / 2 + FACE_HANDLE_HEIGHT / 2)
 BODY_GRASP_OFFSET = (
     0.0,
-    -(BODY_HANDLE_TIP - JAW_BLADE_HALF_THICKNESS),
-    _body_handle_centre_z(CUBE_HALF_SIZE, FACE_THICKNESS),
+    -BODY_HANDLE_RADIUS,
+    _body_post_top(CUBE_HALF_SIZE, FACE_THICKNESS) - FACE_HANDLE_HEIGHT / 2,
 )
 
 # Rotates the joint's local X axis (SAPIEN's default joint-rotation axis) to
@@ -148,10 +163,11 @@ def build_turntable_cube(
     top and rotates about a vertical axis through the cube's center, with
     joint limits [0, pi/2] -- a quarter turn.
 
-    Each link also carries a 2 cm grasp handle (see `HANDLE_HALF_WIDTH`): a
-    post on the face's rotation axis for the rotator, and a side bar on the
-    body for the holder. Contact with a handle is contact with its link, so
-    `agent.is_grasping(link)` needs no special-casing.
+    Each link also carries a 2 cm square grasp post (see `HANDLE_HALF_WIDTH`):
+    one on the face's rotation axis for the rotator, and one on a bridge out of
+    the body's -y side for the holder. Both are square in cross-section, so
+    they can be pinched at any wrist_roll. Contact with a post is contact with
+    its link, so `agent.is_grasping(link)` needs no special-casing.
 
     Args:
         scene: the ManiSkillScene to build into.
@@ -185,21 +201,39 @@ def build_turntable_cube(
         half_size=[cube_half_size, cube_half_size, body_half_height],
         material=sapien.render.RenderMaterial(base_color=color),
     )
-    # Holder's handle: a bar reaching out of the -y side to BODY_HANDLE_TIP,
-    # its top BODY_HANDLE_GAP below the rotating face.
-    body_handle_half_len = (BODY_HANDLE_TIP - cube_half_size) / 2
-    body_handle_pose = sapien.Pose(
-        [
-            0,
-            -(cube_half_size + body_handle_half_len),
-            _body_handle_centre_z(cube_half_size, face_thickness),
-        ]
+    # Holder's handle: a bridge out of the -y side carrying a vertical post.
+    bridge_top = _bridge_top(cube_half_size, face_thickness)
+    bridge_half_len = (BODY_HANDLE_RADIUS - cube_half_size) / 2
+    bridge_pose = sapien.Pose(
+        [0, -(cube_half_size + bridge_half_len), bridge_top - HANDLE_HALF_WIDTH]
     )
-    body_handle_half_size = [HANDLE_HALF_WIDTH, body_handle_half_len, HANDLE_HALF_WIDTH]
-    body.add_box_collision(pose=body_handle_pose, half_size=body_handle_half_size)
+    bridge_half_size = [HANDLE_HALF_WIDTH, bridge_half_len, HANDLE_HALF_WIDTH]
+    body.add_box_collision(pose=bridge_pose, half_size=bridge_half_size)
     body.add_box_visual(
-        pose=body_handle_pose,
-        half_size=body_handle_half_size,
+        pose=bridge_pose,
+        half_size=bridge_half_size,
+        material=sapien.render.RenderMaterial(base_color=handle_color),
+    )
+    # The post runs all the way down to the table. That foot is load-bearing,
+    # not cosmetic: with the handle cantilevered the combined body+handle
+    # centre of mass sits at y = -1.97 cm, only 0.89 cm inside the body's own
+    # 2.85 cm footprint edge, so a downward press of just
+    # 1.69 N * 0.0089 / 0.0515 = 0.29 N at the handle would tip the whole cube
+    # over -- and pressing down is exactly what a top-down holder does.
+    # Standing the post on the table extends the support polygon to y = -9 cm.
+    # It rests on a 2x2 cm patch, so the extra table friction it adds is small
+    # next to the ~0.0835 N*m the holder still has to supply.
+    post_top = _body_post_top(cube_half_size, face_thickness)
+    # Table to post top. The body link's origin is cube_half_size above the
+    # table whenever the cube is resting on it, which is the pose the shape is
+    # designed for; the foot lifts off if the cube is ever picked up.
+    post_height = post_top + cube_half_size
+    post_pose = sapien.Pose([0, -BODY_HANDLE_RADIUS, post_height / 2 - cube_half_size])
+    post_half_size = [HANDLE_HALF_WIDTH, HANDLE_HALF_WIDTH, post_height / 2]
+    body.add_box_collision(pose=post_pose, half_size=post_half_size)
+    body.add_box_visual(
+        pose=post_pose,
+        half_size=post_half_size,
         material=sapien.render.RenderMaterial(base_color=handle_color),
     )
 

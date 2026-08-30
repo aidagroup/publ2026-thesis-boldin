@@ -31,12 +31,21 @@ CUBE_HALF_SIZE = 0.0285
 # 0.28, not 0.30. The binding constraint is not "can the tool centre point
 # touch the cube" (it can: scripts/probe_reach.py measured 0.033 m closest
 # approach even at 0.30) but "can the WRIST be placed above the cube with the
-# tool pointing down", which is what a top-down grasp needs. Measured from the
-# URDF by sweeping the three in-plane joints: the Fixed_Jaw origin reaches at
-# most 0.277 m from the shoulder_pan axis at the grasp height of z~0.17, and
-# the pan axis sits 0.0452 m ahead of the robot base. At 0.30 the required
-# distance is 0.255 m, leaving 2.2 cm; at 0.28 it is 0.235 m, leaving 4.2 cm,
-# which the cube's +-1 cm spawn jitter still fits inside.
+# tool pointing down", which is what a top-down grasp needs. Sweeping the
+# three in-plane joints of the URDF, the Fixed_Jaw origin reaches at most
+# 0.2537 m from the shoulder_pan axis at the rotator's grasp height
+# (z = 0.1717, i.e. the face post's mid-height plus the 0.0972 m from the
+# Fixed_Jaw origin down to the tool centre point), and the pan axis sits
+# 0.0452 m AHEAD of the robot base origin. Required distances:
+#
+#     base 0.30, yaws -+pi/2 (the original)   0.3034 m   short by 5.0 cm
+#     base 0.30, yaws pi / 0                  0.2548 m   short by 1.1 mm
+#     base 0.28, yaws pi / 0                  0.2348 m   1.9 cm of margin
+#
+# So the yaw fix alone is not enough at 0.30 -- it lands exactly on the
+# workspace boundary. 0.28 also survives the cube's +-1 cm spawn jitter
+# (wrist_flex stays between 1.63 and 1.77 rad against its 1.8 limit), while
+# still leaving 3.5 cm between the two grippers at the start pose.
 ARM_BASE_OFFSET = 0.28
 
 # Start configuration for both arms: mani-skill's own SO-100 ready pose, used
@@ -175,7 +184,7 @@ class TwoSO100Base(BaseEnv):
                 agent.reset(start_qpos + noise)
 
             # Cube: fixed at the table center with a small xy jitter. +-1 cm,
-            # not +-2 cm: the top-down grasp pose has 4.2 cm of reach margin
+            # not +-2 cm: the top-down grasp pose has 1.9 cm of reach margin
             # (see ARM_BASE_OFFSET) and the jitter has to fit inside it in
             # EVERY episode, not on average.
             cube_xyz = torch.zeros((b, 3))
