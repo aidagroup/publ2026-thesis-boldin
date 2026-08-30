@@ -46,6 +46,75 @@ else
     echo "  not installed (not required — the library check above is what matters)"
 fi
 
+hr "Which ICD manifest is in effect"
+echo "  VK_ICD_FILENAMES = ${VK_ICD_FILENAMES:-<unset>}"
+MANIFEST="${VK_ICD_FILENAMES%%:*}"
+if [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ]; then
+    sed 's/^/    /' "$MANIFEST"
+    LIB=$(grep -o '"library_path"[^,}]*' "$MANIFEST" | sed 's/.*:[[:space:]]*"//; s/"$//' || true)
+    echo "  library_path -> ${LIB:-<unparsed>}"
+else
+    echo "  (no manifest set; SAPIEN will fall back to its bundled one)"
+    LIB=""
+fi
+
+hr "Can that library actually load? (the usual culprit)"
+# libGLX_nvidia.so.0 needs libnvidia-glcore.so.<exact driver version>. Container
+# runtimes sometimes inject an incomplete or mismatched set, and then the Vulkan
+# loader silently skips the ICD -- instance creation succeeds with zero devices.
+if [ -z "${LIB:-}" ] || [ ! -e "$LIB" ]; then
+    LIB=$(ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ {print $NF; exit}' || true)
+fi
+if [ -n "${LIB:-}" ] && [ -e "$LIB" ]; then
+    echo "  ldd $LIB"
+    if ldd "$LIB" 2>&1 | grep -i 'not found'; then
+        echo "  ^^^ UNRESOLVED dependencies — this is why no device is found"
+    else
+        echo "    all dependencies resolved"
+    fi
+else
+    echo "  library not found at all"
+fi
+
+hr "Driver device nodes"
+ls -1 /dev/nvidia* 2>/dev/null | sed 's/^/  /' || echo "  none present"
+
+hr "What SAPIEN itself sees"
+if command -v uv > /dev/null 2>&1 && [ -f pyproject.toml ]; then
+    uv run python - <<'PYEOF' 2>&1 | sed 's/^/  /'
+import sapien
+for alias in ("cuda", "cuda:0", "cpu"):
+    try:
+        d = sapien.Device(alias)
+        print(f"{alias:8} name={d.name!r} can_render={d.can_render()} "
+              f"is_cuda={d.is_cuda()} pci={d.pci_string}")
+    except Exception as e:
+        print(f"{alias:8} {type(e).__name__}: {e}")
+try:
+    from sapien.render import RenderMaterial
+    RenderMaterial()
+    print("RenderMaterial(): ok — a render device IS available")
+except Exception as e:
+    print(f"RenderMaterial(): {type(e).__name__}: {e}")
+PYEOF
+else
+    echo "  (run from the repo root with uv available to probe sapien)"
+fi
+
+hr "Vulkan loader trace (says exactly why an ICD is rejected)"
+if command -v uv > /dev/null 2>&1 && [ -f pyproject.toml ]; then
+    VK_LOADER_DEBUG=error,warn uv run python -c "
+import sapien
+from sapien.render import RenderMaterial
+try:
+    RenderMaterial(); print('RenderMaterial ok')
+except Exception as e:
+    print(type(e).__name__, e)
+" 2>&1 | grep -iE 'icd|driver|loader|error|warn|manifest|libGLX|RenderMaterial' | head -25 | sed 's/^/  /'
+else
+    echo "  (needs uv and the repo root)"
+fi
+
 hr "Verdict"
 if [ "$found" = "1" ]; then
     cat <<TXT
