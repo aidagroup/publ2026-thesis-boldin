@@ -96,7 +96,6 @@ warn "first run downloads several GB of torch + CUDA wheels; expect a few minute
 uv sync --frozen --extra sim --extra train --extra dev
 ok "synced into $UV_PROJECT_ENVIRONMENT"
 
-# ── 5. Verification — behaviour, not imports ──────────────────────────────────
 # ── 4b. PhysX GPU library, staged by hand (SAPIEN fetches it from GitHub) ─────
 # On first import SAPIEN downloads libPhysXGpu_64.so from a GitHub release. This
 # network cannot reach github.com, so the archive is carried in by hand and
@@ -170,35 +169,39 @@ warn "TERMINAL (it sources ~/.bashrc). A notebook kernel started earlier will NO
 warn "see it, and setting os.environ inside the kernel is too late to help."
 
 # ── 4d. Vulkan ICD ───────────────────────────────────────────────────────────
-# SAPIEN's renderer is Vulkan-only, and its URDF loader builds RenderMaterial
-# objects unconditionally — so ManiSkill cannot create ANY environment without a
-# Vulkan device, even with render_backend="none" and state-only observations.
-# The container has the NVIDIA graphics libraries but no ICD manifest telling the
-# Vulkan loader about them, so vkCreateInstance fails with ErrorIncompatibleDriver.
-# Write our own manifest pointing straight at the library.
+# SAPIEN's _ensure_vulkan_icd() looks ONLY at /usr/share/vulkan/icd.d/nvidia_icd.json.
+# When that path is absent it points VK_ICD_FILENAMES at its own bundled manifest --
+# and setting that variable REPLACES the loader's entire default search, so a
+# perfectly good driver manifest elsewhere (here /etc/vulkan/icd.d/nvidia_icd.json,
+# api_version 1.4.303) is ignored in favour of the bundled one (api_version 1.2.140).
+# The loader then enumerates zero devices and SAPIEN reports "failed to find a
+# rendering device". Fix: point the variable at the driver's own manifest ourselves,
+# which also stops SAPIEN from substituting its bundled copy.
 say "Vulkan ICD"
-if [ -n "${VK_ICD_FILENAMES:-}" ] && [ -f "${VK_ICD_FILENAMES%%:*}" ]; then
-    ok "already configured: $VK_ICD_FILENAMES"
-else
-    # Deliberately NOT trusting a system manifest: /etc/vulkan/icd.d/nvidia_icd.json
-    # exists on this machine and Vulkan still finds no device, so its presence
-    # proves nothing. Ours points at an absolute, verified library path and takes
-    # precedence via VK_ICD_FILENAMES.
-    # No hunting for someone else's manifest: the Vulkan loader already scans the
-    # standard directories, so if a working one existed there we would not be here.
-    # A stale manifest found elsewhere would just reproduce the failure.
-    {
-        LIBGLX=$(ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ {print $NF; exit}' || true)
-        if [ -z "$LIBGLX" ] || [ ! -e "$LIBGLX" ]; then
-            LIBGLX=$(find /usr/lib /usr/lib64 /usr/local -maxdepth 4 \
-                          -name 'libGLX_nvidia.so.0' 2>/dev/null | head -1 || true)
-        fi
-        [ -n "$LIBGLX" ] || die "libGLX_nvidia.so.0 not found — the pod needs NVIDIA_DRIVER_CAPABILITIES to include 'graphics' (see scripts/diagnose_vulkan.sh)"
-        mkdir -p "$WORK/vulkan/icd.d"
-        ICD="$WORK/vulkan/icd.d/nvidia_icd.json"
-        # Absolute path rather than the bare soname: it does not depend on the
-        # loader's search path being right inside every child process.
-        cat > "$ICD" <<JSON
+ICD=""
+for cand in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
+    [ -e "$cand" ] || continue
+    lib=$(grep -o '"library_path"[^,}]*' "$cand" | sed 's/.*:[[:space:]]*"//; s/"$//' || true)
+    [ -n "$lib" ] || continue
+    case "$lib" in
+        /*) [ -e "$lib" ] || continue ;;
+        *)  ldconfig -p 2>/dev/null | grep -q "$lib" || continue ;;
+    esac
+    ICD="$cand"
+    ok "using the driver's own manifest: $ICD -> $lib"
+    break
+done
+
+if [ -z "$ICD" ]; then
+    LIBGLX=$(ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ {print $NF; exit}' || true)
+    if [ -z "$LIBGLX" ] || [ ! -e "$LIBGLX" ]; then
+        LIBGLX=$(find /usr/lib /usr/lib64 /usr/local -maxdepth 4 \
+                      -name 'libGLX_nvidia.so.0' 2>/dev/null | head -1 || true)
+    fi
+    [ -n "$LIBGLX" ] || die "no usable Vulkan ICD and no libGLX_nvidia.so.0 — run scripts/diagnose_vulkan.sh"
+    mkdir -p "$WORK/vulkan/icd.d"
+    ICD="$WORK/vulkan/icd.d/nvidia_icd.json"
+    cat > "$ICD" <<JSON
 {
     "file_format_version": "1.0.0",
     "ICD": {
@@ -207,17 +210,18 @@ else
     }
 }
 JSON
-        ok "wrote $ICD -> $LIBGLX"
-    }
-    export VK_ICD_FILENAMES="$ICD"
-    # SAPIEN's _ensure_vulkan_icd() returns early when this is set, so ours wins
-    # over its bundled fallback (which points at a library that is not here).
-    if ! grep -q 'VK_ICD_FILENAMES' "$PROFILE" 2>/dev/null; then
-        echo "export VK_ICD_FILENAMES=$ICD" >> "$PROFILE"
-        ok "exported into $PROFILE"
-    fi
+    ok "no system manifest — wrote $ICD -> $LIBGLX"
 fi
 
+export VK_ICD_FILENAMES="$ICD"
+if grep -q '^export VK_ICD_FILENAMES=' "$PROFILE" 2>/dev/null; then
+    sed -i "s|^export VK_ICD_FILENAMES=.*|export VK_ICD_FILENAMES=$ICD|" "$PROFILE"
+else
+    echo "export VK_ICD_FILENAMES=$ICD" >> "$PROFILE"
+fi
+ok "VK_ICD_FILENAMES=$ICD"
+
+# ── 5. Verification — behaviour, not imports ──────────────────────────────────
 say "GPU"
 uv run python - <<'PY'
 import re

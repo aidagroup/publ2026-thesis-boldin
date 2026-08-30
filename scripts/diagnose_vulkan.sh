@@ -11,6 +11,10 @@
 # Everything decisive is repeated in the SUMMARY block at the very end: that is
 # the part to copy. The sections above it are the raw evidence behind it.
 set -uo pipefail
+# uv lives in ~/.local/bin, which is only on PATH once ~/.bashrc is sourced —
+# and a non-interactive `bash scripts/...` does not source it. Without this the
+# two most valuable probes below silently skip themselves.
+export PATH="$HOME/.local/bin:$PATH"
 
 hr() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 
