@@ -125,6 +125,44 @@ TXT
     fi
 fi
 
+# ── 4c. libcuda.so shim ───────────────────────────────────────────────────────
+# SAPIEN's physx.enable_gpu() does ctypes.CDLL("libcuda.so") — the UNVERSIONED
+# name. Container runtimes inject only the versioned libcuda.so.1 from the host
+# driver; the bare symlink normally ships in a driver -devel package that is not
+# installed here. torch is unaffected because it links libcuda.so.1 directly.
+# Without this shim: OSError: libcuda.so: cannot open shared object file.
+say "libcuda.so shim"
+SHIM_DIR="$WORK/lib"
+mkdir -p "$SHIM_DIR"
+if [ -e "$SHIM_DIR/libcuda.so" ]; then
+    ok "already present: $SHIM_DIR/libcuda.so"
+else
+    LIBCUDA=""
+    # ldconfig knows where the runtime actually put it; fall back to the usual spots.
+    if command -v ldconfig > /dev/null 2>&1; then
+        LIBCUDA=$(ldconfig -p 2>/dev/null | awk '/libcuda\.so\.1/ {print $NF; exit}')
+    fi
+    if [ -z "$LIBCUDA" ] || [ ! -e "$LIBCUDA" ]; then
+        for c in /usr/lib/x86_64-linux-gnu/libcuda.so.1 \
+                 /usr/lib64/libcuda.so.1 \
+                 /usr/local/nvidia/lib64/libcuda.so.1 \
+                 /usr/local/cuda/compat/libcuda.so.1; do
+            [ -e "$c" ] && { LIBCUDA="$c"; break; }
+        done
+    fi
+    [ -n "$LIBCUDA" ] || die "libcuda.so.1 not found — is this container GPU-enabled? (nvidia-smi works?)"
+    ln -sfn "$LIBCUDA" "$SHIM_DIR/libcuda.so"
+    ok "linked $SHIM_DIR/libcuda.so -> $LIBCUDA"
+fi
+export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if ! grep -q 'callosum-work/lib' "$PROFILE" 2>/dev/null; then
+    echo "export LD_LIBRARY_PATH=\"$SHIM_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"" >> "$PROFILE"
+    ok "exported into $PROFILE"
+fi
+warn "LD_LIBRARY_PATH is read by the loader at process start: run training from a"
+warn "TERMINAL (it sources ~/.bashrc). A notebook kernel started earlier will NOT"
+warn "see it, and setting os.environ inside the kernel is too late to help."
+
 say "GPU"
 uv run python - <<'PY'
 import re
