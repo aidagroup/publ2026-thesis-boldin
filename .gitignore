@@ -256,3 +256,4 @@ vendor/
 # Source snapshot built for hand-upload to the lab JupyterHub (no GitHub access
 # there): `git archive --format=tar.gz -o callosum.tar.gz --prefix=callosum/ <ref>`
 callosum.tar.gz
+.bundle-stage/
