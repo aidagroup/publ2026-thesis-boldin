@@ -247,3 +247,8 @@ demos/
 graft/
 .claude/
 .mcp.json
+
+# Vendored binaries carried in by hand for networks that cannot reach GitHub
+# (the lab JupyterHub). Large, redistributable, and reproducible from a URL —
+# see docs/jupyterhub-runbook.md. scripts/setup_jupyterhub.sh looks here first.
+vendor/

@@ -137,10 +137,11 @@ GitHub, всё с PyPI и `download.pytorch.org`, поэтому блокиро�
 При первом импорте SAPIEN скачивает `libPhysXGpu_64.so` из релиза на GitHub, а
 GitHub здесь закрыт. Файл привозится вручную.
 
-На машине с доступом к GitHub:
+На машине с доступом к GitHub — качать в `vendor/` внутри репозитория
+(директория в `.gitignore`, скрипт развёртывания смотрит туда первым делом):
 
 ```bash
-curl -L -o physx-linux-so.zip \
+mkdir -p vendor && curl -L -o vendor/physx-linux-so.zip \
   https://github.com/sapien-sim/physx-precompiled/releases/download/105.1-physx-5.3.1.patch0/linux-so.zip
 ```
 
