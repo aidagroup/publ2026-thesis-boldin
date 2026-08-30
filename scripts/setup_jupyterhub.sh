@@ -179,9 +179,11 @@ warn "see it, and setting os.environ inside the kernel is too late to help."
 say "Vulkan ICD"
 if [ -n "${VK_ICD_FILENAMES:-}" ] && [ -f "${VK_ICD_FILENAMES%%:*}" ]; then
     ok "already configured: $VK_ICD_FILENAMES"
-elif [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
-    ok "system ICD present"
 else
+    # Deliberately NOT trusting a system manifest: /etc/vulkan/icd.d/nvidia_icd.json
+    # exists on this machine and Vulkan still finds no device, so its presence
+    # proves nothing. Ours points at an absolute, verified library path and takes
+    # precedence via VK_ICD_FILENAMES.
     # No hunting for someone else's manifest: the Vulkan loader already scans the
     # standard directories, so if a working one existed there we would not be here.
     # A stale manifest found elsewhere would just reproduce the failure.

@@ -34,7 +34,25 @@ done
 hr "Vulkan loader and ICD files"
 ldconfig -p 2>/dev/null | grep -i 'libvulkan' | head -3 || echo "  libvulkan: not in ldconfig"
 for d in /usr/share/vulkan/icd.d /etc/vulkan/icd.d; do
-    if [ -d "$d" ]; then echo "  $d:"; ls -1 "$d" 2>/dev/null | sed 's/^/    /'
+    if [ -d "$d" ]; then
+        echo "  $d:"
+        for f in "$d"/*.json; do
+            [ -e "$f" ] || continue
+            echo "    $f:"
+            sed 's/^/      /' "$f"
+            # A manifest existing proves nothing: it may name a library that is
+            # absent, in which case the loader skips it and reports zero devices.
+            l=$(grep -o '"library_path"[^,}]*' "$f" | sed 's/.*:[[:space:]]*"//; s/"$//' || true)
+            if [ -n "$l" ]; then
+                case "$l" in
+                    /*) [ -e "$l" ] && echo "      -> library EXISTS: $l" \
+                                    || echo "      -> library MISSING: $l" ;;
+                    *)  r=$(ldconfig -p 2>/dev/null | grep -m1 "$l" | awk '{print $NF}' || true)
+                        [ -n "$r" ] && echo "      -> resolves to: $r" \
+                                    || echo "      -> soname '$l' NOT resolvable by ldconfig" ;;
+                esac
+            fi
+        done
     else echo "  $d: does not exist"; fi
 done
 echo "  VK_ICD_FILENAMES = ${VK_ICD_FILENAMES:-<unset>}"
@@ -48,7 +66,7 @@ fi
 
 hr "Which ICD manifest is in effect"
 echo "  VK_ICD_FILENAMES = ${VK_ICD_FILENAMES:-<unset>}"
-MANIFEST="${VK_ICD_FILENAMES%%:*}"
+MANIFEST="${VK_ICD_FILENAMES:-}"; MANIFEST="${MANIFEST%%:*}"
 if [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ]; then
     sed 's/^/    /' "$MANIFEST"
     LIB=$(grep -o '"library_path"[^,}]*' "$MANIFEST" | sed 's/.*:[[:space:]]*"//; s/"$//' || true)
