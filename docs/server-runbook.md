@@ -60,16 +60,22 @@ if anything here fails — everything below depends on it.
 ```bash
 uv run python scripts/smoke_env.py
 uv run python scripts/smoke_face_turn.py
+uv run python scripts/probe_grasp.py
 ```
+
+`probe_grasp.py` is the gate that matters most: it drives both arms through
+hand-solved joint waypoints with no policy in the loop, so if it does not end
+in `success` the scene is unsolvable and training is wasted GPU time.
 
 **Known open questions these answer** (all flagged in code as `TODO(review)`):
 
 | Question | Where | If it fails |
 |---|---|---|
-| Do both arms actually reach the cube at `y = ±0.3`? | `smoke_env.py` | shrink the spacing (`two_so100_base._load_agent`); reach is ~0.5 m max, so 0.25 m is the obvious next try |
+| Does the gripper actually close on a handle? | `probe_grasp.py` | the aperture table at the top of its output vs `_turntable_cube.HANDLE_HALF_WIDTH` |
+| Can both arms reach their top-down grasp poses? | `probe_grasp.py` | the `rot→face` / `hold→body` columns should reach a few mm; if not, re-solve the waypoints or shrink `two_so100_base.ARM_BASE_OFFSET` |
+| Are the joint friction/damping sane at cube scale? | `probe_grasp.py` | `angle` stuck at 0 with `grasped` at 1 → lower `FACE_JOINT_DAMPING` in `_turntable_cube.py` |
+| Does the holder actually stop the body from spinning? | `probe_grasp.py` | `dpos`/`drot` climbing during the turn phase → the body handle or the holder's grip |
 | Does the face articulation look/behave right (no jitter, face sits on the body)? | `smoke_face_turn.py` | check `disable_self_collisions`; review the joint pose |
-| Are the joint friction/damping sane at cube scale? | `smoke_face_turn.py` | tune `friction`/`damping` in `_turntable_cube.py` |
-| Does the gripper actually close on the layer's side faces? | `smoke_face_turn.py` | revisit the grasp target in `face_turn.compute_dense_reward` |
 | Does the scripted turn flip `success` on, and body displacement flip it off? | `smoke_face_turn.py` | success logic bug — fix before any training |
 
 Record the actual printed output; it is the evidence that phase 1 works.

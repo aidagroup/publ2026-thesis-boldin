@@ -10,20 +10,25 @@ turns the face) -- see docs/thesis/04-experiment-design.md.
 import math
 from typing import Any
 
+import sapien
 import torch
 from mani_skill.utils import common
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 
 from callosum.configs.face_turn import FaceTurnRewardConfig
-from callosum.envs._turntable_cube import build_turntable_cube
+from callosum.envs._turntable_cube import (
+    BODY_GRASP_OFFSET,
+    FACE_GRASP_OFFSET,
+    build_turntable_cube,
+)
 from callosum.envs.two_so100_base import TwoSO100Base
 
 TARGET_FACE_ANGLE = math.pi / 2  # a quarter turn
 _DEFAULT_REWARD_CONFIG = FaceTurnRewardConfig()
 
 
-# See the note on TwoSO100-v0: approach alone consumed ~90 steps.
+# See the step-budget note on TwoSO100-v0.
 @register_env("FaceTurn-v0", max_episode_steps=300)
 class FaceTurn(TwoSO100Base):
     """Bimanual face-turn task on top of TwoSO100Base's two-arm plumbing.
@@ -33,6 +38,18 @@ class FaceTurn(TwoSO100Base):
     toward `TARGET_FACE_ANGLE`. Success additionally requires the body to
     have stayed within its initial pose's position/rotation tolerance --
     turning the face by knocking the whole cube around does not count.
+
+    Both arms reach for the grasp HANDLES on the cube, not for the links'
+    origins (see `callosum.envs._turntable_cube`). The rotator's handle sits
+    on the rotation axis on purpose: the SO-100 has 5 DOF -- a base yaw, three
+    parallel pitch joints and a wrist roll about the tool's own approach axis
+    -- so the ONLY way it can spin a grasped object about a world-vertical
+    axis without dragging it sideways is to approach straight down and use
+    `wrist_roll`. That matches the design doc's "the rotator comes in from
+    above" (docs/thesis/04-experiment-design.md, v1 simplifications), and it
+    is why `TwoSO100Base._load_agent` now points the arms at the cube (see
+    the base-yaw note there): with the previous base yaws the rotator's wrist
+    could not be placed above the cube at all.
 
     Inherits TwoSO100Base's `partner_obs` flag unchanged: `compute_dense_reward`
     and `evaluate` always read TCP poses straight off `self.agent_a`/`agent_b`
@@ -66,13 +83,20 @@ class FaceTurn(TwoSO100Base):
         # against the part that is actually being held.
         self.body_link = self.cube.links_map["body"]
 
+        # Grasp handles, as poses in their links' frames. Composed with the
+        # link pose (mani_skill Pose.__mul__ broadcasts a single sapien.Pose
+        # against a batched one) so the targets follow the face as it turns
+        # and the body if it gets nudged.
+        self._face_grasp_local = sapien.Pose(p=list(FACE_GRASP_OFFSET))
+        self._body_grasp_local = sapien.Pose(p=list(BODY_GRASP_OFFSET))
+
         # Filled in per env_idx in _initialize_episode; used by evaluate() and
         # compute_dense_reward() to detect body drift from its initial pose.
         self.body_init_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.body_init_q = torch.zeros((self.num_envs, 4), device=self.device)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
-        # Places both arms (rest keyframe + noise) and the cube body (jittered
+        # Places both arms (READY_QPOS + noise) and the cube body (jittered
         # center position) -- see TwoSO100Base._initialize_episode.
         super()._initialize_episode(env_idx, options)
         with torch.device(self.device):
@@ -81,11 +105,27 @@ class FaceTurn(TwoSO100Base):
             self.body_init_pos[env_idx] = self.cube.pose.p[env_idx]
             self.body_init_q[env_idx] = self.cube.pose.q[env_idx]
 
+    @property
+    def face_grasp_pos(self) -> torch.Tensor:
+        """World position of the rotator's grasp handle, shape (num_envs, 3)."""
+        return (self.face_link.pose * self._face_grasp_local).p
+
+    @property
+    def body_grasp_pos(self) -> torch.Tensor:
+        """World position of the holder's grasp handle, shape (num_envs, 3)."""
+        return (self.body_link.pose * self._body_grasp_local).p
+
     def _get_obs_extra(self, info: dict):
         obs = super()._get_obs_extra(info)
         if "state" in self.obs_mode:
             obs["face_angle"] = info["face_angle"]
             obs["face_pose"] = self.face_link.pose.raw_pose
+            # Where to actually put the gripper. Without these the policy has
+            # to infer the handle offsets from the link poses; they are fixed
+            # offsets, but only in the LINKS' frames, so recovering them costs
+            # the network a rotation it does not need to learn.
+            obs["face_grasp_pos"] = self.face_grasp_pos
+            obs["body_grasp_pos"] = self.body_grasp_pos
         return obs
 
     def evaluate(self):
@@ -106,16 +146,24 @@ class FaceTurn(TwoSO100Base):
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
         cfg = self.reward_config
 
-        # (a) rotator reaches for the face, (d) holder reaches for the body.
-        # TODO(review): reach target is the face layer's geometric center.
-        # Now that FACE_THICKNESS is a real 3x3 layer (1.9 cm, not a thin
-        # plate), the center is a defensible grasp target -- a parallel-jaw
-        # gripper should be able to pinch the layer from its side faces.
-        # Unconfirmed without GPU sim whether the gripper actually closes on
-        # it there.
-        rotator_to_face = torch.linalg.norm(self.agent_b.tcp_pos - self.face_link.pose.p, dim=1)
+        # (a) rotator reaches for the face handle, (d) holder for the body
+        # handle.
+        #
+        # These used to aim at `face_link.pose.p` and `cube.pose.p`, both of
+        # which are INSIDE solid geometry -- the face link's origin is the
+        # layer's geometric centre, the articulation root pose is a point
+        # 9.5 mm above the body box's centre. A distance-to-target reward is
+        # monotone, so its greedy optimum was to drive the jaw tips into the
+        # cube's surface, which is not a grasp pose. It was also actively at
+        # odds with grasping: SO100.tcp_pos is the midpoint of the two jaw
+        # TIPS, so for a 5.7 cm object held between open jaws the tcp sits
+        # ~2.1 cm from the object's centre (measured from the URDF), i.e.
+        # opening the gripper to grasp LOWERED the reach reward. Aiming at
+        # a 2 cm handle removes both problems: with the jaws closed on it the
+        # tcp and the handle centre coincide to within ~3 mm.
+        rotator_to_face = torch.linalg.norm(self.agent_b.tcp_pos - self.face_grasp_pos, dim=1)
         rotator_reach = 1 - torch.tanh(5 * rotator_to_face)
-        holder_to_body = torch.linalg.norm(self.agent_a.tcp_pos - self.cube.pose.p, dim=1)
+        holder_to_body = torch.linalg.norm(self.agent_a.tcp_pos - self.body_grasp_pos, dim=1)
         holder_reach = 1 - torch.tanh(5 * holder_to_body)
 
         # (b) grasping: rotator on the face, holder on the body. Both are needed

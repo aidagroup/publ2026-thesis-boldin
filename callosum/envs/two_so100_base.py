@@ -26,11 +26,46 @@ from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner
 # ~5.7 cm real Rubik's cube edge length.
 CUBE_HALF_SIZE = 0.0285
 
+# Distance of each arm's base from the table centre, along +-y.
+#
+# 0.28, not 0.30. The binding constraint is not "can the tool centre point
+# touch the cube" (it can: scripts/probe_reach.py measured 0.033 m closest
+# approach even at 0.30) but "can the WRIST be placed above the cube with the
+# tool pointing down", which is what a top-down grasp needs. Measured from the
+# URDF by sweeping the three in-plane joints: the Fixed_Jaw origin reaches at
+# most 0.277 m from the shoulder_pan axis at the grasp height of z~0.17, and
+# the pan axis sits 0.0452 m ahead of the robot base. At 0.30 the required
+# distance is 0.255 m, leaving 2.2 cm; at 0.28 it is 0.235 m, leaving 4.2 cm,
+# which the cube's +-1 cm spawn jitter still fits inside.
+ARM_BASE_OFFSET = 0.28
 
-# 300, not 100: measured on 2026-08-30, the trained FaceTurn policy needs ~90
-# steps just to bring both tool centre points from the rest pose (0.37 m) to
-# 0.07 m from the cube, and was still improving when the episode ended. An
-# episode has to leave room for approach AND grasp AND the quarter turn.
+# Start configuration for both arms: mani-skill's own SO-100 ready pose, used
+# by TableSceneBuilder's "so100" branch and by SO100GraspCube-v1.
+#
+# NOT SO100.keyframes["rest"] ([0, -1.5708, 1.5708, 0.66, 0, -1.1]), which
+# this env used until 2026-08-30. Two measured problems with "rest":
+#   * qpos[5] = -1.1 is the gripper joint's LOWER limit, and the jaw tips are
+#     then 6.6 mm apart -- the arm starts with the hand CLAMPED SHUT, and
+#     nothing in the dense reward pays for opening it. Worse, SO100.tcp_pos
+#     is the midpoint of the two jaw TIPS, so the gripper joint MOVES the
+#     reach reward's own measurement point: at the "rest" arm pose, sweeping
+#     the gripper from -1.1 to +1.1 lifts the tcp by 6.5 cm, straight away
+#     from a cube whose centre is 4.75 cm off the table. Opening the hand was
+#     therefore locally reward-NEGATIVE, and `grasped` stayed 0.00.
+#   * its approach axis is 38 deg off vertical. At this pose the approach is
+#     exactly (0, 0, -1) and the wrist_roll axis exactly (0, 0, 1), which is
+#     what turning the face about a vertical axis requires.
+READY_QPOS = np.array([0, 0, 0, np.pi / 2, np.pi / 2, 0])
+
+
+# 300, not 100. The budget an optimal FaceTurn episode needs, from the
+# kinematic solution for the grasp poses: >=10 control steps for the rotator
+# and >=19 for the holder to travel from READY_QPOS to their grasp
+# configurations at the 0.05 rad/step delta limit, ~6 steps to close the
+# gripper at 0.2 rad/step, and >=32 steps of wrist_roll for the quarter turn.
+# ~70 steps of pure motion, so 300 leaves room to correct and settle. (With
+# the pre-2026-08-30 base yaws the approach alone cost ~90 steps, because
+# ~32 of them went into rotating shoulder_pan to face the cube.)
 @register_env("TwoSO100-v0", max_episode_steps=300)
 class TwoSO100Base(BaseEnv):
     """Two SO-100 arms around a table with a single loose cube.
@@ -79,20 +114,33 @@ class TwoSO100Base(BaseEnv):
         return self.agent.agents[1]
 
     def _load_agent(self, options: dict):
-        # Mirrored yaws so both arms face the cube at the table center,
-        # matching TableSceneBuilder's panda-pair reference (agents[0] gets
-        # +pi/2, agents[1] gets -pi/2). Identity rotation (as originally
-        # copied from the plan) would have both arms facing the same
-        # direction, so at most one of them could reach the cube.
-        # TODO(review): y=-0.3/y=+0.3 spacing (~60% of SO-100's ~0.5 m max
-        # reach, vs. ~88% for the panda-pair reference) is still unverified
-        # on real GPU sim -- confirm via scripts/smoke_env.py on the server
-        # that both arms actually close on the cube.
+        # Base yaws pi and 0, NOT the panda pair's +pi/2 / -pi/2.
+        #
+        # Those yaws were copied from TableSceneBuilder's panda-pair branch,
+        # but a panda's home pose points along its own +x while the SO-100's
+        # points along its own -y (mani-skill compensates for that by giving
+        # the single-SO100 setups a base yaw of +pi/2 with the object at +x).
+        # Copying the panda numbers therefore aimed both arms 90 deg away from
+        # the cube. Two measured consequences:
+        #   * the arm had to spend ~1.57 rad of shoulder_pan, i.e. ~32 control
+        #     steps at the 0.05 rad/step delta limit, just turning around --
+        #     about a third of the ~90-step approach scripts/probe_policy.py
+        #     recorded;
+        #   * worse, the shoulder_pan axis sits 0.0452 m AHEAD of the base
+        #     origin, so a base yawed sideways puts the pan axis 0.3034 m from
+        #     the cube axis while the wrist can only reach 0.277 m at grasp
+        #     height. The rotator's wrist could not be placed above the cube
+        #     at all, so the top-down grasp the task needs was kinematically
+        #     unreachable -- which is consistent with `grasped` never once
+        #     firing across ~4M steps.
+        # With yaw pi (holder, at -y) and 0 (rotator, at +y) the arms point at
+        # the cube with shoulder_pan at 0, and the required distance drops to
+        # 0.235 m (see ARM_BASE_OFFSET).
         super()._load_agent(
             options,
             [
-                sapien.Pose(p=[0, -0.3, 0], q=euler2quat(0, 0, np.pi / 2)),
-                sapien.Pose(p=[0, 0.3, 0], q=euler2quat(0, 0, -np.pi / 2)),
+                sapien.Pose(p=[0, -ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, np.pi)),
+                sapien.Pose(p=[0, ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, 0)),
             ],
         )
 
@@ -121,14 +169,17 @@ class TwoSO100Base(BaseEnv):
             # once in _load_agent) and do not need resetting per episode.
             self.table_scene.initialize(env_idx)
 
-            rest_qpos = common.to_tensor(self.agent_a.keyframes["rest"].qpos, device=self.device)
+            start_qpos = common.to_tensor(READY_QPOS, device=self.device)
             for agent in (self.agent_a, self.agent_b):
-                noise = torch.randn((b, rest_qpos.shape[-1])) * self.robot_init_qpos_noise
-                agent.reset(rest_qpos + noise)
+                noise = torch.randn((b, start_qpos.shape[-1])) * self.robot_init_qpos_noise
+                agent.reset(start_qpos + noise)
 
-            # Cube: fixed at the table center with a small xy jitter.
+            # Cube: fixed at the table center with a small xy jitter. +-1 cm,
+            # not +-2 cm: the top-down grasp pose has 4.2 cm of reach margin
+            # (see ARM_BASE_OFFSET) and the jitter has to fit inside it in
+            # EVERY episode, not on average.
             cube_xyz = torch.zeros((b, 3))
-            cube_xyz[:, :2] = torch.rand((b, 2)) * 0.04 - 0.02
+            cube_xyz[:, :2] = torch.rand((b, 2)) * 0.02 - 0.01
             cube_xyz[:, 2] = CUBE_HALF_SIZE
             self.cube.set_pose(Pose.create_from_pq(p=cube_xyz))
 

@@ -100,20 +100,27 @@ def main() -> int:
     else:
         print("random policy (untrained baseline)")
 
-    hdr = f"{'step':>5} {'rot→face':>9} {'hold→body':>10} {'grasped':>8} {'angle':>7} {'reward':>8}"
+    hdr = (
+        f"{'step':>5} {'rot→face':>9} {'hold→body':>10} {'grasped':>8} "
+        f"{'held':>6} {'angle':>7} {'reward':>8}"
+    )
     print(f"\n{hdr}\n{'-' * len(hdr)}")
     with torch.no_grad():
         for step in range(args.steps + 1):
-            d_rot = torch.linalg.norm(base.agent_b.tcp_pos - base.face_link.pose.p, dim=1)
-            d_hold = torch.linalg.norm(base.agent_a.tcp_pos - base.cube.pose.p, dim=1)
+            # Same targets compute_dense_reward uses: the grasp HANDLES, not
+            # the link origins (which sit inside solid geometry).
+            d_rot = torch.linalg.norm(base.agent_b.tcp_pos - base.face_grasp_pos, dim=1)
+            d_hold = torch.linalg.norm(base.agent_a.tcp_pos - base.body_grasp_pos, dim=1)
             grasped = base.agent_b.is_grasping(base.face_link).float()
+            held = base.agent_a.is_grasping(base.body_link).float()
             angle = base.face_link.joint.qpos.squeeze(-1)
             info = base.get_info()
             rew = base.compute_dense_reward(None, None, info)
             if step % args.every == 0:
                 print(
                     f"{step:>5} {d_rot.mean():>9.3f} {d_hold.mean():>10.3f} "
-                    f"{grasped.mean():>8.2f} {angle.mean():>7.3f} {rew.mean():>8.3f}"
+                    f"{grasped.mean():>8.2f} {held.mean():>6.2f} "
+                    f"{angle.mean():>7.3f} {rew.mean():>8.3f}"
                 )
             # Keep the last pre-reset breakdown: at step == max_episode_steps the
             # env has already auto-reset, so reading terms after the loop reports
@@ -128,10 +135,13 @@ def main() -> int:
                     cfg_r.weight_holder_reach * (1 - torch.tanh(5 * d_hold)).mean()
                 ),
                 "grasp": float(cfg_r.weight_grasp * grasped.mean()),
+                "holder_grasp": float(cfg_r.weight_holder_grasp * held.mean()),
                 "angle_progress": float(
                     cfg_r.weight_angle_progress * (1 - torch.tanh(2 * angle_rem)).mean()
                 ),
             }
+            if step == 0:
+                start_reward = float(rew.mean())
             if step == args.steps:
                 break
 
@@ -156,17 +166,22 @@ def main() -> int:
     # eval/return are compute_dense_reward divided by the sum of the positive
     # term weights. Printing both scales avoids comparing one against the other,
     # which is exactly the mistake that produced a wrong diagnosis on 2026-08-30.
-    norm = (
-        base.reward_config.weight_rotator_reach
-        + base.reward_config.weight_grasp
-        + base.reward_config.weight_angle_progress
-        + base.reward_config.weight_holder_reach
-    )
+    #
+    # Read off the env, never recomputed here: this local copy had already
+    # gone stale once, silently omitting weight_holder_grasp after that term
+    # was added.
+    norm = base.reward_normalization_divisor
     print(f"  {'TOTAL (raw)':16} {total:+8.4f}")
     print(f"  {'TOTAL (normalized)':16} {total / norm:+8.4f}   <- the scale train/return uses")
     print()
-    print(f"  {'rest pose':22} raw {0.108:+7.4f}  normalized {0.108 / norm:+7.4f}")
-    print(f"  {'scripted success':22} raw {3.097:+7.4f}  normalized {3.097 / norm:+7.4f}")
+    # Measured this run rather than hardcoded: the "doing nothing is worth X"
+    # reference numbers move whenever the scene or the weights change, and a
+    # stale constant here is worse than none.
+    print(
+        f"  {'start pose (step 0)':22} raw {start_reward:+7.4f}"
+        f"  normalized {start_reward / norm:+7.4f}"
+    )
+    print(f"  {'perfect score':22} raw {norm:+7.4f}  normalized {1.0:+7.4f}")
 
     env.close()
     return 0

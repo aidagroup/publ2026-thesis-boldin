@@ -56,7 +56,18 @@ class IPPOConfig:
     eval_partial_reset: bool = False
 
     anneal_lr: bool = False
-    gamma: float = 0.8
+    # 0.99, not the 0.8 inherited from ManiSkill's PPO baseline. 0.8 is an
+    # effective horizon of 1/(1-gamma) = 5 steps, and it is tuned there for
+    # 50-step single-stage tasks (PushCube) where the reward is immediate.
+    # FaceTurn is a 300-step staircase: from the start pose the grasp is
+    # >= 10-19 control steps away and the completed quarter turn >= 32 steps
+    # after that, so at 0.8 the grasp bonus arrives discounted by 0.8**20 =
+    # 0.012 and the turn by 0.8**50 = 1.4e-5. Opening the gripper and closing
+    # it on a handle are therefore invisible to the return, while the reach
+    # term pays out immediately -- exactly the "approach, then hover" the
+    # 2026-08-30 runs showed. At 0.99 the horizon is 100 steps and 0.99**50 =
+    # 0.61, so the turn is still worth most of its face value.
+    gamma: float = 0.99
     gae_lambda: float = 0.9
     num_minibatches: int = 32
     update_epochs: int = 4

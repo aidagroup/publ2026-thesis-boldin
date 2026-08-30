@@ -17,10 +17,14 @@ class FaceTurnRewardConfig:
     weight_grasp: float = 1.0
     # Holder grasping the BODY. Without this the holder has no positive
     # signal for its actual job -- stabilising the cube so the face can be
-    # turned without the whole body spinning. Measured on 2026-08-30: with
-    # reach-only terms both arms learned to hover ~7 cm away and never make
-    # contact, because touching risks the drift penalty and nothing paid for
-    # the risk. The task needs a reward staircase: approach, grip, turn.
+    # turned without the whole body spinning. The task needs a reward
+    # staircase: approach, grip, turn.
+    #
+    # Note that both grasp terms were structurally unreachable before the
+    # 2026-08-30 geometry fix: neither link had a feature the SO-100's jaw can
+    # close on, so `is_grasping` could never fire and both terms were constant
+    # zero while still inflating `reward_normalization_divisor`. See
+    # callosum.envs._turntable_cube.HANDLE_HALF_WIDTH.
     weight_holder_grasp: float = 1.0
     weight_angle_progress: float = 3.0
     weight_holder_reach: float = 1.0
