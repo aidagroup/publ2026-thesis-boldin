@@ -62,21 +62,37 @@ def main() -> int:
     if not args.random:
         run = args.run
         if run is None:
-            cands = sorted(glob.glob(f"runs/*{args.env_id.split('-')[0]}*/"), key=os.path.getmtime)
+            # Newest run that actually HAS checkpoints, not merely the newest
+            # directory: a run that dies during startup still creates its
+            # directory (the TensorBoard writer opens first), and picking that
+            # one fails with a confusing FileNotFoundError.
+            cands = [
+                d
+                for d in glob.glob(f"runs/*{args.env_id.split('-')[0]}*/")
+                if os.path.exists(os.path.join(d, "bijepa_final_ckpt.pt"))
+            ]
             if not cands:
-                print("no run directory found; pass --run or use --random")
+                print("no run with checkpoints found. Directories under runs/:")
+                for d in sorted(glob.glob("runs/*/")):
+                    n = len(glob.glob(os.path.join(d, "*.pt")))
+                    print(f"  {d}  ({n} checkpoint files)")
+                print("\nPass --run <dir>, or --random for an untrained baseline.")
                 return 1
-            run = cands[-1]
+            run = max(cands, key=os.path.getmtime)
         cfg = BiJEPAConfig()
         bij = BiJEPA(cfg, obs_dim=build_agent_obs(raw_obs, 0, uids).shape[-1]).to(device)
-        bij.load_state_dict(torch.load(f"{run}/bijepa_final_ckpt.pt", map_location=device))
+        bij.load_state_dict(
+            torch.load(os.path.join(run, "bijepa_final_ckpt.pt"), map_location=device)
+        )
         agents = []
         for i, uid in enumerate(uids):
             pi = bijepa_step(bij.encoder, bij.predictor, raw_obs, i, uids, "none", cfg.latent_dim)[
                 0
             ]
             a = Agent(pi.shape[-1], int(env.single_action_space[uid].shape[-1])).to(device)
-            a.load_state_dict(torch.load(f"{run}/agent_{uid}_final_ckpt.pt", map_location=device))
+            a.load_state_dict(
+                torch.load(os.path.join(run, f"agent_{uid}_final_ckpt.pt"), map_location=device)
+            )
             a.eval()
             agents.append((a, bij, cfg))
         print(f"loaded {run}")
