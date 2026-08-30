@@ -15,6 +15,13 @@ set -uo pipefail
 # and a non-interactive `bash scripts/...` does not source it. Without this the
 # two most valuable probes below silently skip themselves.
 export PATH="$HOME/.local/bin:$PATH"
+# Prefer the real interpreter over `uv run`: uv without UV_PROJECT_ENVIRONMENT
+# quietly builds a second venv in the repo, and the probes then import nothing.
+[ -f .callosum-env.sh ] && . ./.callosum-env.sh
+PY_BIN=""
+for c in "${UV_PROJECT_ENVIRONMENT:-}/bin/python" /tmp/callosum-work/venv/bin/python; do
+    [ -x "$c" ] && { PY_BIN="$c"; break; }
+done
 
 hr() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 
@@ -73,9 +80,9 @@ DEV_NODES=$(ls -1 /dev/nvidia* 2>/dev/null | tr '\n' ' ' || true)
 echo "  ${DEV_NODES:-<none present>}"
 
 hr "What SAPIEN sees"
-SAPIEN_OUT="(not probed — needs uv and the repo root)"
-if command -v uv > /dev/null 2>&1 && [ -f pyproject.toml ]; then
-    SAPIEN_OUT=$(uv run python - <<'PYEOF' 2>&1 | tail -6
+SAPIEN_OUT="(not probed — no interpreter found; run scripts/setup_jupyterhub.sh first)"
+if [ -n "$PY_BIN" ]; then
+    SAPIEN_OUT=$("$PY_BIN" - <<'PYEOF' 2>&1 | tail -6
 import sapien
 for alias in ("cuda", "cpu"):
     try:
@@ -96,13 +103,13 @@ echo "$SAPIEN_OUT" | sed 's/^/  /'
 
 hr "Vulkan loader trace"
 TRACE="(not probed)"
-if command -v uv > /dev/null 2>&1 && [ -f pyproject.toml ]; then
-    TRACE=$(VK_LOADER_DEBUG=error,warn uv run python -c "
+if [ -n "$PY_BIN" ]; then
+    TRACE=$(VK_LOADER_DEBUG=all "$PY_BIN" -c "
 import sapien
 from sapien.render import RenderMaterial
 try: RenderMaterial()
 except Exception as e: pass
-" 2>&1 | grep -iE 'icd|driver|loader|manifest|libGLX' | head -12 || true)
+" 2>&1 | grep -iE 'icd|driver|loader|manifest|libGLX' | head -30 || true)
     [ -n "$TRACE" ] || TRACE="(loader printed nothing)"
 fi
 echo "$TRACE" | sed 's/^/  /'
