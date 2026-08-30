@@ -127,6 +127,7 @@ train = [
     { name = "tensordict" },
     { name = "torch" },
     { name = "torchrl" },
+    { name = "tqdm" },
 ]
 
 [package.metadata]
@@ -142,6 +143,7 @@ requires-dist = [
     { name = "tensordict", marker = "extra == 'train'" },
     { name = "torch", marker = "extra == 'train'", specifier = "<2.11" },
     { name = "torchrl", marker = "extra == 'train'" },
+    { name = "tqdm", marker = "extra == 'train'" },
 ]
 provides-extras = ["sim", "train", "dev"]
 

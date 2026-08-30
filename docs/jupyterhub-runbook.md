@@ -446,34 +446,34 @@ nohup uv run python scripts/run_ablation.py \
 
 ## Шаг 6. Смотреть метрики
 
-TensorBoard внутри JupyterHub:
+Метрики теперь идут **в сам лог**, отдельный скрипт для этого больше не нужен.
 
-```python
-%load_ext tensorboard
-%tensorboard --logdir runs
+**По ходу обучения.** В терминале рисуется полоса прогресса с ключевыми
+значениями в хвосте. Под `nohup` она сама выключается (`disable=None` в tqdm
+отключает бар, когда вывод не в терминал — перерисовка в файле была бы мусором),
+и вместо неё каждая итерация печатает строку:
+
+```
+iter 42/156 | step 537600 | sps 4582 | return 9.68 | succ 0 | jepa 0.012
 ```
 
-Если расширение не работает (частое ограничение прокси в JupyterHub), метрики
-читаются напрямую из файлов событий:
+Смотреть как обычно: `tail -f runs/<имя>.log`.
 
-```python
-from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-import glob
+**В конце прогона** печатается сводка по всем метрикам — первое значение,
+последнее, минимум, максимум, число точек. То, что раньше приходилось добывать
+отдельным скриптом.
 
-for d in sorted(glob.glob("runs/*/")):
-    ea = EventAccumulator(d)
-    ea.Reload()
-    tags = ea.Tags()["scalars"]
-    print("\n", d, "\n  теги:", tags[:12])
-    for tag in ["losses/jepa_loss", "eval/success_once", "train/return"]:
-        if tag in tags:
-            vals = [e.value for e in ea.Scalars(tag)]
-            print(f"  {tag}: первое={vals[0]:.4f} последнее={vals[-1]:.4f} точек={len(vals)}")
+**Для прошлых или прерванных прогонов:**
+
+```bash
+uv run python scripts/show_metrics.py              # все прогоны
+uv run python scripts/show_metrics.py FaceTurn     # по подстроке имени
+uv run python scripts/show_metrics.py --last 3     # три последних
 ```
 
-Второй способ надёжнее и его вывод можно просто скопировать в чат.
-
----
+**Веб-интерфейс TensorBoard** (`%tensorboard --logdir runs` в ячейке) может не
+работать из-за прокси JupyterHub — на этот случай всё вышеперечисленное читает
+файлы событий напрямую.
 
 ## Шаг 7. Забрать результаты
 

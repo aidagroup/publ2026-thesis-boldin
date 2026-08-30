@@ -34,6 +34,11 @@ train = [
     "torchrl",
     "benchmarl",
     "tensorboard",
+    # Progress bar for the trainer. Already pulled in transitively by several
+    # packages, but declared here because callosum.training.ippo imports it
+    # directly -- an undeclared dependency would break the day a transitive
+    # user drops it.
+    "tqdm",
 ]
 dev = [
     "ruff",

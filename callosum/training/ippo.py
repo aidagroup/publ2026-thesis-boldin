@@ -63,6 +63,7 @@ import torch
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from callosum.agents.bijepa import BiJEPA, jepa_loss
 from callosum.configs.ippo import IPPOConfig, parse_args
@@ -78,6 +79,7 @@ from callosum.envs import face_turn as _face_turn  # noqa: F401
 from callosum.envs import two_so100_base as _two_so100_base  # noqa: F401
 from callosum.training._agent_obs import build_agent_obs
 from callosum.training._bijepa_policy import bijepa_step
+from callosum.training._metrics import MetricLogger
 from callosum.training._ppo_core import Agent, compute_gae, ppo_update
 
 
@@ -125,6 +127,7 @@ def main(args: IPPOConfig) -> None:
 
     print(f"agents: {agent_uids}")
     writer = SummaryWriter(f"runs/{run_name}")
+    metrics = MetricLogger(writer)
     hyperparams_table = "\n".join(f"|{k}|{v}|" for k, v in vars(args).items())
     writer.add_text("hyperparameters", f"|param|value|\n|-|-|\n{hyperparams_table}")
 
@@ -198,7 +201,11 @@ def main(args: IPPOConfig) -> None:
     start_time = time.time()
     next_done = torch.zeros(args.num_envs, device=device)
 
-    for iteration in range(1, args.num_iterations + 1):
+    # disable=None turns the bar off automatically when stdout is not a TTY,
+    # i.e. under `nohup ... > log`, where a redrawing bar would be noise. The
+    # per-iteration line below covers that case instead.
+    bar = tqdm(range(1, args.num_iterations + 1), disable=None, unit="iter", dynamic_ncols=True)
+    for iteration in bar:
         for agent in agents:
             agent.eval()
 
@@ -231,7 +238,7 @@ def main(args: IPPOConfig) -> None:
                         eval_metrics[k].append(v)
             for k, v in eval_metrics.items():
                 mean = torch.stack(v).float().mean()
-                writer.add_scalar(f"eval/{k}", mean, global_step)
+                metrics.log(f"eval/{k}", mean, global_step)
                 print(f"  eval_{k}_mean={mean:.4f}")
             print(
                 f"  evaluated {args.num_eval_steps * args.num_eval_envs} steps,"
@@ -318,7 +325,7 @@ def main(args: IPPOConfig) -> None:
                 final_info = infos["final_info"]
                 done_mask = infos["_final_info"]
                 for k, v in final_info["episode"].items():
-                    writer.add_scalar(f"train/{k}", v[done_mask].float().mean(), global_step)
+                    metrics.log(f"train/{k}", v[done_mask].float().mean(), global_step)
                 with torch.no_grad():
                     for i in range(2):
                         final_obs_i = bijepa_step(
@@ -377,7 +384,7 @@ def main(args: IPPOConfig) -> None:
                 args,
             )
             for k, v in metrics.items():
-                writer.add_scalar(f"losses/{uid}/{k}", v, global_step)
+                metrics.log(f"losses/{uid}/{k}", v, global_step)
 
         # Bi-JEPA auxiliary update: train the shared encoder+predictor on the
         # JEPA aux loss (predict z_j from the agent's own latent), separate
@@ -400,7 +407,7 @@ def main(args: IPPOConfig) -> None:
         if args.bijepa.ema_target:
             bijepa.ema_update()
         jepa_loss_val = (jepa_aux_loss / 2).item()
-        writer.add_scalar("losses/jepa_loss", jepa_loss_val, global_step)
+        metrics.log("losses/jepa_loss", jepa_loss_val, global_step)
         # Б3 collapse diagnostics: alongside the JEPA loss, log the per-latent
         # std of z_i (current) and z_j (CTDE target) and the mean |z_hat| of
         # the predictor output. A jepa_loss that "decreases" while z_std -> 0
@@ -410,21 +417,27 @@ def main(args: IPPOConfig) -> None:
                 z_i_std = torch.stack(z_i_list[i]).std(0).mean().item()
                 z_j_std = torch.stack(z_j_list[i]).std(0).mean().item()
                 z_hat_abs = torch.stack(z_hat_list[i]).abs().mean().item()
-                writer.add_scalar(f"bijepa/{uid}/z_i_std", z_i_std, global_step)
-                writer.add_scalar(f"bijepa/{uid}/z_j_std", z_j_std, global_step)
-                writer.add_scalar(f"bijepa/{uid}/z_hat_abs", z_hat_abs, global_step)
+                metrics.log(f"bijepa/{uid}/z_i_std", z_i_std, global_step)
+                metrics.log(f"bijepa/{uid}/z_j_std", z_j_std, global_step)
+                metrics.log(f"bijepa/{uid}/z_hat_abs", z_hat_abs, global_step)
         update_time = time.time() - update_time
 
         sps = int(global_step / (time.time() - start_time))
-        print(f"iteration={iteration} global_step={global_step} SPS={sps}")
-        writer.add_scalar("charts/SPS", sps, global_step)
-        writer.add_scalar("time/rollout_time", rollout_time, global_step)
-        writer.add_scalar("time/update_time", update_time, global_step)
+        line = metrics.iteration_line(iteration, args.num_iterations, global_step, sps)
+        if bar.disable:
+            print(line, flush=True)
+        else:
+            bar.set_postfix(metrics.headline())
+        metrics.log("charts/SPS", sps, global_step)
+        metrics.log("time/rollout_time", rollout_time, global_step)
+        metrics.log("time/update_time", update_time, global_step)
 
     if args.save_model:
         for i, uid in enumerate(agent_uids):
             torch.save(agents[i].state_dict(), f"runs/{run_name}/agent_{uid}_final_ckpt.pt")
         torch.save(bijepa.state_dict(), f"runs/{run_name}/bijepa_final_ckpt.pt")
+    bar.close()
+    print(metrics.summary(), flush=True)
     writer.close()
     envs.close()
     eval_envs.close()
