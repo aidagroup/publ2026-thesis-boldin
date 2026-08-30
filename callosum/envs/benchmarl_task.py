@@ -351,6 +351,7 @@ def _make_gym_env(
     seed: int | None,
     device: DEVICE_TYPING,
     partner_obs: str = "full",
+    render_backend: str = "none",
     control_mode: str | None = None,
     partial_reset: bool = True,
     reconfiguration_freq: int | None = None,
@@ -384,6 +385,7 @@ def _make_gym_env(
         "obs_mode": "state_dict",
         "sim_backend": "physx_cuda",
         "partner_obs": partner_obs,
+        "render_backend": render_backend,
     }
     if control_mode is not None:
         env_kwargs["control_mode"] = control_mode

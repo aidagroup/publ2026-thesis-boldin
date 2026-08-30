@@ -82,7 +82,11 @@ from callosum.training._ppo_core import Agent, compute_gae, ppo_update
 
 
 def _make_env(args: IPPOConfig, num_envs: int, reconfiguration_freq: int | None) -> gym.Env:
-    env_kwargs = {"obs_mode": "state_dict", "sim_backend": "physx_cuda"}
+    env_kwargs = {
+        "obs_mode": "state_dict",
+        "sim_backend": "physx_cuda",
+        "render_backend": args.render_backend,
+    }
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
     return gym.make(

@@ -30,6 +30,11 @@ class IPPOConfig:
 
     env_id: str = "FaceTurn-v0"
     control_mode: str | None = None  # None = env default (pd_joint_delta_pos for SO-100)
+    # "none" disables the renderer: state-based training never draws anything,
+    # and on a headless box Vulkan may be missing entirely (ManiSkill would then
+    # fail at RenderSystem() with ErrorIncompatibleDriver). Set to "gpu" only
+    # once cameras are needed -- phase 4 (vision).
+    render_backend: str = "none"
     seed: int = 1
     cuda: bool = True
     torch_deterministic: bool = True

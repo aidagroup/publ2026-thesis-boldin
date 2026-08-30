@@ -14,7 +14,20 @@ import callosum.envs.two_so100_base  # noqa: F401
 
 
 def main() -> None:
-    env = gym.make("TwoSO100-v0", num_envs=16, obs_mode="state", sim_backend="gpu")
+    # render_backend="none": this training is state-based and never renders, so
+    # the renderer is pure overhead. It also must be off wherever Vulkan is
+    # unavailable -- ManiSkill's render_utils.can_render() only checks that a
+    # render device was selected, not that Vulkan actually works, so it says yes
+    # on a headless container and then RenderSystem() raises
+    # "vk::createInstanceUnique: ErrorIncompatibleDriver". Disabling it is the
+    # documented remedy (BaseEnv docstring). Phase 4 (vision) will need it back.
+    env = gym.make(
+        "TwoSO100-v0",
+        num_envs=16,
+        obs_mode="state",
+        sim_backend="gpu",
+        render_backend="none",
+    )
     base_env = env.unwrapped
 
     obs, _ = env.reset(seed=0)
