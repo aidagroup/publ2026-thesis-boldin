@@ -252,3 +252,7 @@ graft/
 # (the lab JupyterHub). Large, redistributable, and reproducible from a URL —
 # see docs/jupyterhub-runbook.md. scripts/setup_jupyterhub.sh looks here first.
 vendor/
+
+# Source snapshot built for hand-upload to the lab JupyterHub (no GitHub access
+# there): `git archive --format=tar.gz -o callosum.tar.gz --prefix=callosum/ <ref>`
+callosum.tar.gz
