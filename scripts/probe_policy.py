@@ -17,6 +17,7 @@ import os
 
 import gymnasium as gym
 import torch
+from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
 from callosum.agents.bijepa import BiJEPA
@@ -35,12 +36,22 @@ def main() -> int:
     ap.add_argument("--random", action="store_true", help="skip the checkpoint, act randomly")
     args = ap.parse_args()
 
-    env = gym.make(
-        args.env_id,
-        num_envs=64,
-        obs_mode="state_dict",
-        sim_backend="physx_cuda",
-        render_backend="none",
+    # Wrap exactly as callosum.training.ippo does: `single_action_space` lives on
+    # ManiSkillVectorEnv, not on the TimeLimitWrapper that gym.make returns.
+    # ignore_terminations=True keeps a successful episode running, so the whole
+    # trajectory stays visible instead of auto-resetting mid-probe.
+    n_envs = 64
+    env = ManiSkillVectorEnv(
+        gym.make(
+            args.env_id,
+            num_envs=n_envs,
+            obs_mode="state_dict",
+            sim_backend="physx_cuda",
+            render_backend="none",
+        ),
+        n_envs,
+        ignore_terminations=True,
+        record_metrics=False,
     )
     base = env.unwrapped
     uids = tuple(base.agent.agents_dict.keys())
