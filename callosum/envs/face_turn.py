@@ -124,11 +124,26 @@ class FaceTurn(TwoSO100Base):
         angle_remaining = (TARGET_FACE_ANGLE - info["face_angle"]).clamp(min=0)
         angle_progress = 1 - torch.tanh(2 * angle_remaining)
 
-        # (e) penalty for the body drifting from its initial pose. Separate
-        # weights since position (m) and rotation (rad) drift aren't on
-        # commensurate scales.
-        pos_drift = torch.linalg.norm(self.cube.pose.p - self.body_init_pos, dim=1)
-        rot_drift = common.quat_diff_rad(self.cube.pose.q, self.body_init_q)
+        # (e) penalty for the body drifting BEYOND the tolerance evaluate()
+        # accepts. Separate weights since position (m) and rotation (rad) drift
+        # aren't on commensurate scales.
+        #
+        # The hinge is not cosmetic. Measured on the 2M-step run of 2026-08-30,
+        # with the penalty linear from zero: merely touching the cube within the
+        # tolerance that still counts as success cost 5*0.01 + 5*0.10 = 0.55 per
+        # step, while approaching from the rest pose (0.37 m) to 0.20 m gains
+        # only 0.19. Approaching was net-negative in expectation, so standing
+        # still was a local optimum -- and the policy found it: after 156 updates
+        # the tool centre points had not left the rest pose (0.370 -> ~0.36 m)
+        # and success_once was 0 in all 78 logged points. Clamping at the
+        # tolerance makes the dense reward agree with the success predicate:
+        # incidental contact is free, only real destabilisation is punished.
+        pos_drift = (
+            torch.linalg.norm(self.cube.pose.p - self.body_init_pos, dim=1) - cfg.body_pos_tol
+        ).clamp(min=0)
+        rot_drift = (
+            common.quat_diff_rad(self.cube.pose.q, self.body_init_q) - cfg.body_rot_tol
+        ).clamp(min=0)
 
         return (
             cfg.weight_rotator_reach * rotator_reach
