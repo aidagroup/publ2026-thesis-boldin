@@ -221,6 +221,7 @@ __marimo__/
 # Experiment outputs, logs, checkpoints
 outputs/
 runs/
+runs
 logs/
 wandb/
 multirun/

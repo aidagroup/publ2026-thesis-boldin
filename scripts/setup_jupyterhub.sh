@@ -288,6 +288,32 @@ if [ -d "$REPO_ROOT/.venv" ]; then
     rm -rf "$REPO_ROOT/.venv"
 fi
 
+# ── 4f. runs/ lives OUTSIDE the repo ─────────────────────────────────────────
+# The delivery loop here is "rm -rf callosum && tar xzf callosum.tar.gz", which
+# destroys anything inside the repo -- including training results. Keep runs/ in
+# $HOME (survives re-extraction AND pod restarts, unlike scratch) and symlink it
+# in. Checkpoints are small: the actor-critic MLPs are ~0.6 MB each.
+say "runs/ directory"
+RUNS_STORE="$HOME/callosum-runs"
+mkdir -p "$RUNS_STORE"
+if [ -L "$REPO_ROOT/runs" ]; then
+    ok "runs -> $(readlink "$REPO_ROOT/runs")"
+elif [ -d "$REPO_ROOT/runs" ]; then
+    # A real directory from an earlier layout: preserve its contents, then link.
+    if [ -n "$(ls -A "$REPO_ROOT/runs" 2>/dev/null)" ]; then
+        cp -R "$REPO_ROOT/runs/." "$RUNS_STORE/" 2>/dev/null || true
+        ok "moved existing results into $RUNS_STORE"
+    fi
+    rm -rf "$REPO_ROOT/runs"
+    ln -sfn "$RUNS_STORE" "$REPO_ROOT/runs"
+    ok "runs -> $RUNS_STORE"
+else
+    ln -sfn "$RUNS_STORE" "$REPO_ROOT/runs"
+    ok "runs -> $RUNS_STORE"
+fi
+runs_free=$(df -BG --output=avail "$RUNS_STORE" 2>/dev/null | tail -1 | tr -dc '0-9' || true)
+[ -n "${runs_free:-}" ] && ok "${runs_free} GB free where results are kept"
+
 # ── 5. Verification — behaviour, not imports ──────────────────────────────────
 say "GPU"
 uv run python - <<'PY'
