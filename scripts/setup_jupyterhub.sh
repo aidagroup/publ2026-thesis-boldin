@@ -169,57 +169,93 @@ warn "TERMINAL (it sources ~/.bashrc). A notebook kernel started earlier will NO
 warn "see it, and setting os.environ inside the kernel is too late to help."
 
 # ── 4d. Vulkan ICD ───────────────────────────────────────────────────────────
-# SAPIEN's _ensure_vulkan_icd() looks ONLY at /usr/share/vulkan/icd.d/nvidia_icd.json.
-# When that path is absent it points VK_ICD_FILENAMES at its own bundled manifest --
-# and setting that variable REPLACES the loader's entire default search, so a
-# perfectly good driver manifest elsewhere (here /etc/vulkan/icd.d/nvidia_icd.json,
-# api_version 1.4.303) is ignored in favour of the bundled one (api_version 1.2.140).
-# The loader then enumerates zero devices and SAPIEN reports "failed to find a
-# rendering device". Fix: point the variable at the driver's own manifest ourselves,
-# which also stops SAPIEN from substituting its bundled copy.
+# ManiSkill cannot build ANY environment without a Vulkan device: SAPIEN's URDF
+# loader constructs RenderMaterial unconditionally, whatever the observation mode.
+#
+# Two things make this awkward here:
+#   * SAPIEN's _ensure_vulkan_icd() only looks at /usr/share/vulkan/icd.d/nvidia_icd.json.
+#     Missing that, it points VK_ICD_FILENAMES at its own bundled manifest -- which
+#     REPLACES the loader's whole default search, hiding a good driver manifest elsewhere.
+#   * On this pod the NVIDIA driver is complete and healthy (library loads, ICD entry
+#     points exported, /proc/driver/nvidia present) yet still refuses to initialise its
+#     graphics path inside the container: vkCreateInstance comes back NULL. That is a
+#     container-capability restriction, not something a manifest can fix.
+#
+# So: do not guess. Try each candidate manifest by actually constructing a
+# RenderMaterial with it, and keep the first that works. A software rasteriser
+# (lavapipe) is a perfectly good answer here -- we never render a single frame;
+# physics runs on the GPU through PhysX and does not touch Vulkan.
 say "Vulkan ICD"
-ICD=""
-for cand in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
-    [ -e "$cand" ] || continue
-    lib=$(grep -o '"library_path"[^,}]*' "$cand" | sed 's/.*:[[:space:]]*"//; s/"$//' || true)
-    [ -n "$lib" ] || continue
-    case "$lib" in
-        /*) [ -e "$lib" ] || continue ;;
-        *)  ldconfig -p 2>/dev/null | grep -q "$lib" || continue ;;
-    esac
-    ICD="$cand"
-    ok "using the driver's own manifest: $ICD -> $lib"
-    break
+
+VENV_PY="$UV_PROJECT_ENVIRONMENT/bin/python"
+MESA_PREFIX="$WORK/mesa"
+
+# $1 = ICD manifest, $2 = Vulkan loader (empty = whichever SAPIEN picks itself).
+# SAPIEN reads SAPIEN_VULKAN_LIBRARY_PATH; it only sets that variable when it
+# cannot find a system libvulkan, so setting it ourselves overrides its choice.
+try_icd() {
+    [ -x "$VENV_PY" ] || return 1
+    VK_ICD_FILENAMES="$1" SAPIEN_VULKAN_LIBRARY_PATH="${2:-}" "$VENV_PY" -c \
+        "from sapien.render import RenderMaterial; RenderMaterial()" > /dev/null 2>&1
+}
+
+install_mesa() {
+    [ -d "$MESA_PREFIX" ] && return 0
+    command -v conda > /dev/null 2>&1 || return 1
+    warn "installing lavapipe + a current Vulkan loader into $MESA_PREFIX"
+    conda create -y -q -p "$MESA_PREFIX" -c conda-forge mesalib vulkan-tools > /dev/null 2>&1
+}
+
+ICD=""; LOADER=""
+attempt() {  # $1 = manifest, $2 = loader, $3 = human label
+    [ -e "$1" ] || return 1
+    if try_icd "$1" "$2"; then
+        ICD="$1"; LOADER="$2"; ok "render device via $3"; return 0
+    fi
+    return 1
+}
+
+# Preference order. Hardware first: the NVIDIA driver here is healthy but its ICD
+# refuses to negotiate with the OLD system loader (vkCreateInstance comes back
+# NULL), while a current loader drives it fine -- vulkaninfo from conda enumerates
+# the A100. Software rasterisation is the last resort; it is perfectly adequate
+# because we never render a frame (physics runs on the GPU via PhysX), but the
+# real device costs nothing when it works and phase 4 will need it.
+for pass in system conda; do
+    if [ "$pass" = "conda" ]; then
+        install_mesa || break
+        NEW_LOADER="$MESA_PREFIX/lib/libvulkan.so.1"
+        [ -e "$NEW_LOADER" ] || break
+    else
+        NEW_LOADER=""
+    fi
+    for cand in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
+        attempt "$cand" "$NEW_LOADER" "$(basename "$cand") + ${pass} loader" && break 2
+    done
 done
 
-if [ -z "$ICD" ]; then
-    LIBGLX=$(ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ {print $NF; exit}' || true)
-    if [ -z "$LIBGLX" ] || [ ! -e "$LIBGLX" ]; then
-        LIBGLX=$(find /usr/lib /usr/lib64 /usr/local -maxdepth 4 \
-                      -name 'libGLX_nvidia.so.0' 2>/dev/null | head -1 || true)
-    fi
-    [ -n "$LIBGLX" ] || die "no usable Vulkan ICD and no libGLX_nvidia.so.0 — run scripts/diagnose_vulkan.sh"
-    mkdir -p "$WORK/vulkan/icd.d"
-    ICD="$WORK/vulkan/icd.d/nvidia_icd.json"
-    cat > "$ICD" <<JSON
-{
-    "file_format_version": "1.0.0",
-    "ICD": {
-        "library_path": "$LIBGLX",
-        "api_version": "1.3.242"
-    }
-}
-JSON
-    ok "no system manifest — wrote $ICD -> $LIBGLX"
+# Still nothing: software rasteriser.
+if [ -z "$ICD" ] && install_mesa; then
+    for cand in "$MESA_PREFIX"/share/vulkan/icd.d/*.json; do
+        attempt "$cand" "$MESA_PREFIX/lib/libvulkan.so.1" "$(basename "$cand") (software rasteriser)" && break
+        attempt "$cand" "" "$(basename "$cand") (software rasteriser, system loader)" && break
+    done
 fi
 
+[ -n "$ICD" ] || die "no Vulkan ICD yields a render device — run scripts/diagnose_vulkan.sh, see docs/jupyterhub-runbook.md"
+
 export VK_ICD_FILENAMES="$ICD"
-if grep -q '^export VK_ICD_FILENAMES=' "$PROFILE" 2>/dev/null; then
-    sed -i "s|^export VK_ICD_FILENAMES=.*|export VK_ICD_FILENAMES=$ICD|" "$PROFILE"
-else
-    echo "export VK_ICD_FILENAMES=$ICD" >> "$PROFILE"
-fi
+export SAPIEN_VULKAN_LIBRARY_PATH="$LOADER"
+for var in VK_ICD_FILENAMES SAPIEN_VULKAN_LIBRARY_PATH; do
+    eval "val=\$$var"
+    if grep -q "^export $var=" "$PROFILE" 2>/dev/null; then
+        sed -i "s|^export $var=.*|export $var=$val|" "$PROFILE"
+    else
+        echo "export $var=$val" >> "$PROFILE"
+    fi
+done
 ok "VK_ICD_FILENAMES=$ICD"
+[ -n "$LOADER" ] && ok "SAPIEN_VULKAN_LIBRARY_PATH=$LOADER"
 
 # ── 4e. A sourceable env file ────────────────────────────────────────────────
 # ~/.bashrc only helps shells started AFTER setup ran, and not at all for
@@ -238,6 +274,7 @@ export UV_CACHE_DIR="$UV_CACHE_DIR"
 export HF_HOME="$HF_HOME"
 export LD_LIBRARY_PATH="$SHIM_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 export VK_ICD_FILENAMES="$VK_ICD_FILENAMES"
+export SAPIEN_VULKAN_LIBRARY_PATH="$SAPIEN_VULKAN_LIBRARY_PATH"
 ENVEOF
 ok "wrote $ENV_FILE"
 
