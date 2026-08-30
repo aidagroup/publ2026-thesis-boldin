@@ -49,13 +49,16 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # ManiSkill downloads assets to ~/.maniskill; symlink rather than trusting an
 # env-var name, so this holds regardless of the version's config knob.
-if [ ! -L "$HOME/.maniskill" ]; then
-    [ -d "$HOME/.maniskill" ] && mv "$HOME/.maniskill" "$WORK/maniskill-existing"
-    ln -sfn "$WORK/maniskill" "$HOME/.maniskill"
-fi
+for d in maniskill sapien; do
+    if [ ! -L "$HOME/.$d" ]; then
+        [ -d "$HOME/.$d" ] && mv "$HOME/.$d" "$WORK/$d-existing"
+        mkdir -p "$WORK/$d"
+        ln -sfn "$WORK/$d" "$HOME/.$d"
+    fi
+done
 ok "UV_PROJECT_ENVIRONMENT=$UV_PROJECT_ENVIRONMENT"
 ok "UV_CACHE_DIR=$UV_CACHE_DIR"
-ok "~/.maniskill -> $WORK/maniskill"
+ok "~/.maniskill and ~/.sapien -> $WORK/"
 
 # Persist for future terminals / kernels. Idempotent.
 PROFILE="$HOME/.bashrc"
@@ -88,6 +91,40 @@ uv sync --frozen --extra sim --extra train --extra dev
 ok "synced into $UV_PROJECT_ENVIRONMENT"
 
 # ── 5. Verification — behaviour, not imports ──────────────────────────────────
+# ── 4b. PhysX GPU library, staged by hand (SAPIEN fetches it from GitHub) ─────
+# On first import SAPIEN downloads libPhysXGpu_64.so from a GitHub release. This
+# network cannot reach github.com, so the archive is carried in by hand and
+# unpacked here, before anything imports sapien.
+say "PhysX GPU library"
+PHYSX_VER="105.1-physx-5.3.1.patch0"
+PHYSX_DIR="$HOME/.sapien/physx/$PHYSX_VER"
+if [ -f "$PHYSX_DIR/libPhysXGpu_64.so" ]; then
+    ok "already installed ($(du -h "$PHYSX_DIR/libPhysXGpu_64.so" | cut -f1))"
+else
+    STAGED=""
+    for z in "$REPO_ROOT/vendor/physx-linux-so.zip" "$HOME/physx-linux-so.zip" \
+             "$REPO_ROOT/physx-linux-so.zip" "$HOME/linux-so.zip"; do
+        [ -f "$z" ] && { STAGED="$z"; break; }
+    done
+    if [ -n "$STAGED" ]; then
+        mkdir -p "$PHYSX_DIR"
+        unzip -o -q "$STAGED" -d "$PHYSX_DIR"
+        [ -f "$PHYSX_DIR/libPhysXGpu_64.so" ] || die "archive did not contain libPhysXGpu_64.so"
+        ok "installed from $STAGED -> $PHYSX_DIR"
+    else
+        warn "not found, and this network cannot reach github.com"
+        cat <<TXT
+
+   On a machine WITH GitHub access, download:
+     https://github.com/sapien-sim/physx-precompiled/releases/download/$PHYSX_VER/linux-so.zip
+   Upload it here as ~/physx-linux-so.zip and re-run this script.
+   (81 MB compressed, 237 MB unpacked; it lands on scratch via the ~/.sapien symlink.)
+
+TXT
+        die "PhysX GPU library missing — sapien cannot start without it"
+    fi
+fi
+
 say "GPU"
 uv run python - <<'PY'
 import re
