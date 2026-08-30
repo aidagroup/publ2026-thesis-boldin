@@ -23,7 +23,8 @@ TARGET_FACE_ANGLE = math.pi / 2  # a quarter turn
 _DEFAULT_REWARD_CONFIG = FaceTurnRewardConfig()
 
 
-@register_env("FaceTurn-v0", max_episode_steps=100)
+# See the note on TwoSO100-v0: approach alone consumed ~90 steps.
+@register_env("FaceTurn-v0", max_episode_steps=300)
 class FaceTurn(TwoSO100Base):
     """Bimanual face-turn task on top of TwoSO100Base's two-arm plumbing.
 

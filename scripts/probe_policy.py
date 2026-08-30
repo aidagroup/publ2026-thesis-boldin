@@ -22,6 +22,7 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
 from callosum.agents.bijepa import BiJEPA
 from callosum.configs.bijepa import BiJEPAConfig
+from callosum.envs.face_turn import TARGET_FACE_ANGLE
 from callosum.training._agent_obs import build_agent_obs
 from callosum.training._bijepa_policy import bijepa_step
 from callosum.training._ppo_core import Agent
@@ -114,6 +115,23 @@ def main() -> int:
                     f"{step:>5} {d_rot.mean():>9.3f} {d_hold.mean():>10.3f} "
                     f"{grasped.mean():>8.2f} {angle.mean():>7.3f} {rew.mean():>8.3f}"
                 )
+            # Keep the last pre-reset breakdown: at step == max_episode_steps the
+            # env has already auto-reset, so reading terms after the loop reports
+            # the NEXT episode's start, not this policy's achievement.
+            angle_rem = (TARGET_FACE_ANGLE - angle).clamp(min=0)
+            cfg_r = base.reward_config
+            last_terms = {
+                "rotator_reach": float(
+                    cfg_r.weight_rotator_reach * (1 - torch.tanh(5 * d_rot)).mean()
+                ),
+                "holder_reach": float(
+                    cfg_r.weight_holder_reach * (1 - torch.tanh(5 * d_hold)).mean()
+                ),
+                "grasp": float(cfg_r.weight_grasp * grasped.mean()),
+                "angle_progress": float(
+                    cfg_r.weight_angle_progress * (1 - torch.tanh(2 * angle_rem)).mean()
+                ),
+            }
             if step == args.steps:
                 break
 
@@ -129,22 +147,26 @@ def main() -> int:
                     actions[uid] = a.get_action(pi, deterministic=True)
             raw_obs, _, _, _, _ = env.step(actions)
 
-    print("\nreward terms at the FINAL state (weights from callosum.configs.face_turn):")
-    cfg_r = base.reward_config
-    d_rot = torch.linalg.norm(base.agent_b.tcp_pos - base.face_link.pose.p, dim=1)
-    d_hold = torch.linalg.norm(base.agent_a.tcp_pos - base.cube.pose.p, dim=1)
-    angle_rem = (1.5708 - base.face_link.joint.qpos.squeeze(-1)).clamp(min=0)
-    terms = {
-        "rotator_reach": cfg_r.weight_rotator_reach * (1 - torch.tanh(5 * d_rot)).mean(),
-        "holder_reach": cfg_r.weight_holder_reach * (1 - torch.tanh(5 * d_hold)).mean(),
-        "grasp": cfg_r.weight_grasp * base.agent_b.is_grasping(base.face_link).float().mean(),
-        "angle_progress": cfg_r.weight_angle_progress * (1 - torch.tanh(2 * angle_rem)).mean(),
-    }
-    for k, v in terms.items():
-        print(f"  {k:16} {float(v):+8.4f}")
-    print(f"  {'TOTAL (no drift)':16} {float(sum(terms.values())):+8.4f}")
-    print(f"  {'at rest pose':16} {0.108:+8.4f}   <- doing nothing at all")
-    print(f"  {'scripted success':16} {3.097:+8.4f}   <- solved, from smoke_face_turn.py")
+    print("\nreward terms at the last step BEFORE the episode reset:")
+    for k, v in last_terms.items():
+        print(f"  {k:16} {v:+8.4f}")
+    total = sum(last_terms.values())
+    # ManiSkill's default reward_mode is "normalized_dense" (first entry of
+    # BaseEnv.SUPPORTED_REWARD_MODES), so the trainer's train/return and
+    # eval/return are compute_dense_reward divided by the sum of the positive
+    # term weights. Printing both scales avoids comparing one against the other,
+    # which is exactly the mistake that produced a wrong diagnosis on 2026-08-30.
+    norm = (
+        base.reward_config.weight_rotator_reach
+        + base.reward_config.weight_grasp
+        + base.reward_config.weight_angle_progress
+        + base.reward_config.weight_holder_reach
+    )
+    print(f"  {'TOTAL (raw)':16} {total:+8.4f}")
+    print(f"  {'TOTAL (normalized)':16} {total / norm:+8.4f}   <- the scale train/return uses")
+    print()
+    print(f"  {'rest pose':22} raw {0.108:+7.4f}  normalized {0.108 / norm:+7.4f}")
+    print(f"  {'scripted success':22} raw {3.097:+7.4f}  normalized {3.097 / norm:+7.4f}")
 
     env.close()
     return 0

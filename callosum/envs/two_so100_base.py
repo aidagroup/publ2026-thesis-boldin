@@ -27,7 +27,11 @@ from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner
 CUBE_HALF_SIZE = 0.0285
 
 
-@register_env("TwoSO100-v0", max_episode_steps=100)
+# 300, not 100: measured on 2026-08-30, the trained FaceTurn policy needs ~90
+# steps just to bring both tool centre points from the rest pose (0.37 m) to
+# 0.07 m from the cube, and was still improving when the episode ended. An
+# episode has to leave room for approach AND grasp AND the quarter turn.
+@register_env("TwoSO100-v0", max_episode_steps=300)
 class TwoSO100Base(BaseEnv):
     """Two SO-100 arms around a table with a single loose cube.
 
