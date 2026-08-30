@@ -11,6 +11,12 @@
 #   * /tmp is usually wiped when the pod restarts -> this script is idempotent
 #     and cheap to re-run; only the sources in $HOME survive.
 set -euo pipefail
+# NOTE: with `set -e` + `pipefail`, an assignment like `X=$(find ... | head -1)`
+# KILLS the script silently when find hits an unreadable directory, or when head
+# closes the pipe early and find takes SIGPIPE. Every such substitution below
+# therefore ends in `|| true` and is checked explicitly afterwards. This is not
+# defensive noise: it cost one round trip when the Vulkan section exited without
+# printing a single line.
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '   \033[32m✓\033[0m %s\n' "$*"; }
@@ -26,7 +32,7 @@ need_gb=40
 WORK=""
 for d in /tmp /scratch /data /workspace; do
     [ -d "$d" ] && [ -w "$d" ] || continue
-    free_gb=$(df -BG --output=avail "$d" 2>/dev/null | tail -1 | tr -dc '0-9')
+    free_gb=$(df -BG --output=avail "$d" 2>/dev/null | tail -1 | tr -dc '0-9' || true)
     [ -n "${free_gb:-}" ] || continue
     printf '   %-12s %s GB free\n' "$d" "$free_gb"
     if [ -z "$WORK" ] && [ "$free_gb" -ge "$need_gb" ]; then
@@ -37,7 +43,7 @@ done
 mkdir -p "$WORK"/{venv,uv-cache,hf,maniskill}
 ok "using $WORK"
 
-home_free=$(df -BG --output=avail "$HOME" 2>/dev/null | tail -1 | tr -dc '0-9')
+home_free=$(df -BG --output=avail "$HOME" 2>/dev/null | tail -1 | tr -dc '0-9' || true)
 [ "${home_free:-99}" -lt 5 ] && warn "\$HOME has only ${home_free} GB free — keep runs/ small, checkpoints add up"
 
 # ── 2. Environment: everything heavy points at scratch ────────────────────────
@@ -140,7 +146,7 @@ else
     LIBCUDA=""
     # ldconfig knows where the runtime actually put it; fall back to the usual spots.
     if command -v ldconfig > /dev/null 2>&1; then
-        LIBCUDA=$(ldconfig -p 2>/dev/null | awk '/libcuda\.so\.1/ {print $NF; exit}')
+        LIBCUDA=$(ldconfig -p 2>/dev/null | awk '/libcuda\.so\.1/ {print $NF; exit}' || true)
     fi
     if [ -z "$LIBCUDA" ] || [ ! -e "$LIBCUDA" ]; then
         for c in /usr/lib/x86_64-linux-gnu/libcuda.so.1 \
@@ -176,12 +182,14 @@ if [ -n "${VK_ICD_FILENAMES:-}" ] && [ -f "${VK_ICD_FILENAMES%%:*}" ]; then
 elif [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
     ok "system ICD present"
 else
-    ICD=$(find /usr/share /etc /opt -name 'nvidia_icd*.json' 2>/dev/null | head -1)
-    if [ -z "$ICD" ]; then
-        LIBGLX=$(ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ {print $NF; exit}')
+    # No hunting for someone else's manifest: the Vulkan loader already scans the
+    # standard directories, so if a working one existed there we would not be here.
+    # A stale manifest found elsewhere would just reproduce the failure.
+    {
+        LIBGLX=$(ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ {print $NF; exit}' || true)
         if [ -z "$LIBGLX" ] || [ ! -e "$LIBGLX" ]; then
             LIBGLX=$(find /usr/lib /usr/lib64 /usr/local -maxdepth 4 \
-                          -name 'libGLX_nvidia.so.0' 2>/dev/null | head -1)
+                          -name 'libGLX_nvidia.so.0' 2>/dev/null | head -1 || true)
         fi
         [ -n "$LIBGLX" ] || die "libGLX_nvidia.so.0 not found — the pod needs NVIDIA_DRIVER_CAPABILITIES to include 'graphics' (see scripts/diagnose_vulkan.sh)"
         mkdir -p "$WORK/vulkan/icd.d"
@@ -198,9 +206,7 @@ else
 }
 JSON
         ok "wrote $ICD -> $LIBGLX"
-    else
-        ok "found existing manifest: $ICD"
-    fi
+    }
     export VK_ICD_FILENAMES="$ICD"
     # SAPIEN's _ensure_vulkan_icd() returns early when this is set, so ours wins
     # over its bundled fallback (which points at a library that is not here).
