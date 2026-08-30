@@ -61,6 +61,10 @@ class FaceTurn(TwoSO100Base):
 
         self.cube = build_turntable_cube(self.scene, name="turntable_cube")
         self.face_link = self.cube.links_map["face"]
+        # The holder grips the body link, not the articulation as a whole:
+        # is_grasping takes an Actor or a Link, and contact must be measured
+        # against the part that is actually being held.
+        self.body_link = self.cube.links_map["body"]
 
         # Filled in per env_idx in _initialize_episode; used by evaluate() and
         # compute_dense_reward() to detect body drift from its initial pose.
@@ -114,8 +118,12 @@ class FaceTurn(TwoSO100Base):
         holder_to_body = torch.linalg.norm(self.agent_a.tcp_pos - self.cube.pose.p, dim=1)
         holder_reach = 1 - torch.tanh(5 * holder_to_body)
 
-        # (b) grasping the face.
+        # (b) grasping: rotator on the face, holder on the body. Both are needed
+        # and both are rewarded -- the holder's grip is what makes the face
+        # turnable at all, since the reaction torque would otherwise just spin
+        # the free-floating cube.
         is_grasped = self.agent_b.is_grasping(self.face_link)
+        holder_grasped = self.agent_a.is_grasping(self.body_link)
 
         # (c) progress of the face angle toward the target. Shape (and the
         # 2.0 scale) matches turn_faucet.py's own (commented-out, unshipped)
@@ -149,6 +157,7 @@ class FaceTurn(TwoSO100Base):
         return (
             cfg.weight_rotator_reach * rotator_reach
             + cfg.weight_grasp * is_grasped
+            + cfg.weight_holder_grasp * holder_grasped
             + cfg.weight_angle_progress * angle_progress
             + cfg.weight_holder_reach * holder_reach
             - cfg.weight_body_pos_drift * pos_drift
@@ -163,6 +172,7 @@ class FaceTurn(TwoSO100Base):
         max_reward = (
             cfg.weight_rotator_reach
             + cfg.weight_grasp
+            + cfg.weight_holder_grasp
             + cfg.weight_angle_progress
             + cfg.weight_holder_reach
         )

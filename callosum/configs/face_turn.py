@@ -13,7 +13,15 @@ class FaceTurnRewardConfig:
 
     # Term weights.
     weight_rotator_reach: float = 1.0
+    # Rotator grasping the face.
     weight_grasp: float = 1.0
+    # Holder grasping the BODY. Without this the holder has no positive
+    # signal for its actual job -- stabilising the cube so the face can be
+    # turned without the whole body spinning. Measured on 2026-08-30: with
+    # reach-only terms both arms learned to hover ~7 cm away and never make
+    # contact, because touching risks the drift penalty and nothing paid for
+    # the risk. The task needs a reward staircase: approach, grip, turn.
+    weight_holder_grasp: float = 1.0
     weight_angle_progress: float = 3.0
     weight_holder_reach: float = 1.0
     # Separate weights: position (m) and rotation (rad) drift are not on
