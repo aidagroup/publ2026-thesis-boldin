@@ -127,7 +127,7 @@ def main(args: IPPOConfig) -> None:
 
     print(f"agents: {agent_uids}")
     writer = SummaryWriter(f"runs/{run_name}")
-    metrics = MetricLogger(writer)
+    metric_log = MetricLogger(writer)
     hyperparams_table = "\n".join(f"|{k}|{v}|" for k, v in vars(args).items())
     writer.add_text("hyperparameters", f"|param|value|\n|-|-|\n{hyperparams_table}")
 
@@ -238,7 +238,7 @@ def main(args: IPPOConfig) -> None:
                         eval_metrics[k].append(v)
             for k, v in eval_metrics.items():
                 mean = torch.stack(v).float().mean()
-                metrics.log(f"eval/{k}", mean, global_step)
+                metric_log.log(f"eval/{k}", mean, global_step)
                 print(f"  eval_{k}_mean={mean:.4f}")
             print(
                 f"  evaluated {args.num_eval_steps * args.num_eval_envs} steps,"
@@ -325,7 +325,7 @@ def main(args: IPPOConfig) -> None:
                 final_info = infos["final_info"]
                 done_mask = infos["_final_info"]
                 for k, v in final_info["episode"].items():
-                    metrics.log(f"train/{k}", v[done_mask].float().mean(), global_step)
+                    metric_log.log(f"train/{k}", v[done_mask].float().mean(), global_step)
                 with torch.no_grad():
                     for i in range(2):
                         final_obs_i = bijepa_step(
@@ -372,7 +372,7 @@ def main(args: IPPOConfig) -> None:
             b_values = values_buf[i].reshape(-1)
 
             agents[i].train()
-            metrics = ppo_update(
+            update_metrics = ppo_update(
                 agents[i],
                 optimizers[i],
                 b_obs,
@@ -383,8 +383,8 @@ def main(args: IPPOConfig) -> None:
                 b_values,
                 args,
             )
-            for k, v in metrics.items():
-                metrics.log(f"losses/{uid}/{k}", v, global_step)
+            for k, v in update_metrics.items():
+                metric_log.log(f"losses/{uid}/{k}", v, global_step)
 
         # Bi-JEPA auxiliary update: train the shared encoder+predictor on the
         # JEPA aux loss (predict z_j from the agent's own latent), separate
@@ -407,7 +407,7 @@ def main(args: IPPOConfig) -> None:
         if args.bijepa.ema_target:
             bijepa.ema_update()
         jepa_loss_val = (jepa_aux_loss / 2).item()
-        metrics.log("losses/jepa_loss", jepa_loss_val, global_step)
+        metric_log.log("losses/jepa_loss", jepa_loss_val, global_step)
         # Б3 collapse diagnostics: alongside the JEPA loss, log the per-latent
         # std of z_i (current) and z_j (CTDE target) and the mean |z_hat| of
         # the predictor output. A jepa_loss that "decreases" while z_std -> 0
@@ -417,27 +417,29 @@ def main(args: IPPOConfig) -> None:
                 z_i_std = torch.stack(z_i_list[i]).std(0).mean().item()
                 z_j_std = torch.stack(z_j_list[i]).std(0).mean().item()
                 z_hat_abs = torch.stack(z_hat_list[i]).abs().mean().item()
-                metrics.log(f"bijepa/{uid}/z_i_std", z_i_std, global_step)
-                metrics.log(f"bijepa/{uid}/z_j_std", z_j_std, global_step)
-                metrics.log(f"bijepa/{uid}/z_hat_abs", z_hat_abs, global_step)
+                metric_log.log(f"bijepa/{uid}/z_i_std", z_i_std, global_step)
+                metric_log.log(f"bijepa/{uid}/z_j_std", z_j_std, global_step)
+                metric_log.log(f"bijepa/{uid}/z_hat_abs", z_hat_abs, global_step)
         update_time = time.time() - update_time
 
         sps = int(global_step / (time.time() - start_time))
-        line = metrics.iteration_line(iteration, args.num_iterations, global_step, sps)
+        metric_log.log("charts/SPS", sps, global_step)
+        metric_log.log("time/rollout_time", rollout_time, global_step)
+        metric_log.log("time/update_time", update_time, global_step)
         if bar.disable:
-            print(line, flush=True)
+            print(
+                metric_log.iteration_line(iteration, args.num_iterations, global_step, sps),
+                flush=True,
+            )
         else:
-            bar.set_postfix(metrics.headline())
-        metrics.log("charts/SPS", sps, global_step)
-        metrics.log("time/rollout_time", rollout_time, global_step)
-        metrics.log("time/update_time", update_time, global_step)
+            bar.set_postfix(metric_log.headline())
 
     if args.save_model:
         for i, uid in enumerate(agent_uids):
             torch.save(agents[i].state_dict(), f"runs/{run_name}/agent_{uid}_final_ckpt.pt")
         torch.save(bijepa.state_dict(), f"runs/{run_name}/bijepa_final_ckpt.pt")
     bar.close()
-    print(metrics.summary(), flush=True)
+    print(metric_log.summary(), flush=True)
     writer.close()
     envs.close()
     eval_envs.close()

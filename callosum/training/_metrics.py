@@ -51,14 +51,12 @@ class MetricLogger:
     def __init__(self, writer=None, headline: Iterable[str] = HEADLINE_TAGS):
         self._writer = writer
         self._headline = tuple(headline)
-        self._current: dict[str, float] = {}
         self._history: dict[str, list[float]] = {}
 
     def log(self, tag: str, value, step: int) -> None:
         v = _as_float(value)
         if self._writer is not None:
             self._writer.add_scalar(tag, v, step)
-        self._current[tag] = v
         self._history.setdefault(tag, []).append(v)
 
     def headline(self) -> dict[str, str]:
@@ -75,10 +73,9 @@ class MetricLogger:
         return out
 
     def iteration_line(self, iteration: int, total: int, global_step: int, sps: float) -> str:
-        """One compact line per iteration, then reset the per-iteration store."""
+        """One compact line per iteration, for logs where the bar is disabled."""
         parts = [f"iter {iteration}/{total}", f"step {global_step}", f"sps {sps:.0f}"]
         parts += [f"{k} {v}" for k, v in self.headline().items()]
-        self._current.clear()
         return " | ".join(parts)
 
     def summary(self) -> str:
