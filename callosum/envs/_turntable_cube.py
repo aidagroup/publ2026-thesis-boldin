@@ -111,4 +111,10 @@ def build_turntable_cube(
         damping=2.0,
     )
 
+    # Without this the builder defaults to p=[0,0,0] -- the cube half-buried in
+    # the table at build time -- and mani_skill warns that the initial pose may
+    # collide with other objects. Match the nominal placement used per episode
+    # (TwoSO100Base._initialize_episode puts it at z=CUBE_HALF_SIZE with a small
+    # xy jitter); the per-episode set_pose still overrides this.
+    builder.initial_pose = sapien.Pose(p=[0, 0, cube_half_size])
     return builder.build(name=name, fix_root_link=False)

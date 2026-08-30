@@ -378,7 +378,7 @@ cat <<TXT
    Next, in a TERMINAL (File -> New -> Terminal), not a notebook cell:
 
      cd $REPO_ROOT
-     bash scripts/setup_jupyterhub.sh --smoke      # if not done yet
+     source .callosum-env.sh        # REQUIRED: venv location, libcuda, Vulkan loader
 
      nohup uv run python -m callosum.training.ippo \\
          --env-id TwoSO100-v0 --total-timesteps 50000 \\
