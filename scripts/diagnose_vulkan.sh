@@ -55,6 +55,22 @@ else
     echo "  libGLX_nvidia.so.0 not present — nothing to check"
 fi
 
+hr "NVIDIA Vulkan support libraries (ldd cannot see these)"
+# libGLX_nvidia.so.0 pulls its Vulkan back-end in with dlopen() at init time, so
+# those files are NOT DT_NEEDED entries and `ldd` reports "all resolved" even when
+# they are missing. The loader then says:
+#   Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'
+# libnvidia-glvkspirv (the SPIR-V shader compiler) is the one that matters.
+NV_LIBDIR=$(dirname "${LIBGLX:-/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0}")
+MISSING_VK=""
+for want in libnvidia-glvkspirv libnvidia-glcore libnvidia-eglcore libnvidia-tls libnvidia-ml; do
+    hit=$(ls -1 "$NV_LIBDIR" 2>/dev/null | grep -m1 "^${want}\." || true)
+    if [ -n "$hit" ]; then printf '  %-24s ✓ %s\n' "$want" "$hit"
+    else printf '  %-24s ✗ MISSING\n' "$want"; MISSING_VK="$MISSING_VK $want"; fi
+done
+echo "  (all NVIDIA libs present in $NV_LIBDIR:)"
+ls -1 "$NV_LIBDIR" 2>/dev/null | grep -i '^libnvidia' | sed 's/^/    /' | head -30
+
 hr "ICD manifests (a manifest existing proves nothing)"
 ICD_REPORT=""
 for d in /usr/share/vulkan/icd.d /etc/vulkan/icd.d; do
@@ -120,6 +136,7 @@ echo "caps=$CAPS  visible=$VISIBLE"
 echo "gpu=${GPU:-none}"
 echo "libGLX=${LIBGLX:-MISSING}"
 echo "unresolved_deps=${LDD_MISSING:-none}"
+echo "missing_vk_libs=${MISSING_VK:-none}"
 echo "dev_nodes=${DEV_NODES:-none}"
 echo "icd:${ICD_REPORT:- none found}"
 echo "vk_icd_filenames=${VK_ICD_FILENAMES:-unset}"
