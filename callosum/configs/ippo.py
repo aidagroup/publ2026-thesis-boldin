@@ -44,7 +44,11 @@ class IPPOConfig:
     num_envs: int = 256  # conservative default per the plan; raise on the server
     num_eval_envs: int = 8
     num_steps: int = 50
-    num_eval_steps: int = 50
+    # Must be >= the env's max_episode_steps (100 for both TwoSO100-v0 and
+    # FaceTurn-v0), otherwise NO episode ever finishes inside the eval window
+    # and every eval reports "0 episodes" -- the whole eval/* metric block
+    # stays empty, as it did on 2026-08-30 with the previous default of 50.
+    num_eval_steps: int = 100
     reconfiguration_freq: int | None = None
     eval_reconfiguration_freq: int | None = 1
     partial_reset: bool = True
