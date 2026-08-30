@@ -165,15 +165,26 @@ class FaceTurn(TwoSO100Base):
         )
 
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        return (
+            self.compute_dense_reward(obs=obs, action=action, info=info)
+            / self.reward_normalization_divisor
+        )
+
+    @property
+    def reward_normalization_divisor(self) -> float:
+        """Sum of the POSITIVE term weights -- what normalized_dense divides by.
+
+        Single source of truth: the trainer logs this with the run, because any
+        change to it silently rescales train/return and makes runs incomparable.
+        The drift weights are deliberately excluded (they are unbounded penalties,
+        ~0 in the successful case this normalization targets), which is exactly
+        the subtlety that makes recomputing it elsewhere error-prone.
+        """
         cfg = self.reward_config
-        # Sum of the positive, bounded ([0, 1]-ish) term weights; the drift
-        # penalty is excluded since it is unbounded and ~0 in the successful
-        # (no-drift) case this normalization targets.
-        max_reward = (
+        return (
             cfg.weight_rotator_reach
             + cfg.weight_grasp
             + cfg.weight_holder_grasp
             + cfg.weight_angle_progress
             + cfg.weight_holder_reach
         )
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

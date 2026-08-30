@@ -128,7 +128,22 @@ def main(args: IPPOConfig) -> None:
     print(f"agents: {agent_uids}")
     writer = SummaryWriter(f"runs/{run_name}")
     metric_log = MetricLogger(writer)
-    hyperparams_table = "\n".join(f"|{k}|{v}|" for k, v in vars(args).items())
+    # Record the ENV's reward weights too, not just IPPOConfig. Without them a
+    # run cannot be reproduced or even compared: compute_normalized_dense_reward
+    # divides by the sum of the positive weights, so changing any weight silently
+    # rescales train/return and makes it incomparable with earlier runs (this bit
+    # us on 2026-08-30, when adding weight_holder_grasp moved the divisor 6 -> 7).
+    hyperparams = dict(vars(args))
+    reward_cfg = getattr(envs.unwrapped, "reward_config", None)
+    if reward_cfg is not None:
+        hyperparams |= {f"reward.{k}": v for k, v in vars(reward_cfg).items()}
+        # Read the divisor off the env; recomputing it here once produced 17
+        # instead of 7 by summing the drift penalties too.
+        divisor = getattr(envs.unwrapped, "reward_normalization_divisor", None)
+        if divisor is not None:
+            hyperparams["reward.normalization_divisor"] = divisor
+        print(f"reward weights: {vars(reward_cfg)}")
+    hyperparams_table = "\n".join(f"|{k}|{v}|" for k, v in hyperparams.items())
     writer.add_text("hyperparameters", f"|param|value|\n|-|-|\n{hyperparams_table}")
 
     next_raw_obs, _ = envs.reset(seed=args.seed)
