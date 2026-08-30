@@ -189,73 +189,77 @@ say "Vulkan ICD"
 
 VENV_PY="$UV_PROJECT_ENVIRONMENT/bin/python"
 MESA_PREFIX="$WORK/mesa"
+BASE_LD="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# $1 = ICD manifest, $2 = Vulkan loader (empty = whichever SAPIEN picks itself).
-# SAPIEN reads SAPIEN_VULKAN_LIBRARY_PATH; it only sets that variable when it
-# cannot find a system libvulkan, so setting it ourselves overrides its choice.
+# $1 = ICD manifest, $2 = extra dir prepended to LD_LIBRARY_PATH (empty = none).
+# The loader is chosen by the DYNAMIC linker, so it has to come from
+# LD_LIBRARY_PATH. SAPIEN_VULKAN_LIBRARY_PATH looks like the right knob but is
+# ignored when a system libvulkan exists — verified on this pod.
 try_icd() {
     [ -x "$VENV_PY" ] || return 1
-    VK_ICD_FILENAMES="$1" SAPIEN_VULKAN_LIBRARY_PATH="${2:-}" "$VENV_PY" -c \
-        "from sapien.render import RenderMaterial; RenderMaterial()" > /dev/null 2>&1
+    VK_ICD_FILENAMES="$1" \
+    LD_LIBRARY_PATH="${2:+$2:}$BASE_LD" \
+    "$VENV_PY" -c "from sapien.render import RenderMaterial; RenderMaterial()" > /dev/null 2>&1
 }
 
 install_mesa() {
     [ -d "$MESA_PREFIX" ] && return 0
     command -v conda > /dev/null 2>&1 || return 1
-    warn "installing lavapipe + a current Vulkan loader into $MESA_PREFIX"
+    warn "installing a current Vulkan loader (+ lavapipe) into $MESA_PREFIX"
     conda create -y -q -p "$MESA_PREFIX" -c conda-forge mesalib vulkan-tools > /dev/null 2>&1
 }
+install_mesa || warn "conda unavailable — limited to the system Vulkan loader"
 
-ICD=""; LOADER=""
-attempt() {  # $1 = manifest, $2 = loader, $3 = human label
+# A directory holding ONLY the loader symlink. Prepending the whole conda lib
+# directory would also put its libstdc++/libgcc ahead of the system ones, which
+# can break torch; this exposes exactly one file.
+VKLIB=""
+if [ -e "$MESA_PREFIX/lib/libvulkan.so.1" ]; then
+    VKLIB="$WORK/vklib"
+    mkdir -p "$VKLIB"
+    ln -sfn "$MESA_PREFIX/lib/libvulkan.so.1" "$VKLIB/libvulkan.so.1"
+fi
+
+ICD=""; LDX=""
+attempt() {  # $1 = manifest, $2 = extra lib dir, $3 = label
     [ -e "$1" ] || return 1
-    if try_icd "$1" "$2"; then
-        ICD="$1"; LOADER="$2"; ok "render device via $3"; return 0
-    fi
-    return 1
+    try_icd "$1" "$2" || return 1
+    ICD="$1"; LDX="$2"; ok "render device via $3"
 }
 
-# Preference order. Hardware first: the NVIDIA driver here is healthy but its ICD
-# refuses to negotiate with the OLD system loader (vkCreateInstance comes back
-# NULL), while a current loader drives it fine -- vulkaninfo from conda enumerates
-# the A100. Software rasterisation is the last resort; it is perfectly adequate
-# because we never render a frame (physics runs on the GPU via PhysX), but the
-# real device costs nothing when it works and phase 4 will need it.
-for pass in system conda; do
-    if [ "$pass" = "conda" ]; then
-        install_mesa || break
-        NEW_LOADER="$MESA_PREFIX/lib/libvulkan.so.1"
-        [ -e "$NEW_LOADER" ] || break
-    else
-        NEW_LOADER=""
-    fi
-    for cand in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
-        attempt "$cand" "$NEW_LOADER" "$(basename "$cand") + ${pass} loader" && break 2
-    done
+# Order matters. Hardware first: the system loader here is 1.3.275 (2024) and is
+# too old to negotiate with the 570.x NVIDIA ICD — vkCreateInstance comes back
+# NULL — while a current loader drives the A100 fine. Software rasterisation
+# (lavapipe) is the last resort: adequate, since we never render a frame, but it
+# would not survive phase 4 (vision).
+for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
+    [ -e "$icd" ] || continue
+    n=$(basename "$icd")
+    attempt "$icd" "$VKLIB"     "$n + current loader" && break
+    attempt "$icd" ""           "$n + system loader"  && break
+    attempt "$icd" "$MESA_PREFIX/lib" "$n + full conda lib dir" && break
 done
 
-# Still nothing: software rasteriser.
-if [ -z "$ICD" ] && install_mesa; then
-    for cand in "$MESA_PREFIX"/share/vulkan/icd.d/*.json; do
-        attempt "$cand" "$MESA_PREFIX/lib/libvulkan.so.1" "$(basename "$cand") (software rasteriser)" && break
-        attempt "$cand" "" "$(basename "$cand") (software rasteriser, system loader)" && break
+if [ -z "$ICD" ]; then
+    for icd in "$MESA_PREFIX"/share/vulkan/icd.d/*.json; do
+        [ -e "$icd" ] || continue
+        n=$(basename "$icd")
+        attempt "$icd" "$VKLIB" "$n (software rasteriser)" && break
+        attempt "$icd" ""       "$n (software rasteriser, system loader)" && break
     done
 fi
 
 [ -n "$ICD" ] || die "no Vulkan ICD yields a render device — run scripts/diagnose_vulkan.sh, see docs/jupyterhub-runbook.md"
+export LD_LIBRARY_PATH="${LDX:+$LDX:}$BASE_LD"
 
 export VK_ICD_FILENAMES="$ICD"
-export SAPIEN_VULKAN_LIBRARY_PATH="$LOADER"
-for var in VK_ICD_FILENAMES SAPIEN_VULKAN_LIBRARY_PATH; do
-    eval "val=\$$var"
-    if grep -q "^export $var=" "$PROFILE" 2>/dev/null; then
-        sed -i "s|^export $var=.*|export $var=$val|" "$PROFILE"
-    else
-        echo "export $var=$val" >> "$PROFILE"
-    fi
-done
+if grep -q '^export VK_ICD_FILENAMES=' "$PROFILE" 2>/dev/null; then
+    sed -i "s|^export VK_ICD_FILENAMES=.*|export VK_ICD_FILENAMES=$ICD|" "$PROFILE"
+else
+    echo "export VK_ICD_FILENAMES=$ICD" >> "$PROFILE"
+fi
 ok "VK_ICD_FILENAMES=$ICD"
-[ -n "$LOADER" ] && ok "SAPIEN_VULKAN_LIBRARY_PATH=$LOADER"
+[ -n "$LDX" ] && ok "Vulkan loader from $LDX"
 
 # ── 4e. A sourceable env file ────────────────────────────────────────────────
 # ~/.bashrc only helps shells started AFTER setup ran, and not at all for
@@ -272,9 +276,8 @@ export PATH="\$HOME/.local/bin:\$PATH"
 export UV_PROJECT_ENVIRONMENT="$UV_PROJECT_ENVIRONMENT"
 export UV_CACHE_DIR="$UV_CACHE_DIR"
 export HF_HOME="$HF_HOME"
-export LD_LIBRARY_PATH="$SHIM_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${LDX:+$LDX:}$SHIM_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 export VK_ICD_FILENAMES="$VK_ICD_FILENAMES"
-export SAPIEN_VULKAN_LIBRARY_PATH="$SAPIEN_VULKAN_LIBRARY_PATH"
 ENVEOF
 ok "wrote $ENV_FILE"
 
