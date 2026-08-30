@@ -38,24 +38,40 @@ dev = [
 # build-system). That keeps `import callosum` working identically everywhere — pytest,
 # scripts/*.py, notebooks, and on the server — instead of depending on cwd/sys.path.
 
-# NOTE — do NOT constrain setuptools>=83 (and do not merge Dependabot's bump of it).
-# torch 2.11.0 requires setuptools<82, so forcing 83 silently DOWNGRADES torch
-# 2.11.0 -> 2.10.0 (plus torchvision/cudnn/nccl). The advisory it would fix
+# NOTE — do NOT constrain setuptools>=83 (and do not merge Dependabot's bump of it)
+# without re-checking what it does to torch. This bit us once: torch 2.11.0
+# required setuptools<82, so forcing 83 silently DOWNGRADED torch
+# 2.11.0 -> 2.10.0 (plus torchvision/cudnn/nccl). We are on torch 2.13.0 now and
+# setuptools stays at 81.0.0; re-verify the resolved torch version after any
+# setuptools bump. The advisory it would fix
 # (GHSA-h35f-9h28-mq5c) targets sdist building in setuptools; we build with hatchling
 # and never publish an sdist, so it does not apply. Revisit when torch drops the pin.
 # See docs/setup.md ("CUDA index") for the related torch/CUDA ceiling.
 
-# PyTorch wheels: CUDA 12.8 build on the Linux server (RTX 5090 / Blackwell needs cu128+);
-# on macOS (dev, no GPU sim) torch resolves from PyPI as the CPU/MPS build.
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
-]
+# PyTorch wheels: resolved from PyPI on every platform.
+#
+# This used to force the cu128 index on Linux, because the planned server was an
+# RTX 5090 (Blackwell, sm_120) and Blackwell needs CUDA >= 12.8, which PyPI's
+# default wheel did not yet carry. Two things changed:
+#
+#   1. The actual server is an NVIDIA A100 (sm_80, Ampere). Every modern CUDA
+#      build supports sm_80, so no special index is needed for it.
+#   2. The lab network cannot reach the wheels anyway: download.pytorch.org
+#      answers, but redirects wheel downloads to download-r2.pytorch.org
+#      (Cloudflare R2), which the egress filter blocks. PyPI and
+#      files.pythonhosted.org are reachable, so PyPI is the only workable source.
+#
+# PyPI's torch wheel is a CUDA build; the CUDA runtime arrives through its
+# nvidia-* dependencies, also on PyPI. To go back to a pinned CUDA index (e.g.
+# for a Blackwell box on an unrestricted network), restore:
+#
+#   [[tool.uv.index]]
+#   name = "pytorch-cu128"
+#   url = "https://download.pytorch.org/whl/cu128"
+#   explicit = true
+#
+#   [tool.uv.sources]
+#   torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
 [tool.ruff]
 line-length = 100
