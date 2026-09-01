@@ -72,7 +72,7 @@ in `success` the scene is unsolvable and training is wasted GPU time.
 | Question | Where | If it fails |
 |---|---|---|
 | Does the gripper actually close on a handle? | `probe_grasp.py` | the aperture table at the top of its output vs `_turntable_cube.HANDLE_HALF_WIDTH` |
-| Can both arms reach their top-down grasp poses? | `probe_grasp.py` | the `rot→face` / `hold→body` columns should reach a few mm; if not, re-solve the waypoints or shrink `two_so100_base.ARM_BASE_OFFSET` |
+| Can both arms reach their top-down grasp poses? | `probe_grasp.py` | the `rot→face` / `hold→body` columns should reach a few mm once the jaws close, and the script prints `!!` if not. `uv run --extra dev pytest tests/test_grasp_waypoints.py` checks the same thing locally, with no GPU — run it before burning a server slot |
 | Are the joint friction/damping sane at cube scale? | `probe_grasp.py` | `angle` stuck at 0 with `grasped` at 1 → lower `FACE_JOINT_DAMPING` in `_turntable_cube.py` |
 | Does the holder actually stop the body from spinning? | `probe_grasp.py` | `dpos`/`drot` climbing during the turn phase → the body handle or the holder's grip |
 | Does the face articulation look/behave right (no jitter, face sits on the body)? | `smoke_face_turn.py` | check `disable_self_collisions`; review the joint pose |

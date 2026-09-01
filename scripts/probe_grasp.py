@@ -11,30 +11,34 @@ Two independent checks:
 
   1. Gripper aperture. Sweeps the gripper joint over its full [-1.1, 1.1]
      range and reports the measured jaw-tip separation. Compare against the
-     handle width: `callosum.envs._turntable_cube.HANDLE_HALF_WIDTH`.
-  2. Scripted grasp-and-turn. READY_QPOS -> pre-grasp -> grasp -> close ->
-     quarter turn, printing the reach distances, both `is_grasping` flags,
-     the face angle and the body drift at every phase boundary. If this does
-     not reach `success`, no amount of RL will.
+     handle width: `callosum.envs._cube_geometry.HANDLE_HALF_WIDTH`.
+  2. Scripted grasp-and-turn. READY_QPOS -> pre-grasp -> grasp -> hold ->
+     close -> quarter turn, printing the reach distances, both `is_grasping`
+     flags, the face angle and the body drift at every phase boundary. If this
+     does not reach `success`, no amount of RL will.
 
-The waypoints below are joint configurations, not end-effector poses: there is
-no IK available on the GPU backend (Articulation.create_pinocchio_model raises
-for GPU sim). They were solved offline from so100.urdf by forward kinematics +
-a refined grid search, for the exact arm placement in
-`callosum.envs.two_so100_base` (ARM_BASE_OFFSET, base yaws pi and 0).
+The waypoints come from `callosum.envs._so100_kinematics`. They are joint
+configurations, not end-effector poses, because ManiSkill has no IK on the GPU
+backend (`Articulation.create_pinocchio_model` raises when GPU sim is
+enabled) -- which also means nothing at run time checks that they still point
+at the handles. Two server rounds were lost to exactly that, both frame
+errors:
 
-The FK used to solve them runs the FULL five-joint chain. The first version of
-this script did not: it stopped at `wrist_flex`, which lands on the
-Wrist_Pitch_Roll frame, 6 cm short of `Fixed_Jaw` along the tool axis. Every
-waypoint was therefore commanded ~6 cm too low. The 2026-08-30 server run shows
-exactly that -- the rotator's "grasp" pose put its tcp at z = 0.012, below the
-cube's top face, so it jammed the jaws into the cube (a 0.69 grasp that then
-slipped, and body drift from step 75 on), and the holder's put its tcp at
-z = -0.026, below the table, so it stalled against the tabletop and never
-closed on anything. `hold->body` going 0.048 -> 0.050 during "descend" is the
-signature of that: commanding an unreachable pose makes the arm worse, not
-better. The `rot->face` and `hold->body` columns are the standing check --
-they must fall to a few millimetres once the jaws close.
+  * 2026-08-30 run 1: the FK that solved them stopped at `wrist_flex`, which
+    lands on the Wrist_Pitch_Roll frame, 6 cm short of `Fixed_Jaw` along the
+    tool axis. The rotator's grasp pose put its tcp at z = 0.012, inside the
+    cube, so it jammed the jaws in (a 0.69 grasp that then slipped, plus body
+    drift from step 75); the holder's put its tcp at z = -0.026, below the
+    tabletop, so it stalled and never closed on anything.
+  * 2026-08-30 run 2: the waypoints aimed `SO100.tcp_pos` at each handle's
+    axis. The tcp is the midpoint of the jaw-TIP links, which are points ~2 mm
+    inside the fingertips, so that buried the fixed blade 2.1 mm inside the
+    handle. Both arms settled ~2.7 cm away -- the same miss on both, which is
+    the signature of a constant frame offset -- shoving the cube (dpos
+    0.012 -> 0.019) as they tried to close. `GRASP_POCKET_OFFSET` is the fix.
+
+Both are now regression-tested without a simulator, in
+tests/test_grasp_waypoints.py; the `!!` line below is the run-time backstop.
 
     uv run python scripts/probe_grasp.py
     uv run python scripts/probe_grasp.py --envs 16 --every 20
@@ -49,68 +53,45 @@ from mani_skill.utils import common
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-from callosum.envs._turntable_cube import FACE_HANDLE_HEIGHT, HANDLE_HALF_WIDTH
+from callosum.envs._cube_geometry import FACE_HANDLE_HEIGHT, HANDLE_HALF_WIDTH
+from callosum.envs._so100_kinematics import (
+    HOLDER_GRASP,
+    HOLDER_PREGRASP,
+    READY_QPOS,
+    ROTATOR_GRASP,
+    ROTATOR_PREGRASP,
+    SEATING_GRIPPER_QPOS,
+)
 from callosum.envs.face_turn import TARGET_FACE_ANGLE
-from callosum.envs.two_so100_base import READY_QPOS
-
-# Arm joint waypoints, in the SO-100's active-joint order
-# (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll).
-#
-# wrist_roll stays at pi/2 throughout the approach, the value READY_QPOS
-# already holds, so no roll travel is needed to reach either grasp. At pi/2 the
-# tool approaches straight down and the jaws close along world x -- which also
-# means the moving jaw, which swings 8 cm out along the closing axis when open,
-# swings in x rather than in y, away from the cube and away from the other arm.
-# The rotator then sweeps wrist_roll by +-pi/2 to turn the face: it is the only
-# SO-100 joint whose axis is vertical when the tool points down. Both handles
-# are square in cross-section, so the grasp itself does not depend on the roll.
-#
-# The pre-grasp waypoints sit above the grasp waypoints (1 cm for the rotator,
-# 3 cm for the holder) so the last move onto the handle is a vertical descent
-# rather than a swing that would sweep it aside.
-_ROLL = np.pi / 2
-ROTATOR_PREGRASP = np.array([0.0, 0.4398, -0.6471, 1.7782, _ROLL])
-ROTATOR_GRASP = np.array([0.0, 0.4131, -0.5303, 1.6880, _ROLL])
-HOLDER_PREGRASP = np.array([0.0, -0.3358, 0.3277, 1.5789, _ROLL])
-HOLDER_GRASP = np.array([0.0, -0.3186, 0.5349, 1.3545, _ROLL])
-
-# Where those put the tool centre point with the jaws closed on a handle
-# (gripper qpos -0.9), against the grasp targets the env's reward uses:
-#
-#   rotator grasp   tcp (0.0001, 0.0000, 0.0745)   target (0, 0,      0.0745)
-#   holder  grasp   tcp (-0.0001, -0.0800, 0.0535) target (0, -0.080, 0.0535)
-#
-# i.e. 0.1 mm on both, with the tool 0.00 deg off vertical. Clearances at those
-# poses: 3.3 cm between the two grippers (1.47 cm at the tightest point of the
-# quarter turn), 8.3 mm under the rotator's jaws to the cube's top face, 8.3 mm
-# under the holder's to its bridge and 4.4 cm to the table.
-#
-# The rotator's pre-grasp only lifts 1 cm. More is not reachable: at 1.5 cm
-# `wrist_flex` is already pinned at its 1.8 rad limit. The holder, working
-# 8 cm out from the axis instead of over it, has room for 3 cm.
 
 # Gripper joint targets. -1.1 is the URDF lower limit (jaws shut, tips 6.6 mm
-# apart); 0.0 is mani-skill's own SO-100 ready value (tips 8.4 cm apart).
-# -0.85 is where the measured aperture is ~2 cm, i.e. just touching a handle;
-# commanding the full -1.1 makes the PD drive keep squeezing after contact,
-# which is what generates the >= 0.5 N `is_grasping` needs.
+# apart); 0.0 is mani-skill's own SO-100 ready value. The handle first touches
+# both blades at SEATING_GRIPPER_QPOS (-0.842); commanding the full -1.1 makes
+# the PD drive keep squeezing past that, which is what generates the >= 0.5 N
+# `is_grasping` needs.
 GRIPPER_OPEN = 0.0
 GRIPPER_CLOSED = -1.1
 
-# Per-phase step budgets. Sum stays under FaceTurn-v0's 300-step limit.
+# (name, waypoint, holder gripper, rotator gripper, steps). The holder shuts
+# one phase before the rotator: closing on a handle shoves it by the ~2 mm of
+# approach clearance in `GRASP_POCKET_OFFSET`, and the body should be held
+# before the rotator delivers that nudge to the face. Sums to 290 of the
+# env's 300 steps.
 PHASES = [
-    ("settle", None, GRIPPER_OPEN, 10),
-    ("pregrasp", "pregrasp", GRIPPER_OPEN, 50),
-    ("descend", "grasp", GRIPPER_OPEN, 30),
-    ("close", "grasp", GRIPPER_CLOSED, 25),
-    ("turn", "grasp", GRIPPER_CLOSED, 160),
+    ("settle", None, GRIPPER_OPEN, GRIPPER_OPEN, 10),
+    ("pregrasp", "pregrasp", GRIPPER_OPEN, GRIPPER_OPEN, 50),
+    ("descend", "grasp", GRIPPER_OPEN, GRIPPER_OPEN, 30),
+    ("hold", "grasp", GRIPPER_CLOSED, GRIPPER_OPEN, 20),
+    ("close", "grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 25),
+    ("turn", "grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 155),
 ]
 
-# With the jaws closed on a handle the tcp is 0.1 mm off the tool's roll axis,
-# so a waypoint that is right leaves these distances at ~0 once "close" ends.
-# Anything above this means the waypoints no longer match the scene, and every
-# later column is meaningless -- so say so rather than let it read as a physics
-# result.
+# At a correct grasp the tcp lands 1.9 mm from the handle's axis (the handle
+# sits off the tool centreline by `GRASP_POCKET_OFFSET`, because the jaw-tip
+# links are points inside the fingertips rather than the gripping surfaces).
+# Anything much above that means the waypoints no longer match the scene, and
+# every later column is meaningless -- so say so rather than let it read as a
+# physics result. tests/test_grasp_waypoints.py checks the same thing in CI.
 WAYPOINT_TOLERANCE = 0.010
 
 # pd_joint_delta_pos limits, from SO100._controller_configs. The action space
@@ -120,26 +101,31 @@ DELTA_LIMITS = np.array([0.05, 0.05, 0.05, 0.05, 0.05, 0.2])
 
 
 def _report_aperture(base) -> None:
-    """Measure the jaw opening in sim, instead of trusting the URDF read."""
+    """Measure the jaw opening in sim, instead of trusting the URDF read.
+
+    Tip separation is an UPPER bound on what fits, and a loose one. The tip
+    links are points ~2 mm inside the fingertips, and the jaw is a hinged
+    pincer whose blades are only parallel near the middle of their travel, so
+    the free gap deeper between them is smaller. The row that matters is the
+    one at `SEATING_GRIPPER_QPOS`, where the gap at the handle's insertion
+    depth is exactly the handle width.
+    """
     print("\ngripper aperture (measured from the jaw-tip link poses)")
     print(f"  handle width to straddle: {2 * HANDLE_HALF_WIDTH * 100:.1f} cm")
-    # Tip separation is an UPPER bound on what fits: it is the mouth opening,
-    # and the usable gap deeper between the blades is smaller (the SO-100 jaw
-    # is a hinged pincer, so the two blades are only parallel near the middle
-    # of their travel).
+    print(f"  seats at gripper qpos {SEATING_GRIPPER_QPOS:+.3f}")
     print(f"  {'gripper qpos':>13} {'tip separation':>15}")
     agent = base.agent_b
     q = torch.zeros((base.num_envs, 6), device=base.device)
     q[:, :] = torch.as_tensor(READY_QPOS, dtype=q.dtype, device=base.device)
-    for g in np.linspace(-1.1, 1.1, 12):
+    for g in sorted(np.linspace(-1.1, 1.1, 12).tolist() + [SEATING_GRIPPER_QPOS]):
         q[:, 5] = float(g)
         agent.robot.set_qpos(q)
         base.scene._gpu_apply_all()
         base.scene.px.gpu_update_articulation_kinematics()
         base.scene._gpu_fetch_all()
         sep = torch.linalg.norm(agent.finger1_tip.pose.p - agent.finger2_tip.pose.p, dim=1)
-        flag = "  <- mouth clears the handle" if 2 * HANDLE_HALF_WIDTH < float(sep[0]) else ""
-        print(f"  {g:>13.2f} {float(sep[0]) * 100:>14.2f} cm{flag}")
+        flag = "  <- seating angle" if g == SEATING_GRIPPER_QPOS else ""
+        print(f"  {g:>13.3f} {float(sep[0]) * 100:>14.2f} cm{flag}")
 
 
 def _action(agent, target_arm: np.ndarray, target_grip: float, device) -> torch.Tensor:
@@ -207,7 +193,7 @@ def main() -> int:
 
     step = 0
     with torch.no_grad():
-        for name, waypoint, grip, budget in PHASES:
+        for name, waypoint, hold_grip, rot_grip, budget in PHASES:
             for i in range(budget):
                 rot_arm = (
                     ROTATOR_PREGRASP
@@ -223,8 +209,8 @@ def main() -> int:
                     if waypoint == "grasp"
                     else READY_QPOS[:5]
                 )
-                a_hold = _action(base.agent_a, hold_arm, grip, device)
-                a_rot = _action(base.agent_b, rot_arm, grip, device)
+                a_hold = _action(base.agent_a, hold_arm, hold_grip, device)
+                a_rot = _action(base.agent_b, rot_arm, rot_grip, device)
                 if name == "turn":
                     # Drive wrist_roll away from its grasp value by a quarter
                     # turn, in both directions across the env batch. Rolling

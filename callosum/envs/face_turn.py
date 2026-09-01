@@ -17,11 +17,8 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 
 from callosum.configs.face_turn import FaceTurnRewardConfig
-from callosum.envs._turntable_cube import (
-    BODY_GRASP_OFFSET,
-    FACE_GRASP_OFFSET,
-    build_turntable_cube,
-)
+from callosum.envs._cube_geometry import BODY_GRASP_OFFSET, FACE_GRASP_OFFSET
+from callosum.envs._turntable_cube import build_turntable_cube
 from callosum.envs.two_so100_base import TwoSO100Base
 
 TARGET_FACE_ANGLE = math.pi / 2  # a quarter turn

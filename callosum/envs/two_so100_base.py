@@ -8,7 +8,6 @@ stub that always reports failure.
 
 from typing import Any, ClassVar
 
-import numpy as np
 import sapien
 import torch
 from mani_skill.agents.multi_agent import MultiAgent
@@ -21,50 +20,19 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.pose import Pose
 from transforms3d.euler import euler2quat
 
+from callosum.envs._cube_geometry import CUBE_HALF_SIZE
 from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner_obs
+from callosum.envs._so100_kinematics import (
+    ARM_BASE_OFFSET,
+    HOLDER_BASE_YAW,
+    READY_QPOS,
+    ROTATOR_BASE_YAW,
+)
 
-# ~5.7 cm real Rubik's cube edge length.
-CUBE_HALF_SIZE = 0.0285
-
-# Distance of each arm's base from the table centre, along +-y.
-#
-# 0.28, not 0.30. The binding constraint is not "can the tool centre point
-# touch the cube" (it can: scripts/probe_reach.py measured 0.033 m closest
-# approach even at 0.30) but "can the WRIST be placed above the cube with the
-# tool pointing down", which is what a top-down grasp needs. Sweeping the
-# three in-plane joints of the URDF, the Fixed_Jaw origin reaches at most
-# 0.2537 m from the shoulder_pan axis at the rotator's grasp height
-# (z = 0.1717, i.e. the face post's mid-height plus the 0.0972 m from the
-# Fixed_Jaw origin down to the tool centre point), and the pan axis sits
-# 0.0452 m AHEAD of the robot base origin. Required distances:
-#
-#     base 0.30, yaws -+pi/2 (the original)   0.3034 m   short by 5.0 cm
-#     base 0.30, yaws pi / 0                  0.2548 m   short by 1.1 mm
-#     base 0.28, yaws pi / 0                  0.2348 m   1.9 cm of margin
-#
-# So the yaw fix alone is not enough at 0.30 -- it lands exactly on the
-# workspace boundary. 0.28 also survives the cube's +-1 cm spawn jitter
-# (wrist_flex stays between 1.63 and 1.77 rad against its 1.8 limit), while
-# still leaving 3.5 cm between the two grippers at the start pose.
-ARM_BASE_OFFSET = 0.28
-
-# Start configuration for both arms: mani-skill's own SO-100 ready pose, used
-# by TableSceneBuilder's "so100" branch and by SO100GraspCube-v1.
-#
-# NOT SO100.keyframes["rest"] ([0, -1.5708, 1.5708, 0.66, 0, -1.1]), which
-# this env used until 2026-08-30. Two measured problems with "rest":
-#   * qpos[5] = -1.1 is the gripper joint's LOWER limit, and the jaw tips are
-#     then 6.6 mm apart -- the arm starts with the hand CLAMPED SHUT, and
-#     nothing in the dense reward pays for opening it. Worse, SO100.tcp_pos
-#     is the midpoint of the two jaw TIPS, so the gripper joint MOVES the
-#     reach reward's own measurement point: at the "rest" arm pose, sweeping
-#     the gripper from -1.1 to +1.1 lifts the tcp by 6.5 cm, straight away
-#     from a cube whose centre is 4.75 cm off the table. Opening the hand was
-#     therefore locally reward-NEGATIVE, and `grasped` stayed 0.00.
-#   * its approach axis is 38 deg off vertical. At this pose the approach is
-#     exactly (0, 0, -1) and the wrist_roll axis exactly (0, 0, 1), which is
-#     what turning the face about a vertical axis requires.
-READY_QPOS = np.array([0, 0, 0, np.pi / 2, np.pi / 2, 0])
+# Arm placement and start pose live in `_so100_kinematics`, next to the
+# forward kinematics that justifies them and where CI can check them without a
+# simulator (tests/test_grasp_waypoints.py). The cube's dimensions likewise
+# live in `_cube_geometry`.
 
 
 # 300, not 100. The budget an optimal FaceTurn episode needs, from the
@@ -123,33 +91,14 @@ class TwoSO100Base(BaseEnv):
         return self.agent.agents[1]
 
     def _load_agent(self, options: dict):
-        # Base yaws pi and 0, NOT the panda pair's +pi/2 / -pi/2.
-        #
-        # Those yaws were copied from TableSceneBuilder's panda-pair branch,
-        # but a panda's home pose points along its own +x while the SO-100's
-        # points along its own -y (mani-skill compensates for that by giving
-        # the single-SO100 setups a base yaw of +pi/2 with the object at +x).
-        # Copying the panda numbers therefore aimed both arms 90 deg away from
-        # the cube. Two measured consequences:
-        #   * the arm had to spend ~1.57 rad of shoulder_pan, i.e. ~32 control
-        #     steps at the 0.05 rad/step delta limit, just turning around --
-        #     about a third of the ~90-step approach scripts/probe_policy.py
-        #     recorded;
-        #   * worse, the shoulder_pan axis sits 0.0452 m AHEAD of the base
-        #     origin, so a base yawed sideways puts the pan axis 0.3034 m from
-        #     the cube axis while the wrist can only reach 0.277 m at grasp
-        #     height. The rotator's wrist could not be placed above the cube
-        #     at all, so the top-down grasp the task needs was kinematically
-        #     unreachable -- which is consistent with `grasped` never once
-        #     firing across ~4M steps.
-        # With yaw pi (holder, at -y) and 0 (rotator, at +y) the arms point at
-        # the cube with shoulder_pan at 0, and the required distance drops to
-        # 0.235 m (see ARM_BASE_OFFSET).
+        # Base yaws pi and 0, NOT the panda pair's +pi/2 / -pi/2 -- see
+        # `_so100_kinematics.ARM_BASE_OFFSET` for why, and for the reach
+        # numbers that set the spacing.
         super()._load_agent(
             options,
             [
-                sapien.Pose(p=[0, -ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, np.pi)),
-                sapien.Pose(p=[0, ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, 0)),
+                sapien.Pose(p=[0, -ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, HOLDER_BASE_YAW)),
+                sapien.Pose(p=[0, ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, ROTATOR_BASE_YAW)),
             ],
         )
 
