@@ -70,11 +70,21 @@ class TwoSO100Base(BaseEnv):
         *args,
         robot_uids=("so100", "so100"),
         robot_init_qpos_noise=0.02,
+        cube_spawn_jitter=0.01,
         partner_obs="full",
         **kwargs,
     ):
         validate_partner_obs(partner_obs)
         self.robot_init_qpos_noise = robot_init_qpos_noise
+        # Half-width of the cube's uniform xy spawn jitter, in metres. A
+        # POLICY needs this -- without it there is nothing to generalise over.
+        # An open-loop script cannot survive it at all: its waypoints are
+        # solved once, against the nominal pose, so every centimetre of jitter
+        # is a centimetre of miss. `scripts/probe_grasp.py` and
+        # `scripts/render_scene.py` therefore pass 0.0, and the 2026-09-02
+        # teleport run is what that costs when they do not -- 0.94 and 1.27 cm
+        # of "error" with the physics switched off entirely.
+        self.cube_spawn_jitter = cube_spawn_jitter
         self.partner_obs = partner_obs
         # No explicit control_mode: SO100's first configured controller is
         # already "pd_joint_delta_pos" (SO100._controller_configs), which
@@ -167,12 +177,14 @@ class TwoSO100Base(BaseEnv):
                 noise = torch.randn((b, start_qpos.shape[-1])) * self.robot_init_qpos_noise
                 agent.reset(start_qpos + noise)
 
-            # Cube: fixed at the table center with a small xy jitter. +-1 cm,
-            # not +-2 cm: the top-down grasp pose has 1.9 cm of reach margin
-            # (see ARM_BASE_OFFSET) and the jitter has to fit inside it in
-            # EVERY episode, not on average.
+            # Cube: fixed at the table center with a small xy jitter. The
+            # +-1 cm default, not +-2 cm: the grasp pose has 1.9 cm of reach
+            # margin (see ARM_BASE_OFFSET) and the jitter has to fit inside it
+            # in EVERY episode, not on average. `cube_spawn_jitter=0.0` makes
+            # the spawn deterministic, for the scripted probes.
             cube_xyz = torch.zeros((b, 3))
-            cube_xyz[:, :2] = torch.rand((b, 2)) * 0.02 - 0.01
+            jitter = self.cube_spawn_jitter
+            cube_xyz[:, :2] = (torch.rand((b, 2)) * 2 - 1) * jitter
             cube_xyz[:, 2] = CUBE_HALF_SIZE
             self.cube.set_pose(Pose.create_from_pq(p=cube_xyz))
 

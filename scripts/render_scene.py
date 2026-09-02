@@ -238,6 +238,11 @@ def main() -> int:
             num_envs=1,
             obs_mode="state_dict",
             sim_backend="physx_cuda",
+            # Open loop: the waypoints are solved once against the nominal
+            # cube pose, so any spawn jitter is a pure miss, and the arms must
+            # start exactly where the kinematics assumed.
+            cube_spawn_jitter=0.0,
+            robot_init_qpos_noise=0.0,
             render_backend=args.render_backend,
             render_mode="rgb_array",
         ),

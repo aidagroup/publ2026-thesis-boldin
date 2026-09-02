@@ -151,3 +151,17 @@ def test_every_phase_name_resolves_to_its_waypoint(waypoint, expected) -> None:
     for got, want in zip(expert.arm_targets(waypoint), expected, strict=True):
         np.testing.assert_allclose(got, want)
     assert {p[1] for p in expert.PHASES} <= {None, "pregrasp", "grasp"}
+
+
+@pytest.mark.parametrize("script", ["probe_grasp.py", "render_scene.py"])
+def test_the_scripted_probes_pin_the_cube(script) -> None:
+    """An open-loop script must not be handed a randomly placed cube.
+
+    The waypoints are solved once, against the nominal pose. With the env's
+    default +-1 cm spawn jitter every centimetre of it is a miss the script
+    cannot correct, which on 2026-09-02 read as 0.94 and 1.27 cm of waypoint
+    "error" in a teleported pose -- with the physics switched off.
+    """
+    source = (Path(__file__).parents[1] / "scripts" / script).read_text()
+    assert "cube_spawn_jitter=0.0" in source
+    assert "robot_init_qpos_noise=0.0" in source
