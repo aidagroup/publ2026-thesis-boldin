@@ -54,37 +54,13 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
 from callosum.envs._cube_geometry import FACE_HANDLE_HEIGHT, HANDLE_HALF_WIDTH
+from callosum.envs._scripted_expert import DELTA_LIMITS, PHASES, arm_targets
 from callosum.envs._so100_kinematics import (
-    HOLDER_GRASP,
-    HOLDER_PREGRASP,
     READY_QPOS,
     ROTATOR_GRASP,
-    ROTATOR_PREGRASP,
     SEATING_GRIPPER_QPOS,
 )
 from callosum.envs.face_turn import TARGET_FACE_ANGLE
-
-# Gripper joint targets. -1.1 is the URDF lower limit (jaws shut, tips 6.6 mm
-# apart); 0.0 is mani-skill's own SO-100 ready value. The handle first touches
-# both blades at SEATING_GRIPPER_QPOS (-0.842); commanding the full -1.1 makes
-# the PD drive keep squeezing past that, which is what generates the >= 0.5 N
-# `is_grasping` needs.
-GRIPPER_OPEN = 0.0
-GRIPPER_CLOSED = -1.1
-
-# (name, waypoint, holder gripper, rotator gripper, steps). The holder shuts
-# one phase before the rotator: closing on a handle shoves it by the ~2 mm of
-# approach clearance in `GRASP_POCKET_OFFSET`, and the body should be held
-# before the rotator delivers that nudge to the face. Sums to 290 of the
-# env's 300 steps.
-PHASES = [
-    ("settle", None, GRIPPER_OPEN, GRIPPER_OPEN, 10),
-    ("pregrasp", "pregrasp", GRIPPER_OPEN, GRIPPER_OPEN, 50),
-    ("descend", "grasp", GRIPPER_OPEN, GRIPPER_OPEN, 30),
-    ("hold", "grasp", GRIPPER_CLOSED, GRIPPER_OPEN, 20),
-    ("close", "grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 25),
-    ("turn", "grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 155),
-]
 
 # At a correct grasp the tcp lands 1.9 mm from the handle's axis (the handle
 # sits off the tool centreline by `GRASP_POCKET_OFFSET`, because the jaw-tip
@@ -93,11 +69,6 @@ PHASES = [
 # every later column is meaningless -- so say so rather than let it read as a
 # physics result. tests/test_grasp_waypoints.py checks the same thing in CI.
 WAYPOINT_TOLERANCE = 0.010
-
-# pd_joint_delta_pos limits, from SO100._controller_configs. The action space
-# is normalized to [-1, 1] (PDJointPosControllerConfig.normalize_action
-# defaults to True), so a unit action is one full delta.
-DELTA_LIMITS = np.array([0.05, 0.05, 0.05, 0.05, 0.05, 0.2])
 
 
 def _report_aperture(base) -> None:
@@ -147,7 +118,14 @@ def main() -> int:
     ap.add_argument("--envs", type=int, default=32)
     ap.add_argument("--env-id", default="FaceTurn-v0")
     ap.add_argument("--every", type=int, default=25, help="print every N steps")
+    ap.add_argument(
+        "--only",
+        choices=("both", "rotator", "holder"),
+        default="both",
+        help="park the other arm at READY, to test whether the two collide",
+    )
     args = ap.parse_args()
+    parked = np.asarray(READY_QPOS[:5])
 
     env = ManiSkillVectorEnv(
         gym.make(
@@ -179,7 +157,8 @@ def main() -> int:
     roll_sign = torch.ones(args.envs, device=device)
     roll_sign[half:] = -1.0
 
-    print(f"\nscripted expert on {args.env_id}, {args.envs} envs")
+    driving = "both arms" if args.only == "both" else f"{args.only} only (partner parked at READY)"
+    print(f"\nscripted expert on {args.env_id}, {args.envs} envs, {driving}")
     print(
         f"  face handle: {2 * HANDLE_HALF_WIDTH * 100:.1f} cm wide,"
         f" {FACE_HANDLE_HEIGHT * 100:.1f} cm tall"
@@ -195,20 +174,14 @@ def main() -> int:
     with torch.no_grad():
         for name, waypoint, hold_grip, rot_grip, budget in PHASES:
             for i in range(budget):
-                rot_arm = (
-                    ROTATOR_PREGRASP
-                    if waypoint == "pregrasp"
-                    else ROTATOR_GRASP
-                    if waypoint == "grasp"
-                    else READY_QPOS[:5]
-                )
-                hold_arm = (
-                    HOLDER_PREGRASP
-                    if waypoint == "pregrasp"
-                    else HOLDER_GRASP
-                    if waypoint == "grasp"
-                    else READY_QPOS[:5]
-                )
+                hold_arm, rot_arm = arm_targets(waypoint)
+                # --only parks the other arm at READY for the whole run. If an
+                # arm reaches its handle alone but not alongside its partner,
+                # the blocker is the two of them, not either one's waypoints.
+                if args.only == "rotator":
+                    hold_arm = parked
+                elif args.only == "holder":
+                    rot_arm = parked
                 a_hold = _action(base.agent_a, hold_arm, hold_grip, device)
                 a_rot = _action(base.agent_b, rot_arm, rot_grip, device)
                 if name == "turn":

@@ -13,7 +13,8 @@ import torch
 from mani_skill.agents.multi_agent import MultiAgent
 from mani_skill.agents.robots.so100 import SO100
 from mani_skill.envs.sapien_env import BaseEnv
-from mani_skill.utils import common
+from mani_skill.sensors.camera import CameraConfig
+from mani_skill.utils import common, sapien_utils
 from mani_skill.utils.building import actors
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
@@ -101,6 +102,40 @@ class TwoSO100Base(BaseEnv):
                 sapien.Pose(p=[0, ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, ROTATOR_BASE_YAW)),
             ],
         )
+
+    # Cameras exist ONLY for looking at the scene by hand -- nothing in
+    # training or in the observations reads them, and BaseEnv skips building
+    # them entirely unless the render device can render (`_reconfigure` guards
+    # `_setup_sensors` with `scene.can_render()`), so the `render_backend="none"`
+    # the trainer and the probes use is unaffected.
+    #
+    # Two views, because a single one cannot answer the question they exist for.
+    # The wide view shows whether the arms are where the kinematics says; the
+    # close-up is framed on the two handles, where the millimetres live.
+    # `render_rgb_array()` tiles every human render camera into one image, so
+    # both arrive in a single frame.
+    @property
+    def _default_human_render_camera_configs(self):
+        return [
+            CameraConfig(
+                "render_camera",
+                sapien_utils.look_at(eye=[0.42, -0.30, 0.32], target=[0.0, 0.0, 0.06]),
+                640,
+                480,
+                1.0,
+                0.01,
+                100,
+            ),
+            CameraConfig(
+                "closeup",
+                sapien_utils.look_at(eye=[0.20, -0.17, 0.16], target=[0.0, -0.04, 0.06]),
+                640,
+                480,
+                1.0,
+                0.005,
+                100,
+            ),
+        ]
 
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(

@@ -67,6 +67,18 @@ uv run python scripts/probe_grasp.py
 hand-solved joint waypoints with no policy in the loop, so if it does not end
 in `success` the scene is unsolvable and training is wasted GPU time.
 
+When it fails, look at the scene before re-deriving any more geometry:
+
+```bash
+uv run python scripts/render_scene.py --script      # runs/render/*.png + expert.gif
+```
+
+The first three stills teleport both arms onto each waypoint (`set_qpos`, no
+physics), which separates a wrong waypoint from an arm that could not get
+there -- the distinction the distance columns cannot make, and the one three
+rounds of re-solving the kinematics failed to settle. This is the only script
+that needs a working render device (`--render-backend gpu`, the default here).
+
 **Known open questions these answer** (all flagged in code as `TODO(review)`):
 
 | Question | Where | If it fails |

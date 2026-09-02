@@ -14,9 +14,13 @@ arithmetic, so CI (which has neither mani_skill nor a GPU) can assert that the
 two agree. See docs/implementation-plan.md step 2.1.
 """
 
+import re
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from callosum.envs import _scripted_expert as expert
 from callosum.envs import _so100_kinematics as kin
 from callosum.envs._cube_geometry import (
     BODY_GRASP_WORLD,
@@ -113,3 +117,37 @@ def test_start_pose_is_open_and_vertical() -> None:
         assert tilt < 0.5
         roll_axis = kin.fixed_jaw_pose(kin.READY_QPOS, base)[:3, 1]
         assert abs(abs(roll_axis[2]) - 1.0) < 1e-3, "wrist_roll axis is not vertical"
+
+
+def test_the_phase_table_fits_inside_an_episode() -> None:
+    """The scripted script must finish before the env truncates it.
+
+    `PHASES` is open loop: if the budget outgrows `max_episode_steps` the run
+    is cut off mid-turn and the probe reports a failure that is really a clock.
+    The limit lives in a `@register_env` decorator that CI cannot import
+    (mani_skill is Linux+CUDA only), so read it out of the source.
+    """
+    source = (Path(__file__).parents[1] / "callosum/envs/two_so100_base.py").read_text()
+    match = re.search(r"max_episode_steps=(\d+)", source)
+    assert match, "no max_episode_steps in the env registration"
+    assert expert.TOTAL_STEPS <= int(match.group(1))
+
+
+@pytest.mark.parametrize(
+    ("waypoint", "expected"),
+    [
+        (None, (kin.READY_QPOS[:5], kin.READY_QPOS[:5])),
+        ("pregrasp", (kin.HOLDER_PREGRASP, kin.ROTATOR_PREGRASP)),
+        ("grasp", (kin.HOLDER_GRASP, kin.ROTATOR_GRASP)),
+    ],
+)
+def test_every_phase_name_resolves_to_its_waypoint(waypoint, expected) -> None:
+    """A phase whose name stops matching parks that arm at READY, silently.
+
+    `arm_targets` falls back to READY for anything it does not recognise --
+    convenient for the `settle` phase, dangerous for a typo, which would read
+    in the probe output as an arm that simply failed to reach.
+    """
+    for got, want in zip(expert.arm_targets(waypoint), expected, strict=True):
+        np.testing.assert_allclose(got, want)
+    assert {p[1] for p in expert.PHASES} <= {None, "pregrasp", "grasp"}
