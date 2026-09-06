@@ -42,8 +42,12 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from PIL import Image, ImageDraw
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-from callosum.envs._cube_geometry import BODY_GRASP_WORLD, FACE_GRASP_WORLD
-from callosum.envs._scripted_expert import DELTA_LIMITS, PHASES, arm_targets
+from callosum.envs._cube_geometry import (
+    BODY_GRASP_LIFTED,
+    BODY_GRASP_WORLD,
+    FACE_GRASP_LIFTED,
+)
+from callosum.envs._scripted_expert import DELTA_LIMITS, PHASES, TURN_PHASE, arm_target
 from callosum.envs._so100_kinematics import (
     HOLDER_BASE_POSE,
     READY_QPOS,
@@ -54,7 +58,15 @@ from callosum.envs._so100_kinematics import (
 )
 from callosum.envs.face_turn import TARGET_FACE_ANGLE
 
-POSES = ("ready", "pregrasp", "grasp")
+# The waypoints worth a still, in the order the task reaches them.
+POSES = (
+    ("ready", "ready", "ready"),
+    ("holder pregrasp", "holder_pregrasp", "ready"),
+    ("holder grasp", "holder_grasp", "ready"),
+    ("holder lift", "holder_lift", "ready"),
+    ("rotator pregrasp", "holder_lift", "rotator_pregrasp"),
+    ("rotator grasp", "holder_lift", "rotator_grasp"),
+)
 
 
 def _frame(base) -> np.ndarray:
@@ -100,18 +112,17 @@ def _distances(base) -> tuple[float, float]:
     return float(d_rot.mean()), float(d_hold.mean())
 
 
-def _fk_distances(qpos_holder, qpos_rotator) -> tuple[float, float]:
+def _fk_distances(qpos_holder, qpos_rotator, lifted: bool) -> tuple[float, float]:
     """The same two distances as the kinematics predicts them, with no simulator.
 
     Printing both is the point: where they agree the model matches the scene,
     and where they diverge the arm did not arrive.
     """
+    body = np.asarray(BODY_GRASP_LIFTED if lifted else BODY_GRASP_WORLD)
     rot = np.linalg.norm(
-        tcp_position(qpos_rotator, ROTATOR_BASE_POSE) - np.asarray(FACE_GRASP_WORLD)
+        tcp_position(qpos_rotator, ROTATOR_BASE_POSE) - np.asarray(FACE_GRASP_LIFTED)
     )
-    hold = np.linalg.norm(
-        tcp_position(qpos_holder, HOLDER_BASE_POSE) - np.asarray(BODY_GRASP_WORLD)
-    )
+    hold = np.linalg.norm(tcp_position(qpos_holder, HOLDER_BASE_POSE) - body)
     return float(rot), float(hold)
 
 
@@ -134,23 +145,22 @@ def _action(agent, target_arm: np.ndarray, target_grip: float, device) -> torch.
 
 def _render_poses(base, out: Path) -> None:
     """A still per waypoint, teleported, plus the sim/FK distance comparison."""
-    ready = _six(READY_QPOS, 0.0)
     print("\nwaypoints, teleported (no physics)")
-    print(f"  {'pose':>9} {'rot→face':>18} {'hold→body':>18}")
-    for i, pose in enumerate(POSES):
-        hold_arm, rot_arm = arm_targets(None if pose == "ready" else pose)
-        grip = SEATING_GRIPPER_QPOS if pose == "grasp" else 0.0
-        q_hold = ready if pose == "ready" else _six(hold_arm, grip)
-        q_rot = ready if pose == "ready" else _six(rot_arm, grip)
+    print(f"  {'pose':>17} {'rot→face':>18} {'hold→body':>18}")
+    for i, (label, holder_wp, rotator_wp) in enumerate(POSES):
+        grip = SEATING_GRIPPER_QPOS if holder_wp != "ready" else 0.0
+        rot_grip = SEATING_GRIPPER_QPOS if rotator_wp == "rotator_grasp" else 0.0
+        q_hold = _six(arm_target(holder_wp), grip)
+        q_rot = _six(arm_target(rotator_wp), rot_grip)
         _teleport(base, q_hold, q_rot)
         d_rot, d_hold = _distances(base)
-        fk_rot, fk_hold = _fk_distances(q_hold, q_rot)
+        fk_rot, fk_hold = _fk_distances(q_hold, q_rot, holder_wp == "holder_lift")
         print(
-            f"  {pose:>9} {d_rot * 100:7.2f} cm (fk {fk_rot * 100:5.2f})"
+            f"  {label:>17} {d_rot * 100:7.2f} cm (fk {fk_rot * 100:5.2f})"
             f" {d_hold * 100:7.2f} cm (fk {fk_hold * 100:5.2f})"
         )
-        caption = f"{pose}  |  rot->face {d_rot * 100:.2f} cm  hold->body {d_hold * 100:.2f} cm"
-        path = out / f"pose_{i}_{pose}.png"
+        caption = f"{label}  |  rot->face {d_rot * 100:.2f} cm  hold->body {d_hold * 100:.2f} cm"
+        path = out / f"pose_{i}_{label.replace(' ', '_')}.png"
         _captioned(_frame(base), caption).save(path)
         print(f"            -> {path}")
 
@@ -165,8 +175,8 @@ def _render_script(env, base, uids, out: Path, args) -> None:
 
     print("\nscripted rollout")
     with torch.no_grad():
-        for name, waypoint, hold_grip, rot_grip, budget in PHASES:
-            hold_arm, rot_arm = arm_targets(waypoint)
+        for name, holder_wp, rotator_wp, hold_grip, rot_grip, budget in PHASES:
+            hold_arm, rot_arm = arm_target(holder_wp), arm_target(rotator_wp)
             if args.only == "rotator":
                 hold_arm = parked
             elif args.only == "holder":
@@ -174,7 +184,7 @@ def _render_script(env, base, uids, out: Path, args) -> None:
             for i in range(budget):
                 a_hold = _action(base.agent_a, hold_arm, hold_grip, device)
                 a_rot = _action(base.agent_b, rot_arm, rot_grip, device)
-                if name == "turn":
+                if name == TURN_PHASE:
                     roll_target = float(ROTATOR_GRASP[4]) + TARGET_FACE_ANGLE
                     a_rot[:, 4] = torch.clamp(
                         (roll_target - base.agent_b.robot.get_qpos()[:, 4])
@@ -189,10 +199,10 @@ def _render_script(env, base, uids, out: Path, args) -> None:
                 if step % args.every and not last:
                     continue
                 d_rot, d_hold = _distances(base)
-                dpos = float(torch.linalg.norm(base.cube.pose.p - base.body_init_pos, dim=1).mean())
+                lift = float(base.cube.pose.p[:, 2].mean())
                 caption = (
                     f"{step:>3} {name:<9} rot->face {d_rot * 100:5.2f} cm"
-                    f"  hold->body {d_hold * 100:5.2f} cm  cube moved {dpos * 100:5.2f} cm"
+                    f"  hold->body {d_hold * 100:5.2f} cm  cube at {lift * 100:5.2f} cm"
                 )
                 shot = _captioned(_frame(base), caption)
                 frames.append(shot)

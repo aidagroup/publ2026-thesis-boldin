@@ -17,7 +17,12 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 
 from callosum.configs.face_turn import FaceTurnRewardConfig
-from callosum.envs._cube_geometry import BODY_GRASP_OFFSET, FACE_GRASP_OFFSET
+from callosum.envs._cube_geometry import (
+    BODY_GRASP_OFFSET,
+    CUBE_HALF_SIZE,
+    FACE_GRASP_OFFSET,
+    LIFT_HEIGHT,
+)
 from callosum.envs._turntable_cube import build_turntable_cube
 from callosum.envs.two_so100_base import TwoSO100Base
 
@@ -127,85 +132,83 @@ class FaceTurn(TwoSO100Base):
 
     def evaluate(self):
         cfg = self.reward_config
+        # |angle|, not the signed value: which way a wrist_roll drives the
+        # joint is a sign convention nobody can read off the builder, and the
+        # joint's limits are symmetric so either direction is a quarter turn.
         face_angle = self.face_link.joint.qpos
-        angle_ok = torch.abs(TARGET_FACE_ANGLE - face_angle) < cfg.angle_tol
+        angle_ok = torch.abs(face_angle) > TARGET_FACE_ANGLE - cfg.angle_tol
 
-        pos_drift = torch.linalg.norm(self.cube.pose.p - self.body_init_pos, dim=1)
+        # The cube is SUPPOSED to move now -- the holder picks it up -- so
+        # what "stable" means is that the body has not TURNED. Rotation is the
+        # failure the reaction torque produces; translation is the task.
         rot_drift = common.quat_diff_rad(self.cube.pose.q, self.body_init_q)
-        is_body_stable = (pos_drift < cfg.body_pos_tol) & (rot_drift < cfg.body_rot_tol)
+        is_lifted = self.cube.pose.p[:, 2] > LIFT_HEIGHT - cfg.lift_tol
+        is_body_stable = (rot_drift < cfg.body_rot_tol) & is_lifted
 
         return {
             "success": angle_ok & is_body_stable,
             "face_angle": face_angle,
             "is_body_stable": is_body_stable,
+            "is_lifted": is_lifted,
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
         cfg = self.reward_config
 
-        # (a) rotator reaches for the face handle, (d) holder for the body
-        # handle.
+        # (a) the holder reaches its grip on the body, and (b) closes on it.
         #
-        # These used to aim at `face_link.pose.p` and `cube.pose.p`, both of
-        # which are INSIDE solid geometry -- the face link's origin is the
-        # layer's geometric centre, the articulation root pose is a point
-        # 9.5 mm above the body box's centre. A distance-to-target reward is
-        # monotone, so its greedy optimum was to drive the jaw tips into the
-        # cube's surface, which is not a grasp pose. It was also actively at
-        # odds with grasping: SO100.tcp_pos is the midpoint of the two jaw
-        # TIPS, so for a 5.7 cm object held between open jaws the tcp sits
-        # ~2.1 cm from the object's centre (measured from the URDF), i.e.
-        # opening the gripper to grasp LOWERED the reach reward. Aiming at
-        # a 2 cm handle removes both problems: with the jaws closed on it the
-        # tcp and the handle centre coincide to within ~3 mm.
-        rotator_to_face = torch.linalg.norm(self.agent_b.tcp_pos - self.face_grasp_pos, dim=1)
-        rotator_reach = 1 - torch.tanh(5 * rotator_to_face)
+        # The reach target is NOT a link origin. Both link origins are inside
+        # solid geometry, and a distance-to-target reward is monotone, so its
+        # greedy optimum was to drive the jaw tips into the cube's surface --
+        # which is not a grasp pose. `BODY_GRASP_OFFSET` is the point the tool
+        # centre point actually occupies at the solved grasp, 1.94 cm to the
+        # side of the cube's axis because the jaws hold the body against the
+        # flat of the fixed blade.
         holder_to_body = torch.linalg.norm(self.agent_a.tcp_pos - self.body_grasp_pos, dim=1)
         holder_reach = 1 - torch.tanh(5 * holder_to_body)
-
-        # (b) grasping: rotator on the face, holder on the body. Both are needed
-        # and both are rewarded -- the holder's grip is what makes the face
-        # turnable at all, since the reaction torque would otherwise just spin
-        # the free-floating cube.
-        is_grasped = self.agent_b.is_grasping(self.face_link)
         holder_grasped = self.agent_a.is_grasping(self.body_link)
 
-        # (c) progress of the face angle toward the target. Shape (and the
+        # (c) lift it to working height. Gated on the grip: without the gate
+        # the term pays for knocking the cube upward, which is the opposite of
+        # the behaviour wanted.
+        height = self.cube.pose.p[:, 2]
+        lift_progress = ((height - CUBE_HALF_SIZE) / (LIFT_HEIGHT - CUBE_HALF_SIZE)).clamp(
+            0.0, 1.0
+        ) * holder_grasped
+
+        # (d) the rotator reaches the nub and (e) closes on it -- both gated on
+        # the cube being off the table, because until then the rotator has
+        # nowhere to be: its own closed gripper sweeps 4.26 cm below the cube's
+        # axis, which on the table is inside the tabletop.
+        lifted = info["is_lifted"].float()
+        rotator_to_face = torch.linalg.norm(self.agent_b.tcp_pos - self.face_grasp_pos, dim=1)
+        rotator_reach = (1 - torch.tanh(5 * rotator_to_face)) * lifted
+        is_grasped = self.agent_b.is_grasping(self.face_link) * lifted
+
+        # (f) progress of the face angle toward the target. Shape (and the
         # 2.0 scale) matches turn_faucet.py's own (commented-out, unshipped)
         # draft reward for this same family of task -- the closest available
         # precedent, since that file's shipped compute_dense_reward is a
         # "TODO (stao, tmu): finalize a dense reward" stub.
-        angle_remaining = (TARGET_FACE_ANGLE - info["face_angle"]).clamp(min=0)
+        angle_remaining = (TARGET_FACE_ANGLE - torch.abs(info["face_angle"])).clamp(min=0)
         angle_progress = 1 - torch.tanh(2 * angle_remaining)
 
-        # (e) penalty for the body drifting BEYOND the tolerance evaluate()
-        # accepts. Separate weights since position (m) and rotation (rad) drift
-        # aren't on commensurate scales.
-        #
-        # The hinge is not cosmetic. Measured on the 2M-step run of 2026-08-30,
-        # with the penalty linear from zero: merely touching the cube within the
-        # tolerance that still counts as success cost 5*0.01 + 5*0.10 = 0.55 per
-        # step, while approaching from the rest pose (0.37 m) to 0.20 m gains
-        # only 0.19. Approaching was net-negative in expectation, so standing
-        # still was a local optimum -- and the policy found it: after 156 updates
-        # the tool centre points had not left the rest pose (0.370 -> ~0.36 m)
-        # and success_once was 0 in all 78 logged points. Clamping at the
-        # tolerance makes the dense reward agree with the success predicate:
-        # incidental contact is free, only real destabilisation is punished.
-        pos_drift = (
-            torch.linalg.norm(self.cube.pose.p - self.body_init_pos, dim=1) - cfg.body_pos_tol
-        ).clamp(min=0)
+        # (g) penalty for the body turning BEYOND the tolerance evaluate()
+        # accepts. Clamped at the tolerance, not linear from zero: measured on
+        # the 2M-step run of 2026-08-30, an unclamped penalty made merely
+        # touching the cube cost more per step than approaching it gained, so
+        # standing still was a local optimum -- and the policy found it.
         rot_drift = (
             common.quat_diff_rad(self.cube.pose.q, self.body_init_q) - cfg.body_rot_tol
         ).clamp(min=0)
 
         return (
-            cfg.weight_rotator_reach * rotator_reach
-            + cfg.weight_grasp * is_grasped
+            cfg.weight_holder_reach * holder_reach
             + cfg.weight_holder_grasp * holder_grasped
+            + cfg.weight_lift * lift_progress
+            + cfg.weight_rotator_reach * rotator_reach
+            + cfg.weight_grasp * is_grasped
             + cfg.weight_angle_progress * angle_progress
-            + cfg.weight_holder_reach * holder_reach
-            - cfg.weight_body_pos_drift * pos_drift
             - cfg.weight_body_rot_drift * rot_drift
         )
 
@@ -227,9 +230,10 @@ class FaceTurn(TwoSO100Base):
         """
         cfg = self.reward_config
         return (
-            cfg.weight_rotator_reach
-            + cfg.weight_grasp
+            cfg.weight_holder_reach
             + cfg.weight_holder_grasp
+            + cfg.weight_lift
+            + cfg.weight_rotator_reach
+            + cfg.weight_grasp
             + cfg.weight_angle_progress
-            + cfg.weight_holder_reach
         )

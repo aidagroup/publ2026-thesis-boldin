@@ -4,124 +4,124 @@ Split out of `_turntable_cube` so it can be imported WITHOUT a simulator.
 `_turntable_cube` needs sapien and mani_skill, which exist only on the Linux
 + CUDA server, so anything importing it is unavailable to CI -- and the thing
 CI most needs to check is exactly this: that the scripted grasp waypoints in
-`callosum.envs._so100_kinematics` still point at the handles these numbers
-describe. Two server round trips were burned on waypoints that had silently
-stopped matching the scene; see tests/test_grasp_waypoints.py.
+`callosum.envs._so100_kinematics` still point at what these numbers describe.
+Several server round trips were burned on waypoints that had silently stopped
+matching the scene; see tests/test_grasp_waypoints.py.
+
+LAYOUT (rewritten 2026-09-06). The rotating face is the one that FACES THE
+ROTATOR, so the rotation axis is horizontal, along world y. The holder grips
+the other two layers -- its own face plus the middle -- from its own side, and
+LIFTS the cube off the table before the rotator turns anything.
+
+The lift is not decoration. Turning the face means rolling the rotator's
+wrist about the cube's axis, and the gripper's own collision geometry reaches
+4.26 cm from that axis (`scripts/measure_gripper.py`, the `Fixed_Jaw_part1`
+corner). With the cube resting on the table its axis is only 2.85 cm up, so a
+quarter turn drives the gripper's palm through the tabletop. Held at
+`LIFT_HEIGHT` the same sweep clears the table by 4.7 cm.
 """
+
+import numpy as np
 
 # ~5.7 cm real Rubik's cube edge length (matches callosum.envs.two_so100_base).
 CUBE_HALF_SIZE = 0.0285
 # A real 3x3 layer (one third of the cube), not an arbitrary thin plate.
 FACE_THICKNESS = 2 * CUBE_HALF_SIZE / 3
 
-# Half-width of both grasp handles, i.e. 2.0 cm across the jaws.
+# The cube is split across y: the rotator's side is the turning layer, the
+# remaining two thirds are one rigid body for the holder to hold.
+FACE_SPLIT_Y = CUBE_HALF_SIZE - FACE_THICKNESS
+
+# Height of the cube's CENTRE while the holder holds it up, i.e. the height of
+# the rotation axis during the turn. Set by the rotator's gripper, not by the
+# cube: at the closed gripper the outermost collision pad sits 4.26 cm from the
+# wrist_roll axis, so a quarter turn sweeps a 4.26 cm circle about the cube's
+# axis. 9.0 cm leaves 4.7 cm of tabletop clearance, and the cube's own lowest
+# swept point (its half-diagonal, 4.03 cm) clears by 5.0 cm.
+LIFT_HEIGHT = 0.090
+
+# --- the nub ------------------------------------------------------------
 #
-# WHY handles exist at all. The SO-100's jaw is a hinged pincer, not a
-# parallel jaw, and its aperture was measured directly from
-# mani_skill/assets/robots/so100/so100.urdf + the jaw collision meshes:
-# projected into the Fixed_Jaw frame the gripper is planar, and the free gap
-# between the two blades at a given insertion depth y (the fixed blade tip is
-# at y = -0.1064, its root at y = -0.0389) is
+# The one feature the bare cube cannot do without, and the reason it is this
+# size rather than any other.
 #
-#     depth y      -0.100   -0.090   -0.080   -0.070   -0.060
-#     max gap       5.2 cm   5.8 cm   6.4 cm   7.0 cm   6.0 cm
+# A face turn is a wrist ROLL, and the SO-100's roll axis is the Fixed_Jaw
+# frame's own y axis -- the line x = z = 0 -- while the fixed blade's gripping
+# face is the plane x = +0.0079. Anything the jaws hold seats against that
+# face, so its centre lands `width/2 - 0.0079` off the roll axis. Rolling the
+# wrist therefore spins a NARROW object about itself and swings a wide one
+# around an arc: a bare 5.7 cm layer would come out 2.06 cm off axis and be
+# dragged 2.9 cm sideways over a quarter turn, against a hinge that cannot go
+# anywhere. (Clamping it is not the problem -- `scripts/measure_gripper.py`
+# shows the jaws close on a bare layer perfectly well. Turning it is.)
 #
-# A 5.7 cm cube layer therefore only fits >= 3 cm back from the jaw tips. But
-# the layer is only 1.9 cm tall and sits flush on a 3.8 cm body, and a
-# top-down grasp (the one the design doc specifies, and the only one whose
-# wrist_roll axis is vertical -- see face_turn.FaceTurn) puts the blade's
-# 6.7 cm length along the vertical, so a blade deep enough to hold the layer
-# unavoidably straddles the body as well and locks the joint. The bare cube
-# is not graspable by this arm in the pose the task needs.
+# 2 * 0.0079 is therefore the widest object that sits EXACTLY on the roll axis,
+# and that is what this is: a square peg on the centre of the rotator's face,
+# on the axis, one facelet-ish across (a real 5.7 cm cube's facelet is 1.9 cm).
+NUB_HALF_WIDTH = 0.0079
+# How far it stands out from the face. The jaws seat 9.72 cm down the blade
+# and the blade tip is 0.92 cm beyond that, so a grip centred 1.5 cm along the
+# nub leaves the blade tip 5.8 mm clear of the cube's face -- which it must be,
+# because that tip sweeps a 3.96 cm circle across the face during the turn.
+NUB_LENGTH = 0.025
+NUB_GRASP_DEPTH = 0.015
+
+# --- grasp points -------------------------------------------------------
 #
-# 2.0 cm is inside the object scale mani-skill itself uses for the SO-100:
-# PickCubeSO100-v1 uses cube_half_size 0.0125 (2.5 cm) and SO100GraspCube-v1
-# randomizes 2.2-2.8 cm. At 2.0 cm the two gripping FACES are exactly one
-# handle-width apart at gripper qpos -0.842 (`_so100_kinematics
-# .SEATING_GRIPPER_QPOS`), mid-range of the joint's [-1.1, 1.1] travel, so
-# there is room both to open before the grasp and to squeeze after it. Note
-# that is the gap between the blade surfaces, which is 8 mm tighter than the
-# jaw-TIP separation the tip links report -- the tip links sit ~2 mm inside
-# the fingertips, and reading grasp width off them is what put the fixed blade
-# through the handle on the 2026-08-30 probe run.
-HANDLE_HALF_WIDTH = 0.010
-
-# Height of the graspable section of BOTH posts. 3.5 cm: with the jaws closed
-# on a 2 cm handle the tool centre point sits 9.72 cm straight down the blade
-# from the Fixed_Jaw origin and the lowest point of the gripper mesh is only
-# 9.2 mm below it, so pinching a post at its mid-height leaves 8.3 mm of
-# clearance under the jaws -- enough for the face post to clear the cube's top
-# face and for the body post to clear its own bridge.
-FACE_HANDLE_HEIGHT = 0.035
-
-# The body handle is a bridge out of the body's -y side (the holder's side)
-# carrying a vertical post whose axis sits at this radius from the cube axis.
+# Offsets from each link's origin to the point the arm's TOOL CENTRE POINT
+# should occupy, which is what `SO100.tcp_pos` reports and what the reward's
+# reach terms and `scripts/probe_grasp.py` measure. They are not the links'
+# origins (buried in solid geometry) and not the jaws' pocket either -- the
+# pocket is where the held object's axis goes, and for the holder, which grips
+# the whole 5.7 cm body, that axis is 2.16 cm from its own tool axis.
 #
-# A post rather than a plain horizontal bar, for two measured reasons.
-# (1) A 2x2 cm post is graspable at ANY wrist_roll; the bar it replaced was
-#     2 cm across x but 5.15 cm along y, so it could only be pinched if the
-#     closing direction happened to be world x -- a knife edge on one joint
-#     that the policy has no reason to respect.
-# (2) It raises the grasp from 2.6 cm to 5.35 cm above the table, so the
-#     holder's jaws have 4.4 cm of clearance instead of 1.7 cm.
-#
-# 8.0 cm radius, from three clearances measured on the gripper meshes -- note
-# a finger blade is 2.8 cm across (Fixed_Jaw_part2.ply spans +-0.0139 m), so
-# the blade, not its centreline, is what has to clear things. The
-# rotating face sweeps a circle of radius CUBE_HALF_SIZE*sqrt(2) = 4.03 cm and
-# the holder's gripper comes no closer than 7.35 cm to the axis inside that
-# height band. The two grippers stay 3.3 cm apart at their grasp poses, and
-# 1.47 cm apart at the worst point of the rotator's quarter turn, during which
-# its gripper sweeps a 4.26 cm circle about the axis. And the radius is the
-# holder's lever arm: resisting the 0.0835 N*m reaction torque (see
-# FACE_JOINT_DAMPING) takes 1.04 N here against 2.93 N at the bare body's own
-# 2.85 cm half-width.
-BODY_HANDLE_RADIUS = 0.080
-# Vertical gap between the top of the body handle's bridge and the underside
-# of the rotating face, so the two never rub.
-BODY_HANDLE_GAP = 0.002
+# Both are derived in `scripts/solve_waypoints.py` from the solved waypoints
+# and re-checked in CI, so they cannot drift away from the joint angles.
 
+# Face link frame: its origin is the cube's rotation centre, so the nub's axis
+# is the x = z = 0 line and the grasp sits along +y.
+FACE_GRASP_OFFSET = (0.0, CUBE_HALF_SIZE + NUB_GRASP_DEPTH, 0.0)
 
-def _bridge_top(cube_half_size: float, face_thickness: float) -> float:
-    """Top of the body handle's bridge, in the body link's own frame.
+# Body link frame: same origin. The holder's tool axis runs 1.94 cm to +x of
+# the cube's axis (its blade lies flat on the body's -x face), 4.5 mm back
+# from the cube's centre plane in y, and 9.6 mm above the centre -- gripping
+# a little above centre keeps the blade inside the body's height and still
+# lets the cube hang stably.
+BODY_GRASP_OFFSET = (0.0194, -0.0045, 0.0096)
 
-    The body link's origin is the cube's rotation centre, so the underside of
-    the rotating face sits at `cube_half_size - face_thickness` in this frame
-    and the bridge stops `BODY_HANDLE_GAP` below it.
-    """
-    return cube_half_size - face_thickness - BODY_HANDLE_GAP
-
-
-def _body_post_top(cube_half_size: float, face_thickness: float) -> float:
-    """Top of the body handle's vertical post, in the body link's own frame."""
-    return _bridge_top(cube_half_size, face_thickness) + FACE_HANDLE_HEIGHT
-
-
-# Grasp points, as offsets in each link's own frame, for the reward's reach
-# terms. These are points in FREE SPACE that the tool centre point can
-# actually occupy; the link origins are not (they are buried inside solid
-# geometry, which is what the reach reward used to aim at). Both assume the
-# default cube dimensions, as build_turntable_cube's callers all use them.
-#
-# In world coordinates for a cube resting at the table centre this puts the
-# rotator's target at (0, 0, 0.0745) and the holder's at (0, -0.080, 0.0535) --
-# in both cases the mid-height of the post's 3.5 cm graspable section.
-FACE_GRASP_OFFSET = (0.0, 0.0, FACE_THICKNESS / 2 + FACE_HANDLE_HEIGHT / 2)
-BODY_GRASP_OFFSET = (
-    0.0,
-    -BODY_HANDLE_RADIUS,
-    _body_post_top(CUBE_HALF_SIZE, FACE_THICKNESS) - FACE_HANDLE_HEIGHT / 2,
-)
-
-# The same two grasp points in WORLD coordinates, for a cube resting at the
-# table centre with no spawn jitter (`TwoSO100Base._initialize_episode` puts
-# the body link's origin at z = CUBE_HALF_SIZE). This is the pose the scripted
-# waypoints in `_so100_kinematics` are solved against; at run time the env
-# reads the live link poses instead (`FaceTurn.face_grasp_pos`).
-_FACE_LINK_Z = CUBE_HALF_SIZE + (CUBE_HALF_SIZE - FACE_THICKNESS / 2)
-FACE_GRASP_WORLD = (0.0, 0.0, _FACE_LINK_Z + FACE_GRASP_OFFSET[2])
+# The same two points in WORLD coordinates for the poses the scripted
+# waypoints are solved against: the holder grasps the cube where it spawns, on
+# the table, and the rotator only ever meets it once it has been lifted.
 BODY_GRASP_WORLD = (
-    0.0,
+    BODY_GRASP_OFFSET[0],
     BODY_GRASP_OFFSET[1],
     CUBE_HALF_SIZE + BODY_GRASP_OFFSET[2],
 )
+BODY_GRASP_LIFTED = (
+    BODY_GRASP_OFFSET[0],
+    BODY_GRASP_OFFSET[1],
+    LIFT_HEIGHT + BODY_GRASP_OFFSET[2],
+)
+FACE_GRASP_LIFTED = (
+    FACE_GRASP_OFFSET[0],
+    FACE_GRASP_OFFSET[1],
+    LIFT_HEIGHT + FACE_GRASP_OFFSET[2],
+)
+
+
+def gripper_sweep_clearance(axis_height: float) -> float:
+    """Tabletop clearance under the rotator's gripper during the quarter turn.
+
+    `GRIPPER_SWEEP_RADIUS` is measured, not assumed -- run
+    `scripts/measure_gripper.py` to re-derive it from the URDF collision pads.
+    Negative means the palm goes through the table.
+    """
+    return axis_height - GRIPPER_SWEEP_RADIUS
+
+
+# Largest distance from the wrist_roll axis to any of the gripper's four
+# collision pads, with the jaws closed. The corner of `Fixed_Jaw_part1`.
+GRIPPER_SWEEP_RADIUS = 0.0426
+# Half-diagonal of the cube's own square cross-section: what the rotating
+# layer itself sweeps about the axis.
+CUBE_SWEEP_RADIUS = float(CUBE_HALF_SIZE * np.sqrt(2))

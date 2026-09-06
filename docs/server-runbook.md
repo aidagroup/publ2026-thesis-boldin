@@ -83,10 +83,11 @@ that needs a working render device (`--render-backend gpu`, the default here).
 
 | Question | Where | If it fails |
 |---|---|---|
-| Does the gripper actually close on a handle? | `probe_grasp.py` | the aperture table at the top of its output vs `_turntable_cube.HANDLE_HALF_WIDTH` |
-| Can both arms reach their top-down grasp poses? | `probe_grasp.py` | the `rot→face` / `hold→body` columns should reach a few mm once the jaws close, and the script prints `!!` if not. `uv run --extra dev pytest tests/test_grasp_waypoints.py` checks the same thing locally, with no GPU — run it before burning a server slot |
+| Can the holder pick the bare cube up? | `probe_grasp.py` | `lift` must climb to 9 cm during the `lift` phase and stay there. If it drops back, the pinch on the body's side faces is not carrying the weight |
+| Does the gripper close on the nub? | `probe_grasp.py` | the aperture table at the top of its output vs `_cube_geometry.NUB_HALF_WIDTH` |
+| Can both arms reach their grasps with the tool horizontal? | `probe_grasp.py` | the `rot→face` / `hold→body` columns should reach a few mm once the jaws close, and the script prints `!!` per arm if not. `uv run --extra dev pytest tests/test_grasp_waypoints.py` and `uv run python scripts/solve_waypoints.py` check the same thing locally, with no GPU — run both before burning a server slot |
 | Are the joint friction/damping sane at cube scale? | `probe_grasp.py` | `angle` stuck at 0 with `grasped` at 1 → lower `FACE_JOINT_DAMPING` in `_turntable_cube.py` |
-| Does the holder actually stop the body from spinning? | `probe_grasp.py` | `dpos`/`drot` climbing during the turn phase → the body handle or the holder's grip |
+| Does the holder resist the reaction torque? | `probe_grasp.py` | `drot` climbing during the turn phase → the holder's grip is slipping. There is no table friction to help any more: the cube is in the air |
 | Does the face articulation look/behave right (no jitter, face sits on the body)? | `smoke_face_turn.py` | check `disable_self_collisions`; review the joint pose |
 | Does the scripted turn flip `success` on, and body displacement flip it off? | `smoke_face_turn.py` | success logic bug — fix before any training |
 

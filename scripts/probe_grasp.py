@@ -11,7 +11,7 @@ Two independent checks:
 
   1. Gripper aperture. Sweeps the gripper joint over its full [-1.1, 1.1]
      range and reports the measured jaw-tip separation. Compare against the
-     handle width: `callosum.envs._cube_geometry.HANDLE_HALF_WIDTH`.
+     nub width: `callosum.envs._cube_geometry.NUB_HALF_WIDTH`.
   2. Scripted grasp-and-turn. READY_QPOS -> pre-grasp -> grasp -> hold ->
      close -> quarter turn, printing the reach distances, both `is_grasping`
      flags, the face angle and the body drift at every phase boundary. If this
@@ -53,8 +53,8 @@ from mani_skill.utils import common
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-from callosum.envs._cube_geometry import FACE_HANDLE_HEIGHT, HANDLE_HALF_WIDTH
-from callosum.envs._scripted_expert import DELTA_LIMITS, PHASES, arm_targets
+from callosum.envs._cube_geometry import LIFT_HEIGHT, NUB_HALF_WIDTH, NUB_LENGTH
+from callosum.envs._scripted_expert import DELTA_LIMITS, PHASES, TURN_PHASE, arm_target
 from callosum.envs._so100_kinematics import (
     READY_QPOS,
     ROTATOR_GRASP,
@@ -82,7 +82,7 @@ def _report_aperture(base) -> None:
     depth is exactly the handle width.
     """
     print("\ngripper aperture (measured from the jaw-tip link poses)")
-    print(f"  handle width to straddle: {2 * HANDLE_HALF_WIDTH * 100:.1f} cm")
+    print(f"  nub width to straddle: {2 * NUB_HALF_WIDTH * 100:.1f} cm")
     print(f"  seats at gripper qpos {SEATING_GRIPPER_QPOS:+.3f}")
     print(f"  {'gripper qpos':>13} {'tip separation':>15}")
     agent = base.agent_b
@@ -165,23 +165,23 @@ def main() -> int:
     driving = "both arms" if args.only == "both" else f"{args.only} only (partner parked at READY)"
     print(f"\nscripted expert on {args.env_id}, {args.envs} envs, {driving}")
     print(
-        f"  face handle: {2 * HANDLE_HALF_WIDTH * 100:.1f} cm wide,"
-        f" {FACE_HANDLE_HEIGHT * 100:.1f} cm tall"
+        f"  nub: {2 * NUB_HALF_WIDTH * 100:.1f} cm across,"
+        f" {NUB_LENGTH * 100:.1f} cm long; lift to {LIFT_HEIGHT * 100:.1f} cm"
     )
     hdr = (
         f"{'step':>5} {'phase':>9} {'rot→face':>9} {'hold→body':>10} "
         f"{'grasped':>8} {'held':>6} {'angle+':>7} {'angle-':>7} "
-        f"{'dpos':>6} {'drot':>6} {'succ':>5}"
+        f"{'lift':>6} {'drot':>6} {'succ':>5}"
     )
     print(f"{hdr}\n{'-' * len(hdr)}")
 
     step = 0
     with torch.no_grad():
-        for name, waypoint, hold_grip, rot_grip, budget in PHASES:
+        for name, holder_wp, rotator_wp, hold_grip, rot_grip, budget in PHASES:
             for i in range(budget):
-                hold_arm, rot_arm = arm_targets(waypoint)
+                hold_arm, rot_arm = arm_target(holder_wp), arm_target(rotator_wp)
                 # --only parks the other arm at READY for the whole run. If an
-                # arm reaches its handle alone but not alongside its partner,
+                # arm reaches its target alone but not alongside its partner,
                 # the blocker is the two of them, not either one's waypoints.
                 if args.only == "rotator":
                     hold_arm = parked
@@ -189,7 +189,7 @@ def main() -> int:
                     rot_arm = parked
                 a_hold = _action(base.agent_a, hold_arm, hold_grip, device)
                 a_rot = _action(base.agent_b, rot_arm, rot_grip, device)
-                if name == "turn":
+                if name == TURN_PHASE:
                     # Drive wrist_roll away from its grasp value by a quarter
                     # turn, in both directions across the env batch. Rolling
                     # does not drag the grip off the post: with the jaws closed
@@ -211,34 +211,42 @@ def main() -> int:
                 angle = base.face_link.joint.qpos
                 d_rot = torch.linalg.norm(base.agent_b.tcp_pos - base.face_grasp_pos, dim=1)
                 d_hold = torch.linalg.norm(base.agent_a.tcp_pos - base.body_grasp_pos, dim=1)
-                dpos = torch.linalg.norm(base.cube.pose.p - base.body_init_pos, dim=1)
+                lift = base.cube.pose.p[:, 2]
                 drot = common.quat_diff_rad(base.cube.pose.q, base.body_init_q)
                 print(
                     f"{step:>5} {name:>9} {d_rot.mean():>9.3f} {d_hold.mean():>10.3f} "
                     f"{base.agent_b.is_grasping(base.face_link).float().mean():>8.2f} "
                     f"{base.agent_a.is_grasping(base.body_link).float().mean():>6.2f} "
                     f"{angle[:half].mean():>7.3f} {angle[half:].mean():>7.3f} "
-                    f"{dpos.mean():>6.3f} {drot.mean():>6.3f} "
+                    f"{lift.mean():>6.3f} {drot.mean():>6.3f} "
                     f"{info['success'].float().mean():>5.2f}"
                 )
 
-            if name == "close":
-                d_rot = torch.linalg.norm(base.agent_b.tcp_pos - base.face_grasp_pos, dim=1)
-                d_hold = torch.linalg.norm(base.agent_a.tcp_pos - base.body_grasp_pos, dim=1)
-                for who, d in (("rotator", d_rot), ("holder", d_hold)):
-                    if float(d.mean()) > WAYPOINT_TOLERANCE:
-                        print(
-                            f"  !! {who} settled {float(d.mean()) * 100:.1f} cm from its handle"
-                            f" (expected < {WAYPOINT_TOLERANCE * 1000:.0f} mm). The waypoint does"
-                            " not match the scene -- re-solve it before reading anything below."
-                        )
+            # Each arm is checked at the phase where it has just closed, not
+            # both at the end: the holder grips 100 steps before the rotator
+            # does, and reporting its miss only at the end hides which arm
+            # actually failed.
+            checks = {
+                "hold": ("holder", base.agent_a, "body_grasp_pos"),
+                "close": ("rotator", base.agent_b, "face_grasp_pos"),
+            }
+            if name in checks:
+                who, agent, target = checks[name]
+                d = torch.linalg.norm(agent.tcp_pos - getattr(base, target), dim=1)
+                if float(d.mean()) > WAYPOINT_TOLERANCE:
+                    print(
+                        f"  !! {who} settled {float(d.mean()) * 100:.1f} cm from its grip"
+                        f" (expected < {WAYPOINT_TOLERANCE * 1000:.0f} mm). The waypoint does"
+                        " not match the scene -- re-solve it before reading anything below."
+                    )
 
     info = base.get_info()
     angle = base.face_link.joint.qpos
     print("\nverdict")
-    print(f"  best face angle : {float(angle.max()):.3f} rad of {TARGET_FACE_ANGLE:.3f}")
+    print(f"  best face angle : {float(angle.abs().max()):.3f} rad of {TARGET_FACE_ANGLE:.3f}")
     print(f"  rotator grasped : {base.agent_b.is_grasping(base.face_link).float().mean():.2f}")
     print(f"  holder  grasped : {base.agent_a.is_grasping(base.body_link).float().mean():.2f}")
+    print(f"  cube lifted     : {info['is_lifted'].float().mean():.2f}")
     print(f"  body stable     : {info['is_body_stable'].float().mean():.2f}")
     print(f"  success         : {info['success'].float().mean():.2f}")
     if float(info["success"].float().mean()) == 0.0:

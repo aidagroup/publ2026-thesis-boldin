@@ -29,30 +29,63 @@ import numpy as np
 
 # --- arm placement -------------------------------------------------------
 #
-# Distance of each arm's base from the table centre, along +-y, and the base
-# yaws. Yaws pi and 0, NOT the panda pair's +pi/2 / -pi/2: a panda's home pose
-# points along its own +x while the SO-100's points along its own -y
-# (mani-skill compensates for that by giving the single-SO100 setups a base
-# yaw of +pi/2 with the object at +x). Copying the panda numbers aimed both
-# arms 90 deg away from the cube, which cost ~1.57 rad of shoulder_pan (~32
-# control steps) on every episode and, worse, put the shoulder_pan axis --
-# which sits 0.0452 m AHEAD of the base origin -- 0.3034 m from the cube axis
-# while the Fixed_Jaw origin reaches only 0.2537 m at the rotator's grasp
-# height with the tool pointing down. The top-down grasp the task needs was
-# simply unreachable.
+# Both arms face the cube along y: yaws pi and 0, NOT the panda pair's
+# +-pi/2. A panda's home pose points along its own +x while the SO-100's
+# points along its own -y (mani-skill compensates by giving single-SO100
+# setups a base yaw of +pi/2 with the object at +x). Copying the panda numbers
+# aimed both arms 90 deg away from the cube.
 #
-# 0.28 rather than 0.30 for the same reason, with the yaws already fixed:
+# 0.34, up from the 0.28 that suited the old top-down layout, because the arms
+# now hold their tools HORIZONTAL and that costs reach at the near end. Swept
+# over the whole joint range (scripts/solve_waypoints.py), a tool within 2 deg
+# of horizontal cannot bring the jaws' pocket closer than ~0.26 m to its own
+# base at any useful height: the arm has to be extended to point flat. At 0.28
+# the holder could not reach the cube on the table at all, and at 0.32 its
+# wrist_flex sat exactly on its 1.8 rad limit. At 0.34 every waypoint below
+# solves exactly with >= 0.19 rad of margin on every joint.
 #
-#     base 0.30, yaws -+pi/2 (the original)   0.3034 m   short by 5.0 cm
-#     base 0.30, yaws pi / 0                  0.2548 m   short by 1.1 mm
-#     base 0.28, yaws pi / 0                  0.2348 m   1.9 cm of margin
-#
-# 0.28 also survives the cube's +-1 cm spawn jitter (wrist_flex stays between
-# 1.63 and 1.77 rad against its 1.8 limit) and still leaves 3.5 cm between the
-# two grippers at the start pose.
-ARM_BASE_OFFSET = 0.28
+# The x offsets put each arm's shoulder_pan plane through the line its tool
+# has to lie on, so pan stays ~0 and the tool stays exactly horizontal. The
+# holder's is the larger one because it grips the whole 5.7 cm body, whose
+# axis is therefore 2.16 cm off its tool axis; the rotator grips a nub sized
+# to sit ON its tool axis, so it needs almost nothing.
+ARM_BASE_OFFSET = 0.34
 HOLDER_BASE_YAW = np.pi
 ROTATOR_BASE_YAW = 0.0
+HOLDER_BASE_X = 0.0216
+ROTATOR_BASE_X = 0.0
+
+# --- what the jaws can hold, from the collision meshes -------------------
+#
+# The fixed blade never moves, so its gripping face is a hard wall at a fixed
+# local x. Measured on Fixed_Jaw_part2.ply it is x = +0.0079, while
+# `Fixed_Jaw_tip` is at x = +0.0100: the tip link is a point 2.1 mm INSIDE the
+# fingertip. `SO100.tcp_pos` is the midpoint of those tip links, so aiming the
+# tcp at a held object's axis buries the fixed blade in it -- which is exactly
+# what the 2026-08-30 probe run showed.
+#
+# Re-derive any of this with `scripts/measure_gripper.py`.
+FIXED_BLADE_FACE_X = 0.0079
+# Insertion depth: 9.72 cm down the blade, where the jaws seat.
+POCKET_DEPTH = -0.0972
+# Slack in x so the open jaw can be lowered around an object without the fixed
+# blade scraping it. Closing then nudges the object by this much, so it is
+# 1 mm, not the 2 mm the old top-down layout used.
+GRASP_CLEARANCE = 0.001
+SEATING_GRIPPER_QPOS = -0.842
+
+
+def pocket_offset(half_width: float) -> np.ndarray:
+    """Where an object of this half-width must sit, in the Fixed_Jaw frame.
+
+    NOT where the tool centre point is. An object seats against the fixed
+    blade's face, so its axis lands `FIXED_BLADE_FACE_X - half_width` from the
+    wrist_roll axis once the jaws close -- which is why the nub is sized at
+    exactly `FIXED_BLADE_FACE_X` (see `_cube_geometry.NUB_HALF_WIDTH`): at that
+    width, and only at that width, a roll spins it about its own axis.
+    """
+    return np.array([FIXED_BLADE_FACE_X - half_width - GRASP_CLEARANCE, POCKET_DEPTH, 0.0])
+
 
 # Start configuration for both arms: mani-skill's own SO-100 ready pose, used
 # by TableSceneBuilder's "so100" branch and by SO100GraspCube-v1.
@@ -99,51 +132,33 @@ JOINT_LIMITS = np.array(
     ]
 )
 
-# Where a grasp handle's axis must sit in the Fixed_Jaw frame -- NOT where the
-# tool centre point is.
-#
-# The fixed blade never moves, so its gripping face is a hard wall at a fixed
-# local x. Measured on Fixed_Jaw_part2.ply, at the depth below that face sits
-# at x = +0.0079, while `Fixed_Jaw_tip` is at x = +0.0100: the tip link is a
-# point 2.1 mm INSIDE the fingertip. Centring a 2 cm handle on the closed tcp
-# (local x = -0.0001) therefore overlaps the blade by 2.1 mm, which is exactly
-# what the 2026-08-30 probe run showed -- both arms settled ~2.7 cm from their
-# handles, the same miss on both, with the cube shoved (dpos 0.012 -> 0.019)
-# at the moment the jaws tried to close.
-#
-# x = fixed face - HANDLE_HALF_WIDTH - 2 mm of approach clearance, so the open
-# jaw slides down past the handle with 1.9 mm to spare and only the MOVING jaw
-# touches it on closing. y is the insertion depth: 9.72 cm down the blade,
-# where the aperture reaches 2.0 cm at gripper qpos -0.842, mid-range of its
-# [-1.1, 1.1] travel, and the lowest point of the gripper mesh is only 9.2 mm
-# further down -- which is what leaves the jaws 8.3 mm of clearance over the
-# cube's top face and over the body handle's bridge.
-GRASP_POCKET_OFFSET = np.array([-0.00410, -0.09720, 0.0])
-SEATING_GRIPPER_QPOS = -0.842
-
 # --- scripted waypoints --------------------------------------------------
-# Arm joints only (the gripper is commanded separately). Solved by the FK
-# below against `_cube_geometry`'s handle positions; tests/test_grasp_waypoints
-# re-derives and checks them, so they cannot silently drift out of date again.
+# Arm joints only (the gripper is commanded separately). Solved against
+# `_cube_geometry` by `scripts/solve_waypoints.py`; tests/test_grasp_waypoints
+# re-derives the resulting tool poses, so they cannot silently drift again.
 #
-# wrist_roll stays at pi/2, the value READY_QPOS already holds, so no roll
-# travel is needed to reach either grasp. At pi/2 the tool approaches straight
-# down and the jaws close along world x -- which also means the moving jaw,
-# which swings 8 cm out along the closing axis when open, swings in x rather
-# than in y, away from the cube and away from the other arm. Both handles are
-# square in cross-section, so the grasp itself does not depend on the roll.
+# The order the task runs in: the holder comes down onto the cube where it
+# spawns, closes, and LIFTS it to `LIFT_HEIGHT`; only then does the rotator
+# come down onto the nub and roll.
 #
-# The pre-grasp waypoints sit above the grasp waypoints (1 cm for the rotator,
-# 3 cm for the holder) so the last move onto the handle is a vertical descent.
-# The rotator cannot have more: at a 1.5 cm lift its wrist_flex is already
-# pinned at the 1.8 rad limit.
-PREGRASP_LIFT_ROTATOR = 0.010
-PREGRASP_LIFT_HOLDER = 0.030
-_ROLL = np.pi / 2
-ROTATOR_PREGRASP = np.array([0.0175, 0.4393, -0.6463, 1.7779, _ROLL])
-ROTATOR_GRASP = np.array([0.0175, 0.4126, -0.5296, 1.6878, _ROLL])
-HOLDER_PREGRASP = np.array([0.0265, -0.3362, 0.3281, 1.5789, _ROLL])
-HOLDER_GRASP = np.array([0.0265, -0.3191, 0.5354, 1.3545, _ROLL])
+# Both pre-grasps sit 3 cm straight ABOVE their grasp, and the last move is a
+# vertical descent -- not a back-off along the tool axis, which is how the
+# top-down layout used to approach. Two reasons, both measured:
+#   * Backing off 5 cm along the tool means moving 5 cm closer to the arm's
+#     own base, and that is precisely where a horizontal tool stops being
+#     reachable: the solver lands 35 mm out with the wrist_flex on its limit.
+#   * The jaws' slot is bounded in x by the two blades and open in z, so a
+#     vertical descent drops the object into the slot without either blade
+#     sweeping across it first.
+PREGRASP_LIFT = 0.030
+ROTATOR_PREGRASP = np.array([0.0035, -0.3070, 1.3653, -1.0580, 1.5651])
+ROTATOR_GRASP = np.array([0.0035, 0.1886, 1.3103, -1.4998, 1.5754])
+HOLDER_PREGRASP = np.array([0.0000, 0.5372, 0.9194, -1.4566, 1.5689])
+HOLDER_GRASP = np.array([0.0000, 0.8418, 0.7706, -1.6124, 1.5756])
+# Same grip, 6.15 cm higher: the cube's centre goes from resting on the table
+# to `LIFT_HEIGHT`. The grip does not slide, so the tool rises by the same
+# amount the cube does.
+HOLDER_LIFT = np.array([0.0000, 0.1981, 1.0111, -1.2091, 1.5672])
 
 
 def _rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
@@ -176,13 +191,13 @@ def _axis_rotation(axis, angle: float) -> np.ndarray:
     return np.eye(3) + np.sin(angle) * k + (1 - np.cos(angle)) * (k @ k)
 
 
-def arm_base_pose(y: float, yaw: float) -> np.ndarray:
-    """4x4 world pose of a robot base placed at (0, y, 0) with the given yaw."""
-    return _transform(_rpy(0.0, 0.0, yaw), (0.0, y, 0.0))
+def arm_base_pose(x: float, y: float, yaw: float) -> np.ndarray:
+    """4x4 world pose of a robot base placed at (x, y, 0) with the given yaw."""
+    return _transform(_rpy(0.0, 0.0, yaw), (x, y, 0.0))
 
 
-HOLDER_BASE_POSE = arm_base_pose(-ARM_BASE_OFFSET, HOLDER_BASE_YAW)
-ROTATOR_BASE_POSE = arm_base_pose(ARM_BASE_OFFSET, ROTATOR_BASE_YAW)
+HOLDER_BASE_POSE = arm_base_pose(HOLDER_BASE_X, -ARM_BASE_OFFSET, HOLDER_BASE_YAW)
+ROTATOR_BASE_POSE = arm_base_pose(ROTATOR_BASE_X, ARM_BASE_OFFSET, ROTATOR_BASE_YAW)
 
 
 def fixed_jaw_pose(qpos, base_pose: np.ndarray) -> np.ndarray:
@@ -212,7 +227,7 @@ def tcp_position(qpos, base_pose: np.ndarray) -> np.ndarray:
     return (tip1 + tip2) / 2
 
 
-def seated_handle_position(qpos, base_pose: np.ndarray) -> np.ndarray:
-    """Where a handle's axis ends up if this pose is a correct grasp."""
+def seated_object_position(qpos, base_pose: np.ndarray, half_width: float) -> np.ndarray:
+    """Where the axis of an object of this half-width ends up at this pose."""
     fixed = fixed_jaw_pose(qpos, base_pose)
-    return fixed[:3, 3] + fixed[:3, :3] @ GRASP_POCKET_OFFSET
+    return fixed[:3, 3] + fixed[:3, :3] @ pocket_offset(half_width)

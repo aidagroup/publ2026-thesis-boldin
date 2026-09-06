@@ -25,8 +25,10 @@ from callosum.envs._cube_geometry import CUBE_HALF_SIZE
 from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner_obs
 from callosum.envs._so100_kinematics import (
     ARM_BASE_OFFSET,
+    HOLDER_BASE_X,
     HOLDER_BASE_YAW,
     READY_QPOS,
+    ROTATOR_BASE_X,
     ROTATOR_BASE_YAW,
 )
 
@@ -102,14 +104,21 @@ class TwoSO100Base(BaseEnv):
         return self.agent.agents[1]
 
     def _load_agent(self, options: dict):
-        # Base yaws pi and 0, NOT the panda pair's +pi/2 / -pi/2 -- see
-        # `_so100_kinematics.ARM_BASE_OFFSET` for why, and for the reach
-        # numbers that set the spacing.
+        # Base yaws pi and 0, NOT the panda pair's +pi/2 / -pi/2, and each
+        # arm shifted along x so its shoulder_pan plane contains the line its
+        # tool has to lie on -- see `_so100_kinematics.ARM_BASE_OFFSET` for
+        # why, and for the reach numbers that set the spacing.
         super()._load_agent(
             options,
             [
-                sapien.Pose(p=[0, -ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, HOLDER_BASE_YAW)),
-                sapien.Pose(p=[0, ARM_BASE_OFFSET, 0], q=euler2quat(0, 0, ROTATOR_BASE_YAW)),
+                sapien.Pose(
+                    p=[HOLDER_BASE_X, -ARM_BASE_OFFSET, 0],
+                    q=euler2quat(0, 0, HOLDER_BASE_YAW),
+                ),
+                sapien.Pose(
+                    p=[ROTATOR_BASE_X, ARM_BASE_OFFSET, 0],
+                    q=euler2quat(0, 0, ROTATOR_BASE_YAW),
+                ),
             ],
         )
 
