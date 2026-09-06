@@ -87,7 +87,17 @@ from callosum.training._ppo_core import Agent, compute_gae, ppo_update
 # `info["episode"]` is a HARDCODED set (return, episode_len, success_once,
 # fail_once, ...) -- keys an env's own evaluate() returns do NOT appear there,
 # so anything task-specific has to be read from final_info itself.
-TASK_METRICS = ("solved_facelets", "moves_applied", "is_lifted", "is_body_stable")
+TASK_METRICS = (
+    "solved_facelets",
+    "moves_applied",
+    "is_lifted",
+    "is_body_stable",
+    "holder_grasped",
+    "rotator_grasped",
+    "holder_dist",
+    "rotator_dist",
+    "cube_height",
+)
 
 
 def _make_env(args: IPPOConfig, num_envs: int, reconfiguration_freq: int | None) -> gym.Env:

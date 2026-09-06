@@ -145,11 +145,21 @@ class FaceTurn(TwoSO100Base):
         is_lifted = self.cube.pose.p[:, 2] > LIFT_HEIGHT - cfg.lift_tol
         is_body_stable = (rot_drift < cfg.body_rot_tol) & is_lifted
 
+        # The staircase is gated: nothing pays for lifting unless the holder
+        # is gripping, and none of the rotator's terms pay unless the cube is
+        # lifted. So a run where is_lifted stays 0 has to say WHICH rung the
+        # policy is stuck on, or the log cannot distinguish "never touches the
+        # cube" from "grips it but will not carry it".
         return {
             "success": angle_ok & is_body_stable,
             "face_angle": face_angle,
             "is_body_stable": is_body_stable,
             "is_lifted": is_lifted,
+            "holder_grasped": self.agent_a.is_grasping(self.body_link),
+            "rotator_grasped": self.agent_b.is_grasping(self.face_link),
+            "holder_dist": torch.linalg.norm(self.agent_a.tcp_pos - self.body_grasp_pos, dim=1),
+            "rotator_dist": torch.linalg.norm(self.agent_b.tcp_pos - self.face_grasp_pos, dim=1),
+            "cube_height": self.cube.pose.p[:, 2],
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
