@@ -84,3 +84,17 @@ def test_the_env_registration_imports_survive() -> None:
     src = SOURCE.read_text(encoding="utf-8")
     assert "from callosum.envs import face_turn as" in src
     assert "from callosum.envs import two_so100_base as" in src
+
+
+def test_task_metrics_are_read_from_final_info_not_from_episode() -> None:
+    """`info["episode"]` is a hardcoded set inside ManiSkillVectorEnv.
+
+    return/episode_len/success_once/fail_once and nothing else. Keys an env's
+    own evaluate() returns never appear there, so reading task metrics out of
+    it logs nothing at all -- which is what the first RubikCube-v0 wiring did.
+    """
+    source = (Path(__file__).parents[1] / "callosum/training/ippo.py").read_text()
+    assert "TASK_METRICS" in source
+    assert "final_info[k][done_mask]" in source
+    for key in ("solved_facelets", "moves_applied"):
+        assert key in source

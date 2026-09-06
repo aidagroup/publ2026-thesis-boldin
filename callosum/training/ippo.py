@@ -76,11 +76,18 @@ from callosum.configs.ippo import IPPOConfig, parse_args
 # empirically, `ruff check --fix` silently deleted both when they collided
 # on the single name `callosum`.
 from callosum.envs import face_turn as _face_turn  # noqa: F401
+from callosum.envs import rubik as _rubik  # noqa: F401
 from callosum.envs import two_so100_base as _two_so100_base  # noqa: F401
 from callosum.training._agent_obs import build_agent_obs
 from callosum.training._bijepa_policy import bijepa_step
 from callosum.training._metrics import MetricLogger
 from callosum.training._ppo_core import Agent, compute_gae, ppo_update
+
+# Task metrics to pull straight out of `final_info`. ManiSkillVectorEnv's
+# `info["episode"]` is a HARDCODED set (return, episode_len, success_once,
+# fail_once, ...) -- keys an env's own evaluate() returns do NOT appear there,
+# so anything task-specific has to be read from final_info itself.
+TASK_METRICS = ("solved_facelets", "moves_applied", "is_lifted", "is_body_stable")
 
 
 def _make_env(args: IPPOConfig, num_envs: int, reconfiguration_freq: int | None) -> gym.Env:
@@ -251,6 +258,9 @@ def main(args: IPPOConfig) -> None:
                     num_episodes += eval_infos["_final_info"].sum()
                     for k, v in eval_infos["final_info"]["episode"].items():
                         eval_metrics[k].append(v)
+                    for k in TASK_METRICS:
+                        if k in eval_infos["final_info"]:
+                            eval_metrics[k].append(eval_infos["final_info"][k])
             for k, v in eval_metrics.items():
                 mean = torch.stack(v).float().mean()
                 metric_log.log(f"eval/{k}", mean, global_step)
@@ -341,6 +351,11 @@ def main(args: IPPOConfig) -> None:
                 done_mask = infos["_final_info"]
                 for k, v in final_info["episode"].items():
                     metric_log.log(f"train/{k}", v[done_mask].float().mean(), global_step)
+                for k in TASK_METRICS:
+                    if k in final_info:
+                        metric_log.log(
+                            f"train/{k}", final_info[k][done_mask].float().mean(), global_step
+                        )
                 with torch.no_grad():
                     for i in range(2):
                         final_obs_i = bijepa_step(
