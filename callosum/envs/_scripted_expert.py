@@ -47,16 +47,19 @@ WAYPOINTS = {
 # (label, holder waypoint, rotator waypoint, holder gripper, rotator gripper,
 #  steps). The rotator stays parked at READY until the cube is in the air --
 # it has nothing to reach for before then, and everything to knock over.
+# Budgets are the synchronized cost of each transition plus slack, checked in
+# CI (tests/test_grasp_waypoints.py) -- a phase shorter than its move leaves
+# the arm mid-flight and reads as a geometry failure.
 PHASES = [
     ("settle", "ready", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 10),
-    ("reach", "holder_pregrasp", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 40),
-    ("descend", "holder_grasp", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 25),
-    ("hold", "holder_grasp", "ready", GRIPPER_CLOSED, GRIPPER_OPEN, 20),
-    ("lift", "holder_lift", "ready", GRIPPER_CLOSED, GRIPPER_OPEN, 35),
-    ("approach", "holder_lift", "rotator_pregrasp", GRIPPER_CLOSED, GRIPPER_OPEN, 40),
-    ("seat", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_OPEN, 25),
-    ("close", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 20),
-    ("turn", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 85),
+    ("reach", "holder_pregrasp", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 70),
+    ("descend", "holder_grasp", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 12),
+    ("hold", "holder_grasp", "ready", GRIPPER_CLOSED, GRIPPER_OPEN, 16),
+    ("lift", "holder_lift", "ready", GRIPPER_CLOSED, GRIPPER_OPEN, 20),
+    ("approach", "holder_lift", "rotator_pregrasp", GRIPPER_CLOSED, GRIPPER_OPEN, 60),
+    ("seat", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_OPEN, 16),
+    ("close", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 16),
+    ("turn", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 45),
 ]
 
 TOTAL_STEPS = sum(p[5] for p in PHASES)
@@ -88,3 +91,24 @@ def arm_targets(waypoint: str | None) -> tuple[np.ndarray, np.ndarray]:
             return arm_target(holder), arm_target(rotator)
     ready = WAYPOINTS["ready"]
     return ready, ready
+
+
+def synchronized_step(qpos, target) -> "np.ndarray":
+    """Per-joint deltas scaled so every arm joint ARRIVES AT THE SAME TIME.
+
+    Driving each joint at its own limit independently is what the probe did
+    until 2026-09-06, and it does not follow the straight line between the two
+    configurations: shoulder_lift arrives in 11 steps and elbow in 19 while
+    wrist_flex needs 61, so for fifty steps the arm is extended forward with
+    the hand still pointing down. Measured on the holder's approach, that
+    swings the gripper 9.5 cm BELOW the tabletop -- it jams, and `dq` crawls
+    instead of closing. The straight joint-space line between the same two
+    configurations clears the table by 1.5 cm.
+
+    Returns the delta to add to `qpos` this step, arm joints only.
+    """
+    error = np.asarray(target, dtype=float)[:5] - np.asarray(qpos, dtype=float)[:5]
+    worst = np.abs(error / DELTA_LIMITS[:5]).max()
+    if worst <= 1.0:
+        return error
+    return error / worst

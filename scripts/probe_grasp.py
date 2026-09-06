@@ -54,7 +54,13 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
 from callosum.envs._cube_geometry import LIFT_HEIGHT, NUB_HALF_WIDTH, NUB_LENGTH
-from callosum.envs._scripted_expert import DELTA_LIMITS, PHASES, TURN_PHASE, arm_target
+from callosum.envs._scripted_expert import (
+    DELTA_LIMITS,
+    PHASES,
+    TURN_PHASE,
+    arm_target,
+    synchronized_step,
+)
 from callosum.envs._so100_kinematics import (
     READY_QPOS,
     ROTATOR_GRASP,
@@ -106,11 +112,15 @@ def _action(agent, target_arm: np.ndarray, target_grip: float, device) -> torch.
     qpos + action, so saturating the action means "move this joint as fast as
     the controller allows toward the waypoint".
     """
-    target = torch.as_tensor(
-        np.concatenate([target_arm, [target_grip]]), dtype=torch.float32, device=device
+    qpos = agent.robot.get_qpos()
+    arm = np.asarray(
+        [synchronized_step(q, target_arm) for q in qpos[:, :5].cpu().numpy()], dtype=np.float32
     )
     delta = torch.as_tensor(DELTA_LIMITS, dtype=torch.float32, device=device)
-    return torch.clamp((target - agent.robot.get_qpos()) / delta, -1.0, 1.0)
+    action = torch.zeros_like(qpos)
+    action[:, :5] = torch.as_tensor(arm, device=device) / delta[:5]
+    action[:, 5] = (target_grip - qpos[:, 5]) / delta[5]
+    return torch.clamp(action, -1.0, 1.0)
 
 
 def main() -> int:

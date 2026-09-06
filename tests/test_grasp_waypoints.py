@@ -255,3 +255,35 @@ def test_the_face_grasp_offset_is_measured_from_the_face_LINK() -> None:
         )
         < 1e-12
     )
+
+
+def test_every_phase_is_long_enough_for_its_own_move() -> None:
+    """A phase shorter than its synchronized move leaves the arm mid-flight.
+
+    That reads in the probe output as an arm that missed its target, which is
+    indistinguishable from a wrong waypoint until you look at the joint error.
+    """
+    previous = {"holder": "ready", "rotator": "ready"}
+    for label, holder_wp, rotator_wp, _, _, budget in expert.PHASES:
+        for role, wp in (("holder", holder_wp), ("rotator", rotator_wp)):
+            start = expert.arm_target(previous[role])
+            goal = expert.arm_target(wp)
+            need = np.ceil((np.abs(goal - start) / expert.DELTA_LIMITS[:5]).max())
+            assert budget >= need, f"{label}/{role}: {budget} steps for a {need:.0f}-step move"
+            previous[role] = wp
+
+
+def test_a_synchronized_step_moves_every_joint_together() -> None:
+    """All joints must arrive on the same step, or the arm sweeps the table."""
+    start = np.asarray(kin.READY_QPOS[:5])
+    goal = np.asarray(kin.HOLDER_PREGRASP)
+    qpos, arrived = start.copy(), None
+    for step in range(1, 200):
+        qpos = qpos + expert.synchronized_step(qpos, goal)
+        if np.abs(goal - qpos).max() < 1e-9:
+            arrived = step
+            break
+    assert arrived is not None
+    # Independent per-joint driving would land the short joints ~50 steps early.
+    fractions = np.abs(goal - start) / np.abs(goal - start).max()
+    assert fractions.min() < 0.3, "this waypoint no longer exercises the failure"
