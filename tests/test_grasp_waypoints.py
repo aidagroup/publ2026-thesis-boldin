@@ -232,3 +232,26 @@ def test_the_scripted_probes_pin_the_cube(script) -> None:
     source = (Path(__file__).parents[1] / "scripts" / script).read_text()
     assert "cube_spawn_jitter=0.0" in source
     assert "robot_init_qpos_noise=0.0" in source
+
+
+def test_the_face_grasp_offset_is_measured_from_the_face_LINK() -> None:
+    """The face link's origin is the layer's centre, not the cube's.
+
+    Measuring the nub from the cube's centre put the rotator's reach target
+    1.9 cm too far out. The builder is the authority on where that origin is,
+    so read its joint translation rather than restating the number.
+    """
+    source = (Path(__file__).parents[1] / "callosum/envs/_turntable_cube.py").read_text()
+    match = re.search(r"pose_in_parent=sapien\.Pose\(\s*\[0, ([^,]+), 0\]", source)
+    assert match, "the face joint's translation is no longer where this test looks"
+    assert match.group(1).strip() == "cube_half_size - face_thickness / 2"
+    assert abs(cube.FACE_LINK_ORIGIN_Y - (cube.CUBE_HALF_SIZE - cube.FACE_THICKNESS / 2)) < 1e-12
+    # Composed through the link origin, the reach target must land on the nub.
+    assert (
+        abs(
+            cube.FACE_LINK_ORIGIN_Y
+            + cube.FACE_GRASP_OFFSET[1]
+            - (cube.CUBE_HALF_SIZE + cube.NUB_GRASP_DEPTH)
+        )
+        < 1e-12
+    )

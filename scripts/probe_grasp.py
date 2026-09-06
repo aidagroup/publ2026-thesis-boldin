@@ -170,10 +170,13 @@ def main() -> int:
     )
     hdr = (
         f"{'step':>5} {'phase':>9} {'rot→face':>9} {'hold→body':>10} "
-        f"{'grasped':>8} {'held':>6} {'angle+':>7} {'angle-':>7} "
-        f"{'lift':>6} {'drot':>6} {'succ':>5}"
+        f"{'dq_h':>6} {'dq_r':>6} {'grasped':>8} {'held':>6} "
+        f"{'angle+':>7} {'angle-':>7} {'lift':>6} {'drot':>6} {'succ':>5}"
     )
     print(f"{hdr}\n{'-' * len(hdr)}")
+    print("  dq_h/dq_r: worst joint still short of the commanded waypoint, in rad.")
+    print("  Near 0 with a big distance = the waypoint is wrong; big = the arm")
+    print("  never arrived, and the distance column says nothing about geometry.")
 
     step = 0
     with torch.no_grad():
@@ -189,6 +192,8 @@ def main() -> int:
                     rot_arm = parked
                 a_hold = _action(base.agent_a, hold_arm, hold_grip, device)
                 a_rot = _action(base.agent_b, rot_arm, rot_grip, device)
+                # Keep the commanded targets for the tracking columns below.
+                targets = (hold_arm, rot_arm)
                 if name == TURN_PHASE:
                     # Drive wrist_roll away from its grasp value by a quarter
                     # turn, in both directions across the env batch. Rolling
@@ -208,6 +213,24 @@ def main() -> int:
                 if step % args.every and i != budget - 1:
                     continue
                 info = base.get_info()
+                # The measurement whose absence cost a server round trip on
+                # 2026-09-06: how far each arm still is from the joint angles
+                # it was commanded. Without it, "the waypoint is wrong" and
+                # "the arm never got there" produce the identical distance
+                # column, and there is no way to tell which one you are
+                # looking at. Near zero here with a large distance means the
+                # waypoint; large here means the arm is blocked or too slow.
+                dq_hold, dq_rot = (
+                    float(
+                        (
+                            agent.robot.get_qpos()[:, :5]
+                            - torch.as_tensor(target, dtype=torch.float32, device=device)
+                        )
+                        .abs()
+                        .max()
+                    )
+                    for agent, target in ((base.agent_a, targets[0]), (base.agent_b, targets[1]))
+                )
                 angle = base.face_link.joint.qpos
                 d_rot = torch.linalg.norm(base.agent_b.tcp_pos - base.face_grasp_pos, dim=1)
                 d_hold = torch.linalg.norm(base.agent_a.tcp_pos - base.body_grasp_pos, dim=1)
@@ -215,6 +238,7 @@ def main() -> int:
                 drot = common.quat_diff_rad(base.cube.pose.q, base.body_init_q)
                 print(
                     f"{step:>5} {name:>9} {d_rot.mean():>9.3f} {d_hold.mean():>10.3f} "
+                    f"{dq_hold:>6.3f} {dq_rot:>6.3f} "
                     f"{base.agent_b.is_grasping(base.face_link).float().mean():>8.2f} "
                     f"{base.agent_a.is_grasping(base.body_link).float().mean():>6.2f} "
                     f"{angle[:half].mean():>7.3f} {angle[half:].mean():>7.3f} "

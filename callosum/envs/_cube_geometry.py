@@ -78,9 +78,18 @@ NUB_GRASP_DEPTH = 0.015
 # Both are derived in `scripts/solve_waypoints.py` from the solved waypoints
 # and re-checked in CI, so they cannot drift away from the joint angles.
 
-# Face link frame: its origin is the cube's rotation centre, so the nub's axis
-# is the x = z = 0 line and the grasp sits along +y.
-FACE_GRASP_OFFSET = (0.0, CUBE_HALF_SIZE + NUB_GRASP_DEPTH, 0.0)
+# Face link frame. Its origin is NOT the cube's rotation centre: the builder
+# gives the face box no local offset, so the link's origin sits at the LAYER's
+# centre, `FACE_LINK_ORIGIN_Y` in front of the cube's. Measuring the nub from
+# the cube's centre instead put the rotator's target 1.9 cm too far out, which
+# on the 2026-09-06 server run read as the rotator settling 6.47 cm short --
+# a number that reproduces to the millimetre once the offset is included.
+#
+# The body link has no such trap (its origin IS the cube's centre, because its
+# box carries the offset instead), which is why the holder's column matched
+# exactly in the same run while the rotator's did not.
+FACE_LINK_ORIGIN_Y = CUBE_HALF_SIZE - FACE_THICKNESS / 2
+FACE_GRASP_OFFSET = (0.0, CUBE_HALF_SIZE + NUB_GRASP_DEPTH - FACE_LINK_ORIGIN_Y, 0.0)
 
 # Body link frame: same origin. The holder's tool axis runs 1.94 cm to +x of
 # the cube's axis (its blade lies flat on the body's -x face), 4.5 mm back
@@ -104,7 +113,7 @@ BODY_GRASP_LIFTED = (
 )
 FACE_GRASP_LIFTED = (
     FACE_GRASP_OFFSET[0],
-    FACE_GRASP_OFFSET[1],
+    FACE_LINK_ORIGIN_Y + FACE_GRASP_OFFSET[1],
     LIFT_HEIGHT + FACE_GRASP_OFFSET[2],
 )
 

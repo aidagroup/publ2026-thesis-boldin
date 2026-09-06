@@ -38,6 +38,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 from mani_skill.utils import common
+from mani_skill.utils.structs.pose import Pose
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from PIL import Image, ImageDraw
 
@@ -45,7 +46,9 @@ import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
 from callosum.envs._cube_geometry import (
     BODY_GRASP_LIFTED,
     BODY_GRASP_WORLD,
+    CUBE_HALF_SIZE,
     FACE_GRASP_LIFTED,
+    LIFT_HEIGHT,
 )
 from callosum.envs._scripted_expert import DELTA_LIMITS, PHASES, TURN_PHASE, arm_target
 from callosum.envs._so100_kinematics import (
@@ -86,6 +89,17 @@ def _captioned(frame: np.ndarray, caption: str) -> Image.Image:
     out.paste(img, (0, 0))
     ImageDraw.Draw(out).text((6, img.height + 6), caption, fill=(235, 235, 235))
     return out
+
+
+def _place_cube(base, centre_height: float) -> None:
+    """Move the cube itself, so lifted waypoints are measured against a lifted cube."""
+    pose = base.cube.pose
+    p = pose.p.clone()
+    p[:, 2] = centre_height
+    base.cube.set_pose(Pose.create_from_pq(p=p, q=pose.q))
+    base.scene._gpu_apply_all()
+    base.scene.px.gpu_update_articulation_kinematics()
+    base.scene._gpu_fetch_all()
 
 
 def _teleport(base, qpos_holder, qpos_rotator) -> None:
@@ -152,9 +166,11 @@ def _render_poses(base, out: Path) -> None:
         rot_grip = SEATING_GRIPPER_QPOS if rotator_wp == "rotator_grasp" else 0.0
         q_hold = _six(arm_target(holder_wp), grip)
         q_rot = _six(arm_target(rotator_wp), rot_grip)
+        lifted = holder_wp == "holder_lift"
+        _place_cube(base, LIFT_HEIGHT if lifted else CUBE_HALF_SIZE)
         _teleport(base, q_hold, q_rot)
         d_rot, d_hold = _distances(base)
-        fk_rot, fk_hold = _fk_distances(q_hold, q_rot, holder_wp == "holder_lift")
+        fk_rot, fk_hold = _fk_distances(q_hold, q_rot, lifted)
         print(
             f"  {label:>17} {d_rot * 100:7.2f} cm (fk {fk_rot * 100:5.2f})"
             f" {d_hold * 100:7.2f} cm (fk {fk_hold * 100:5.2f})"
@@ -276,6 +292,7 @@ def main() -> int:
     print(f"initial state -> {path}")
 
     _render_poses(base, out)
+    _place_cube(base, CUBE_HALF_SIZE)
     if args.script:
         _render_script(env, base, uids, out, args)
 
