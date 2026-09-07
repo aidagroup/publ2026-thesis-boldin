@@ -26,7 +26,7 @@ _DEFAULT_REWARD_CONFIG = RubikRewardConfig()
 _MOVE_IDS = {move: i for i, move in enumerate(_rubik.MOVES)}
 
 
-@register_env("RubikCube-v0", max_episode_steps=300)
+@register_env("RubikCube-v0", max_episode_steps=500)
 class RubikCube(FaceTurn):
     """Bimanual Rubik's-cube task on top of FaceTurn's holder/rotator mechanism.
 

@@ -38,15 +38,17 @@ from callosum.envs._so100_kinematics import (
 # live in `_cube_geometry`.
 
 
-# 300, not 100. The budget an optimal FaceTurn episode needs, from the
+# 500, not 300. The budget an optimal FaceTurn episode needs, from the
 # kinematic solution for the grasp poses: >=10 control steps for the rotator
 # and >=19 for the holder to travel from READY_QPOS to their grasp
 # configurations at the 0.05 rad/step delta limit, ~6 steps to close the
 # gripper at 0.2 rad/step, and >=32 steps of wrist_roll for the quarter turn.
-# ~70 steps of pure motion, so 300 leaves room to correct and settle. (With
-# the pre-2026-08-30 base yaws the approach alone cost ~90 steps, because
+# ~70 steps of pure motion. `_scripted_expert.PHASES` totals 440 to give the
+# scripted solver margin on every transition (server run 2026-09-07: 265 was
+# not enough -- cube ended at z = -0.374 m, 47 cm below spawn).
+# (With the pre-2026-08-30 base yaws the approach alone cost ~90 steps, because
 # ~32 of them went into rotating shoulder_pan to face the cube.)
-@register_env("TwoSO100-v0", max_episode_steps=300)
+@register_env("TwoSO100-v0", max_episode_steps=500)
 class TwoSO100Base(BaseEnv):
     """Two SO-100 arms around a table with a single loose cube.
 

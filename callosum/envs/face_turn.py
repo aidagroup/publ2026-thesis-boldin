@@ -31,7 +31,7 @@ _DEFAULT_REWARD_CONFIG = FaceTurnRewardConfig()
 
 
 # See the step-budget note on TwoSO100-v0.
-@register_env("FaceTurn-v0", max_episode_steps=300)
+@register_env("FaceTurn-v0", max_episode_steps=500)
 class FaceTurn(TwoSO100Base):
     """Bimanual face-turn task on top of TwoSO100Base's two-arm plumbing.
 

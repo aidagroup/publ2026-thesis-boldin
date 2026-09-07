@@ -43,7 +43,7 @@ def test_the_env_registers_as_rubikcube_v0() -> None:
     kwargs = {
         kw.arg: kw.value.value for kw in decorator.keywords if isinstance(kw.value, ast.Constant)
     }
-    assert kwargs.get("max_episode_steps") == 300
+    assert kwargs.get("max_episode_steps") == 500
 
 
 def test_the_move_table_tensor_is_built_once() -> None:

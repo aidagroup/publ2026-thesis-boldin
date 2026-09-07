@@ -52,14 +52,14 @@ WAYPOINTS = {
 # the arm mid-flight and reads as a geometry failure.
 PHASES = [
     ("settle", "ready", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 10),
-    ("reach", "holder_pregrasp", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 70),
-    ("descend", "holder_grasp", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 12),
-    ("hold", "holder_grasp", "ready", GRIPPER_CLOSED, GRIPPER_OPEN, 16),
-    ("lift", "holder_lift", "ready", GRIPPER_CLOSED, GRIPPER_OPEN, 20),
-    ("approach", "holder_lift", "rotator_pregrasp", GRIPPER_CLOSED, GRIPPER_OPEN, 60),
-    ("seat", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_OPEN, 16),
-    ("close", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 16),
-    ("turn", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 45),
+    ("reach", "holder_pregrasp", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 130),
+    ("descend", "holder_grasp", "ready", GRIPPER_OPEN, GRIPPER_OPEN, 20),
+    ("hold", "holder_grasp", "ready", GRIPPER_CLOSED, GRIPPER_OPEN, 30),
+    ("lift", "holder_lift", "ready", GRIPPER_CLOSED, GRIPPER_OPEN, 40),
+    ("approach", "holder_lift", "rotator_pregrasp", GRIPPER_CLOSED, GRIPPER_OPEN, 100),
+    ("seat", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_OPEN, 25),
+    ("close", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 25),
+    ("turn", "holder_lift", "rotator_grasp", GRIPPER_CLOSED, GRIPPER_CLOSED, 60),
 ]
 
 TOTAL_STEPS = sum(p[5] for p in PHASES)
