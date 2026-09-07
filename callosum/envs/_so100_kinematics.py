@@ -49,7 +49,7 @@ import numpy as np
 # holder's is the larger one because it grips the whole 5.7 cm body, whose
 # axis is therefore 2.16 cm off its tool axis; the rotator grips a nub sized
 # to sit ON its tool axis, so it needs almost nothing.
-ARM_BASE_OFFSET = 0.26  # B: проба 0.26 для приближения
+ARM_BASE_OFFSET = 0.34  # B: при 0.28 holder не достаёт, при 0.32 wrist_flex на лимите; 0.34 — единственное рабочее (см. coarser_sweep, miss 0.092 м при 0.26, недостижимо)
 HOLDER_BASE_YAW = np.pi
 ROTATOR_BASE_YAW = 0.0
 HOLDER_BASE_X = 0.0216
