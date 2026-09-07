@@ -249,6 +249,7 @@ def main() -> int:
                 print(
                     f"{step:>5} {name:>9} {d_rot.mean():>9.3f} {d_hold.mean():>10.3f} "
                     f"{dq_hold:>6.3f} {dq_rot:>6.3f} "
+                # Audit item 6: is_grasping checks y-axis; SO-100 jaws close along x (see handoff item 6)
                     f"{base.agent_b.is_grasping(base.face_link).float().mean():>8.2f} "
                     f"{base.agent_a.is_grasping(base.body_link).float().mean():>6.2f} "
                     f"{angle[:half].mean():>7.3f} {angle[half:].mean():>7.3f} "

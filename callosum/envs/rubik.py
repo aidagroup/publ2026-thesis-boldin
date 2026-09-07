@@ -75,7 +75,7 @@ class RubikCube(FaceTurn):
             # per-step move application below has no such loop.
             colours = np.empty((b, _rubik.N_FACELETS), dtype=np.int64)
             for k in range(b):
-                state, _ = _rubik.scramble(self.reward_config.scramble_depth, self._episode_rng)
+                state, _ = _rubik.scramble(self.reward_config.scramble_depth, self._batched_episode_rng[env_idx[k]])
                 colours[k] = state.colours
             self.cube_colours[env_idx] = torch.from_numpy(colours).to(self.device)
             self.moves_applied[env_idx] = 0
@@ -89,9 +89,12 @@ class RubikCube(FaceTurn):
             # (num_envs, 54, 6) one-hot, flattened to (num_envs, 324). Shared
             # task field (no agent_x_ prefix): both arms need to see the
             # cube's logical state, not just their own proprioception.
+            # Bi-JEPA fix: narrow shared cube-colours field. Full 324-dim is bit-identical
+            # between agents (near-trivial target). Use face-centre colours (54) plus
+            # a small learned encoding later; for now keep raw but document issue.
             one_hot = torch.zeros((self.num_envs, _rubik.N_FACELETS, 6), device=self.device)
             one_hot.scatter_(2, self.cube_colours.unsqueeze(-1), 1.0)
-            obs["cube_colours"] = one_hot.reshape(self.num_envs, -1)
+            obs["cube_colours"] = one_hot.reshape(self.num_envs, -1)  # TODO(3.2): encode to < 54 dims
         return obs
 
     def _apply_completed_turns(self, env_idx: torch.Tensor, face_angle: torch.Tensor) -> None:
@@ -106,8 +109,9 @@ class RubikCube(FaceTurn):
         move_ids = torch.empty(env_idx.shape[0], dtype=torch.long, device=self.device)
         for k in range(env_idx.shape[0]):
             face = _rubik.facing_face(quats[k], (0.0, 1.0, 0.0))
-            # Positive angle -> clockwise -> "X"; negative -> "X'".
-            move_ids[k] = _MOVE_IDS[face if signs[k] > 0 else face + "'"]
+            # Positive angle -> counter-clockwise (right-hand rule, axis +y) -> "X'";
+            # negative -> "X". See handoff item 2 / audit C.
+            move_ids[k] = _MOVE_IDS[face + "'" if signs[k] > 0 else face]
 
         perm = self._move_tables[move_ids]  # (n, 54)
         self.cube_colours[env_idx] = torch.gather(self.cube_colours[env_idx], 1, perm)
