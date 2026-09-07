@@ -180,43 +180,88 @@ def _diag(base, phase: str, who: str, target_attr: str) -> None:
 
     held = base.agent_a.is_grasping(base.body_link).float().mean()
     rgripped = base.agent_b.is_grasping(base.face_link).float().mean()
+
+    # --- contact normal force on each finger (N) ---------------------------
+    # SO100.is_grasping thresholds |force| >= 0.5 N (mani_skill so100.py). Printing
+    # the raw force is what decides "held==0 but TCP on the handle" from "TCP off
+    # because the cube slipped": a real grip reads >=0.5 N on BOTH fingers, a cube
+    # the jaws are just shoving reads ~0.
+    def _finger_force(agent, link):
+        try:
+            lf = agent.scene.get_pairwise_contact_forces(agent.finger1_link, link)
+            rf = agent.scene.get_pairwise_contact_forces(agent.finger2_link, link)
+            nl = float(torch.linalg.norm(lf, axis=1).mean())
+            nr = float(torch.linalg.norm(rf, axis=1).mean())
+            return nl, nr
+        except Exception:
+            # Some sim backends expose no per-pair contact API; degrade to NaN
+            # rather than crash a whole GPU probe run.
+            return float("nan"), float("nan")
+
+    h_lf, h_rf = _finger_force(base.agent_a, base.body_link)
+    r_lf, r_rf = _finger_force(base.agent_b, base.face_link)
+
     cube_mean = cube.pose.p.mean(dim=0).cpu().numpy()
     nominal = np.array([0.0, 0.0, CUBE_HALF_SIZE])
-    # cube upright-ness: angle of its world-z axis from gravity (rad)
+    # `tilt` = angle of the cube's world-z axis from vertical. A pure YAW spin
+    # about the vertical axis leaves world-z identical, so tilt==0 and tilt
+    # ALONE cannot catch a cube the gripper is rotating instead of holding.
+    # That is what `drot` -- the body's total orientation drift from its spawn
+    # pose, identical to FaceTurn.evaluate's rot_drift (face_turn.py:144) --
+    # catches. `body_init_q` is the spawn orientation, captured per env at
+    # reset (face_turn.py:108).
+    drot = float(common.quat_diff_rad(cube.pose.q, base.body_init_q).mean())
     R = _quat_to_mat(cube.pose.q[0].cpu().numpy())
     tilt = float(np.arccos(np.clip(R[2, 2], -1.0, 1.0)))
     print(
         f"  [diag {phase}] {who} TCP vs {target_attr} in cube frame "
-        f"(cm): x={res_local[0]*100:+.2f} y={res_local[1]*100:+.2f} "
-        f"z={res_local[2]*100:+.2f}"
+        f"(cm): x={res_local[0] * 100:+.2f} y={res_local[1] * 100:+.2f} "
+        f"z={res_local[2] * 100:+.2f}"
     )
     print(
-        f"  [diag {phase}] sim tcp={np.round(sim_tcp*100,2)}cm "
-        f"fk={np.round(fk_tcp*100,2)}cm drift={np.round(frame_drift*100,2)}cm "
-        f"(|d|={np.linalg.norm(frame_drift)*100:.2f}cm)"
+        f"  [diag {phase}] sim tcp={np.round(sim_tcp * 100, 2)}cm "
+        f"fk={np.round(fk_tcp * 100, 2)}cm drift={np.round(frame_drift * 100, 2)}cm "
+        f"(|d|={np.linalg.norm(frame_drift) * 100:.2f}cm)"
     )
     print(
         f"  [diag {phase}] cube.mean={np.round(cube_mean, 3)} "
         f"(nominal {nominal}, drift {np.round(cube_mean - nominal, 3)}, "
-        f"tilt={np.degrees(tilt):.1f} deg)"
+        f"tilt={np.degrees(tilt):.1f} deg, drot={np.degrees(drot):.1f} deg)"
     )
+    gripper_qpos = float(agent.robot.get_qpos()[:, 5].mean())
     print(
-        f"  [diag {phase}] held(holder)={float(held):.2f} "
-        f"grasped(rotator)={float(rgripped):.2f}"
+        f"  [diag {phase}] gripper_qpos={gripper_qpos:+.3f} "
+        f"holder_force=({h_lf:.2f}/{h_rf:.2f})N rotator_force=({r_lf:.2f}/{r_rf:.2f})N "
+        f"held(holder)={float(held):.2f} grasped(rotator)={float(rgripped):.2f}"
     )
+    body_rot_tol = float(getattr(base.reward_config, "body_rot_tol", 0.1))
     if np.linalg.norm(res_local) < 0.01:
         verdict = "grip is ON the handle"
-    elif res_world.dot(np.array([0.0, 0.0, 1.0])) and (cube_mean[2] < nominal[2] - 0.02):
+    elif cube_mean[2] < nominal[2] - 0.02:
         verdict = "cube is BELOW spawn -- grip lost, body fell"
     elif np.linalg.norm(frame_drift) > 0.03:
         verdict = (
             "FRAME MISMATCH: sim tcp != FK tcp at the same qpos -- waypoints "
             "solve against a mis-framed model; re-check _so100_kinematics vs URDF"
         )
+    elif drot > body_rot_tol:
+        verdict = (
+            "cube spun %.0f deg in yaw (drot) but FK==sim tcp (|d|=%.2fcm) -- "
+            "gripper ejected it; NOT a waypoint miss. held=%.2f, "
+            "holder_force=%.2f/%.2f N (need >=0.5)"
+            % (
+                np.degrees(drot),
+                np.linalg.norm(frame_drift) * 100,
+                float(held),
+                h_lf,
+                h_rf,
+            )
+        )
     elif tilt > np.radians(20):
         verdict = (
-            "cube spun (tilt %.0f deg) but FK==sim tcp -- gripper is "
-            "ejecting/rotating the cube; not a waypoint miss" % np.degrees(tilt)
+            "cube tipped %.0f deg but FK==sim tcp -- gripper is "
+            "ejecting/rotating the cube; not a waypoint miss"
+            % np.degrees(tilt)
         )
     else:
         verdict = "residual looks like a geometry/waypoint miss"
@@ -375,12 +420,27 @@ def main() -> int:
             if name in checks:
                 who, agent, target = checks[name]
                 d = torch.linalg.norm(agent.tcp_pos - getattr(base, target), dim=1)
-                if float(d.mean()) > WAYPOINT_TOLERANCE:
-                    print(
-                        f"  !! {who} settled {float(d.mean()) * 100:.1f} cm from its grip"
-                        f" (expected < {WAYPOINT_TOLERANCE * 1000:.0f} mm). The waypoint does"
-                        " not match the scene -- re-solve it before reading anything below."
-                    )
+                dm = float(d.mean())
+                if dm > WAYPOINT_TOLERANCE:
+                    # A large d is ONLY a wrong waypoint if the FK actually
+                    # disagrees with what SAPIEN reports at the same joints.
+                    # If sim==fk tcp the gap is the CUBE moving under a failed
+                    # grip (held==0), not a scene/waypoint mismatch -- and the
+                    # classic 2026-08-30 trap is re-solving a frame that is
+                    # already correct. --diag below is the authoritative check.
+                    if args.diag:
+                        print(
+                            f"  !! {who} settled {dm * 100:.1f} cm from its grip"
+                            f" (expected < {WAYPOINT_TOLERANCE * 1000:.0f} mm); see"
+                            " the --diag verdict to decide frame-miss from drift."
+                        )
+                    else:
+                        print(
+                            f"  !! {who} settled {dm * 100:.1f} cm from its grip"
+                            f" (expected < {WAYPOINT_TOLERANCE * 1000:.0f} mm). Run"
+                            " with --diag to separate a frame mismatch from a"
+                            " drifted cube before re-solving."
+                        )
                 if args.diag:
                     _diag(base, name, who, target)
 
