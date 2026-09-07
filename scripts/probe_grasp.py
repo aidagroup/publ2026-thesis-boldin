@@ -62,9 +62,12 @@ from callosum.envs._scripted_expert import (
     synchronized_step,
 )
 from callosum.envs._so100_kinematics import (
+    HOLDER_BASE_POSE,
+    ROTATOR_BASE_POSE,
     READY_QPOS,
     ROTATOR_GRASP,
     SEATING_GRIPPER_QPOS,
+    tcp_position,
 )
 from callosum.envs.face_turn import TARGET_FACE_ANGLE
 
@@ -123,6 +126,18 @@ def _action(agent, target_arm: np.ndarray, target_grip: float, device) -> torch.
     return torch.clamp(action, -1.0, 1.0)
 
 
+def _quat_to_mat(q: np.ndarray) -> np.ndarray:
+    """3x3 orientation matrix (local->world) from a SAPIEN quaternion [w,x,y,z]."""
+    w, x, y, z = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
 def _world_to_local(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Rotate a world vector into the cube's local frame (quaternion w,x,y,z).
 
@@ -130,15 +145,7 @@ def _world_to_local(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     the mean of each env's rotated residual -- good enough for a one-line
     diagnostic that only prints the mean.
     """
-    w, x, y, z = q
-    r = np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-        ]
-    )
-    return r.T @ v  # world->local is the transpose of the orientation matrix
+    return _quat_to_mat(q).T @ v  # world->local is the transpose of the orientation matrix
 
 
 def _diag(base, phase: str, who: str, target_attr: str) -> None:
@@ -149,24 +156,49 @@ def _diag(base, phase: str, who: str, target_attr: str) -> None:
     and STAY ~0 while it is held. A CONSTANT large residual means the waypoint
     geometry no longer matches the scene; a residual that GROWS from ~0 means
     the cube slipped out of an initially-good grip (friction/contact failure).
+
+    The decisive sub-test is the sim-vs-FK TCP comparison: SAPIEN reports
+    ``agent.tcp_pos`` from its URDF, the model reports ``kin.tcp_position``
+    from `_so100_kinematics`. If those disagree at the SAME joint angles the
+    waypoints were solved against the wrong kinematic frame (the 2026-08-30
+    class of regression), and no physics fix will move the TCP. If they agree
+    but the cube spun, the gripper is ejecting it (friction/contact).
     """
     cube = base.cube
     tcp = base.agent_a.tcp_pos if who == "holder" else base.agent_b.tcp_pos
     handle = getattr(base, target_attr)
     res_world = (tcp - handle).mean(dim=0).cpu().numpy()
     res_local = _world_to_local(cube.pose.q[0].cpu().numpy(), res_world)
+
+    # --- the discriminator: sim TCP vs model FK at the same joints ---
+    agent = base.agent_a if who == "holder" else base.agent_b
+    base_pose = HOLDER_BASE_POSE if who == "holder" else ROTATOR_BASE_POSE
+    qpos = agent.robot.get_qpos()[0].cpu().numpy()          # (6,) incl. gripper
+    fk_tcp = tcp_position(qpos, base_pose)                 # (3,) world
+    sim_tcp = tcp[0].cpu().numpy()
+    frame_drift = fk_tcp - sim_tcp
+
     held = base.agent_a.is_grasping(base.body_link).float().mean()
     rgripped = base.agent_b.is_grasping(base.face_link).float().mean()
     cube_mean = cube.pose.p.mean(dim=0).cpu().numpy()
     nominal = np.array([0.0, 0.0, CUBE_HALF_SIZE])
+    # cube upright-ness: angle of its world-z axis from gravity (rad)
+    R = _quat_to_mat(cube.pose.q[0].cpu().numpy())
+    tilt = float(np.arccos(np.clip(R[2, 2], -1.0, 1.0)))
     print(
         f"  [diag {phase}] {who} TCP vs {target_attr} in cube frame "
         f"(cm): x={res_local[0]*100:+.2f} y={res_local[1]*100:+.2f} "
         f"z={res_local[2]*100:+.2f}"
     )
     print(
+        f"  [diag {phase}] sim tcp={np.round(sim_tcp*100,2)}cm "
+        f"fk={np.round(fk_tcp*100,2)}cm drift={np.round(frame_drift*100,2)}cm "
+        f"(|d|={np.linalg.norm(frame_drift)*100:.2f}cm)"
+    )
+    print(
         f"  [diag {phase}] cube.mean={np.round(cube_mean, 3)} "
-        f"(nominal {nominal}, drift {np.round(cube_mean - nominal, 3)})"
+        f"(nominal {nominal}, drift {np.round(cube_mean - nominal, 3)}, "
+        f"tilt={np.degrees(tilt):.1f} deg)"
     )
     print(
         f"  [diag {phase}] held(holder)={float(held):.2f} "
@@ -176,6 +208,16 @@ def _diag(base, phase: str, who: str, target_attr: str) -> None:
         verdict = "grip is ON the handle"
     elif res_world.dot(np.array([0.0, 0.0, 1.0])) and (cube_mean[2] < nominal[2] - 0.02):
         verdict = "cube is BELOW spawn -- grip lost, body fell"
+    elif np.linalg.norm(frame_drift) > 0.03:
+        verdict = (
+            "FRAME MISMATCH: sim tcp != FK tcp at the same qpos -- waypoints "
+            "solve against a mis-framed model; re-check _so100_kinematics vs URDF"
+        )
+    elif tilt > np.radians(20):
+        verdict = (
+            "cube spun (tilt %.0f deg) but FK==sim tcp -- gripper is "
+            "ejecting/rotating the cube; not a waypoint miss" % np.degrees(tilt)
+        )
     else:
         verdict = "residual looks like a geometry/waypoint miss"
     print(f"  [diag {phase}] verdict: {verdict}")
