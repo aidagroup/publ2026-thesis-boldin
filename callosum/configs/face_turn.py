@@ -41,3 +41,7 @@ class FaceTurnRewardConfig:
     angle_tol: float = 0.05  # rad (~3 deg) short of the quarter turn
     lift_tol: float = 0.015  # m below LIFT_HEIGHT that still counts as lifted
     body_rot_tol: float = 0.1  # rad (~6 deg) of body rotation from its spawn
+
+# NOTE: SO-100 gripper force_limit=100 N·m is boilerplate (shared with arm joints),
+# not a real servo figure. All comfortable margins (200-1500x) depend on it.
+# Worth an ablation with realistic cap before trusting grasp-stability results.
