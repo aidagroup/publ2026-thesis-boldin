@@ -53,7 +53,7 @@ from mani_skill.utils import common
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-from callosum.envs._cube_geometry import LIFT_HEIGHT, NUB_HALF_WIDTH, NUB_LENGTH
+from callosum.envs._cube_geometry import CUBE_HALF_SIZE, LIFT_HEIGHT, NUB_HALF_WIDTH, NUB_LENGTH
 from callosum.envs._scripted_expert import (
     DELTA_LIMITS,
     PHASES,
@@ -123,11 +123,76 @@ def _action(agent, target_arm: np.ndarray, target_grip: float, device) -> torch.
     return torch.clamp(action, -1.0, 1.0)
 
 
+def _world_to_local(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Rotate a world vector into the cube's local frame (quaternion w,x,y,z).
+
+    Rotation is linear, so rotating the batch-mean residual is equivalent to
+    the mean of each env's rotated residual -- good enough for a one-line
+    diagnostic that only prints the mean.
+    """
+    w, x, y, z = q
+    r = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+    return r.T @ v  # world->local is the transpose of the orientation matrix
+
+
+def _diag(base, phase: str, who: str, target_attr: str) -> None:
+    """Print where the holding arm's TCP sits, in the cube's frame.
+
+    If `target_attr` (e.g. ``body_grasp_pos``) is the handle the arm is trying
+    to hold, the residual TCP-minus-handle should be ~0 once the grip is on --
+    and STAY ~0 while it is held. A CONSTANT large residual means the waypoint
+    geometry no longer matches the scene; a residual that GROWS from ~0 means
+    the cube slipped out of an initially-good grip (friction/contact failure).
+    """
+    cube = base.cube
+    tcp = base.agent_a.tcp_pos if who == "holder" else base.agent_b.tcp_pos
+    handle = getattr(base, target_attr)
+    res_world = (tcp - handle).mean(dim=0).cpu().numpy()
+    res_local = _world_to_local(cube.pose.q[0].cpu().numpy(), res_world)
+    held = base.agent_a.is_grasping(base.body_link).float().mean()
+    rgripped = base.agent_b.is_grasping(base.face_link).float().mean()
+    cube_mean = cube.pose.p.mean(dim=0).cpu().numpy()
+    nominal = np.array([0.0, 0.0, CUBE_HALF_SIZE])
+    print(
+        f"  [diag {phase}] {who} TCP vs {target_attr} in cube frame "
+        f"(cm): x={res_local[0]*100:+.2f} y={res_local[1]*100:+.2f} "
+        f"z={res_local[2]*100:+.2f}"
+    )
+    print(
+        f"  [diag {phase}] cube.mean={np.round(cube_mean, 3)} "
+        f"(nominal {nominal}, drift {np.round(cube_mean - nominal, 3)})"
+    )
+    print(
+        f"  [diag {phase}] held(holder)={float(held):.2f} "
+        f"grasped(rotator)={float(rgripped):.2f}"
+    )
+    if np.linalg.norm(res_local) < 0.01:
+        verdict = "grip is ON the handle"
+    elif res_world.dot(np.array([0.0, 0.0, 1.0])) and (cube_mean[2] < nominal[2] - 0.02):
+        verdict = "cube is BELOW spawn -- grip lost, body fell"
+    else:
+        verdict = "residual looks like a geometry/waypoint miss"
+    print(f"  [diag {phase}] verdict: {verdict}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--envs", type=int, default=32)
     ap.add_argument("--env-id", default="FaceTurn-v0")
     ap.add_argument("--every", type=int, default=25, help="print every N steps")
+    ap.add_argument(
+        "--diag",
+        action="store_true",
+        help="print holder/rotator TCP residual in the cube's local frame at "
+        "the hold/close phase ends (isolates geometry-miss from grip-slip; "
+        "needs a GPU server, ignored elsewhere)",
+    )
     ap.add_argument(
         "--only",
         choices=("both", "rotator", "holder"),
@@ -274,6 +339,8 @@ def main() -> int:
                         f" (expected < {WAYPOINT_TOLERANCE * 1000:.0f} mm). The waypoint does"
                         " not match the scene -- re-solve it before reading anything below."
                     )
+                if args.diag:
+                    _diag(base, name, who, target)
 
     info = base.get_info()
     angle = base.face_link.joint.qpos
