@@ -172,7 +172,7 @@ scripts/                 # smoke-скрипты запуска (сервер)
 - Запуск как модуль: `python -m callosum.training.ippo --env-id <id>` (так вызывает runbook).
 - **Логирование:** в зависимостях сейчас нет ни `tensorboard`, ни `wandb`. Добавь **`tensorboard`** в extra `train` и пиши скаляры (reward, success-rate, лоссы) в `runs/`. Это единственная новая зависимость, которую можно трогать; остальной лок не менять.
 - Число параллельных сред по умолчанию взять консервативно (напр. 256) — на сервере подкрутим.
-- ⚠️ **Среды создавать с `render_backend="none"`** (`gym.make(..., obs_mode="state", render_backend="none")`): на сервере аппаратный Vulkan не работает (только lavapipe), и без этого `gym.make` с `sim_backend="gpu"` падает на создании `RenderSystem` (см. `server-runbook.md`).
+- ⚠️ **Среды создавать с `render_backend="none"`** (`gym.make(..., obs_mode="state", render_backend="none")`): обучению по состояниям рендер не нужен, а если на сервере окажется только lavapipe, без этого `gym.make` с `sim_backend="gpu"` падает на создании `RenderSystem` (см. `server-runbook.md`).
 **Критерий готовности (СЕРВЕР):** сначала sanity на **`TwoSO101-v0`** (до шага 1.5 – `TwoSO100-v0`) (чистая reach-награда) — кривая награды растёт; затем `FaceTurn-v0` — success-rate логируется и нетривиален.
 
 ### Шаг 2.2 – BenchMARL-обёртка + IPPO/MAPPO
