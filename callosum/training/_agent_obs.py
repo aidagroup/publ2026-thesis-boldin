@@ -47,8 +47,27 @@ _ROLE_PREFIX = ("agent_a_", "agent_b_")
 if TYPE_CHECKING:
     import torch
 
+STATE_GROUPS = ("agent", "extra")
+"""Top-level groups ManiSkill v3.0.1 flattens into `obs["state"]` for visual obs modes with a
+`state` part (`BaseEnv._flatten_raw_obs`: `dict(agent=..., extra=...)`, in this order). Pass it
+as `state_groups` where the structured observation also carries sensor groups."""
+
 Path = tuple[str, ...]
 Layout = list[tuple[Path, int]]
+
+
+def state_view(structured: Mapping, groups: Sequence[str] = STATE_GROUPS) -> dict:
+    """The structured observation restricted to `groups`, in that order (others are dropped).
+
+    For `obs_mode="state+rgb"` and the like, `get_obs(unflattened=True)` also holds
+    `sensor_param` / `sensor_data`, which are not part of the flat `obs["state"]`. Dropping them
+    is only done on explicit request (`state_groups`); with no restriction `obs_layout` and
+    `select_fields` still reject unknown groups. Raises `KeyError` if a group is missing.
+    """
+    missing = [g for g in groups if g not in structured]
+    if missing:
+        raise KeyError(f"structured observation has no group(s) {missing}: {list(structured)}")
+    return {g: structured[g] for g in groups}
 
 
 def obs_layout(structured: Mapping) -> Layout:
@@ -208,8 +227,16 @@ class AgentObsBuilder:
         flat_obs: torch.Tensor,
         partner_obs: str,
         agent_uids: Sequence[str] = AGENT_UIDS,
+        state_groups: Sequence[str] | None = None,
     ) -> AgentObsBuilder:
-        """Builder for an env, verified against one of its real flat observations."""
+        """Builder for an env, verified against one of its real flat observations.
+
+        `state_groups=None` (training, `obs_mode="state"`) uses every group of `structured`, so
+        an unknown one raises in `select_fields`. Playback in a `state+rgb` env passes
+        `STATE_GROUPS` to ignore the camera groups, which are not in the flat state vector.
+        """
+        if state_groups is not None:
+            structured = state_view(structured, state_groups)
         layout = obs_layout(structured)
         check_layout(layout, flat_obs, structured)
         return cls(layout, partner_obs, agent_uids)

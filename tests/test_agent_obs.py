@@ -13,9 +13,11 @@ import pytest
 
 from callosum.training._agent_obs import (
     AGENT_UIDS,
+    STATE_GROUPS,
     AgentObsBuilder,
     obs_layout,
     select_fields,
+    state_view,
 )
 
 N = 3  # batch size
@@ -252,3 +254,15 @@ def test_check_layout_catches_wrong_order_and_size() -> None:
     with pytest.raises(ValueError, match="flattening order"):
         check_layout(layout, shuffled, tensors)
     AgentObsBuilder.from_env_obs(tensors, flat, "full")
+
+
+def test_training_path_still_rejects_unknown_sensor_groups() -> None:
+    """Without `state_groups` an unknown top-level group (camera data) raises, as before."""
+    obs = make_obs()
+    obs["sensor_data"] = {"cam": {"rgb": np.zeros((N, 4, 4, 3), dtype=np.uint8)}}
+    with pytest.raises(ValueError, match="unexpected observation group"):
+        AgentObsBuilder(obs_layout(obs), "full")
+    # Explicit restriction drops it, and the result equals the plain layout.
+    restricted = state_view(obs, STATE_GROUPS)
+    assert list(restricted) == ["agent", "extra"]
+    assert obs_layout(restricted) == obs_layout(make_obs())

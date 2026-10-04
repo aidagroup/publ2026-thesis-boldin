@@ -9,7 +9,13 @@ import pytest
 torch = pytest.importorskip("torch")  # CI installs only the dev extra; run with `make dev`
 
 from callosum.configs.ippo import IPPOConfig
-from callosum.training._agent_obs import AGENT_UIDS, AgentObsBuilder, obs_layout
+from callosum.training._agent_obs import (
+    AGENT_UIDS,
+    STATE_GROUPS,
+    AgentObsBuilder,
+    check_layout,
+    obs_layout,
+)
 from callosum.training._checkpoint import save_checkpoint
 from callosum.training._playback import (
     CheckpointPolicy,
@@ -184,3 +190,48 @@ def test_episode_summary_tracks_return_success_and_face_angle() -> None:
     assert summary.face_angle_deg == pytest.approx(68.75, abs=0.01)
     assert "success False" in summary.status() and "68.8 deg" in summary.status()
     assert "once: True" in summary.text() and "3 steps" in summary.text()
+
+
+def with_camera_groups(structured: dict) -> dict:
+    """`get_obs(unflattened=True)` of a `state+rgb` env: the state groups plus the camera ones."""
+    gen = torch.Generator().manual_seed(9)
+    return {
+        **structured,
+        "sensor_param": {
+            "cam_a": {"cam2world_gl": torch.randn(N, 4, 4, generator=gen)},
+            "cam_b": {"intrinsic_cv": torch.randn(N, 3, 3, generator=gen)},
+        },
+        "sensor_data": {
+            "cam_a": {"rgb": torch.randint(0, 255, (N, 32, 24, 3), generator=gen).to(torch.uint8)},
+            "cam_b": {"rgb": torch.randint(0, 255, (N, 32, 24, 3), generator=gen).to(torch.uint8)},
+        },
+    }
+
+
+def test_playback_layout_ignores_camera_groups_and_matches_training(tmp_path) -> None:
+    path, _, reference = make_checkpoint(tmp_path)
+    cam = structured_obs(CAM_UIDS, seed=5)
+    full = with_camera_groups(cam)
+    state = flat(cam)  # what obs["state"] holds: agent + extra only
+    assert state.shape[-1] == 57
+
+    # Without the explicit restriction the camera groups are counted (the original bug).
+    assert sum(w for _, w in obs_layout(full)) > 57
+    with pytest.raises(ValueError, match="columns"):
+        check_layout(obs_layout(full), state, full)
+
+    policy = CheckpointPolicy(path)
+    policy.bind(full, state, CAM_UIDS, [(-torch.ones(6), torch.ones(6))] * 2)
+    assert policy.builder.layout == reference.layout
+    assert policy.builder.total_dim == 57
+    check_layout(policy.builder.layout, state, cam)
+    assert policy.builder.columns == reference.columns
+    assert list(policy.act(state)) == list(CAM_UIDS)
+
+
+def test_state_groups_must_exist() -> None:
+    plain = rename_agent_keys(structured_obs(CAM_UIDS), CAM_UIDS, AGENT_UIDS)
+    with pytest.raises(KeyError):
+        AgentObsBuilder.from_env_obs(
+            {"agent": plain["agent"]}, flat(plain), "full", state_groups=STATE_GROUPS
+        )

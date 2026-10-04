@@ -13,9 +13,11 @@ from the env's state observation exactly as the trainer did:
 * The per-agent slicing is the trainer's own `AgentObsBuilder`. Its layout comes from the
   structured observation (`get_obs(unflattened=True)`) with the wrist-camera agent uids renamed
   to the training uids (`rename_agent_keys`), and `check_layout` verifies it against the real
-  flat state. The camera robots have the same joints as the plain ones, so the layout is
-  identical; `CheckpointPolicy.bind` asserts that the resulting input widths equal the
-  checkpoint's `obs_dims`.
+  flat state. Only the `agent` and `extra` groups are used (`STATE_GROUPS`, what ManiSkill
+  v3.0.1 flattens into `obs["state"]`); the `sensor_data` / `sensor_param` groups of the
+  unflattened observation are dropped explicitly. The camera robots have the same joints as
+  the plain ones, so the layout is identical; `CheckpointPolicy.bind` asserts that the
+  resulting input widths equal the checkpoint's `obs_dims`.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from typing import Any
 import torch
 
 from callosum.configs.ippo import IPPOConfig
-from callosum.training._agent_obs import AgentObsBuilder
+from callosum.training._agent_obs import STATE_GROUPS, AgentObsBuilder
 from callosum.training._checkpoint import load_agent_weights, load_checkpoint
 from callosum.training._ppo_core import ActorCritic
 
@@ -160,7 +162,8 @@ class CheckpointPolicy:
         """Attach the policy to an env: build and verify the per-agent input slicing.
 
         Args:
-            structured: the env's `get_obs(unflattened=True)` (needs `agent` and `extra`).
+            structured: the env's `get_obs(unflattened=True)`; only its `agent` and `extra` groups
+                are used (the camera groups are not part of the flat state).
             flat_state: the env's flat state observation from the same moment (`state_of(obs)`).
             env_uids: the env's agent uids, agent_a first (may differ from the training uids).
             bounds: per agent, the `(low, high)` of its action space.
@@ -171,7 +174,11 @@ class CheckpointPolicy:
         """
         canonical = rename_agent_keys(structured, env_uids, self.train_uids)
         builder = AgentObsBuilder.from_env_obs(
-            canonical, flat_state, self.cfg.partner_obs, self.train_uids
+            canonical,
+            flat_state,
+            self.cfg.partner_obs,
+            self.train_uids,
+            state_groups=STATE_GROUPS,
         )
         if builder.obs_dims != self.obs_dims:
             raise ValueError(
