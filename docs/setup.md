@@ -65,7 +65,9 @@ git clone https://github.com/aidagroup/callosum.git && cd callosum
 bash scripts/setup_server.sh --smoke
 ```
 
-Later: `cd "$CALLOSUM_REPO" && git pull && bash scripts/setup_server.sh`
+Later: `cd "$CALLOSUM_REPO" && bash scripts/update_server.sh` (hard-syncs the checkout to the
+latest pushed code, safe after force-pushes, then re-runs setup; options in
+[server-runbook.md](server-runbook.md#1-environment-clone-or-update-then-setup)).
 (`CALLOSUM_REPO` comes from `~/.callosum-env.sh`, below). The repo is cloned over
 HTTPS because there is no SSH key on the server; if the repository is private,
 git will ask for a username and a read-only token (check on the server).
@@ -181,7 +183,7 @@ immediately without reinstalling.
 edit locally  →  git commit  →  git push                              (dev / macOS)
                                     │
                                     ▼
-JupyterHub terminal:  git pull  →  bash scripts/setup_server.sh  →  detached run
+JupyterHub terminal:  bash scripts/update_server.sh  →  detached run
                                     │
                                     ▼
 JupyterHub file browser: download results                              (→ dev / macOS)

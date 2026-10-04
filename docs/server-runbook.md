@@ -44,7 +44,7 @@ restart), results in `~/callosum-runs` (small, persistent) reached through the
 
 ## Session order
 
-### 1. Environment: clone or pull, then setup
+### 1. Environment: clone or update, then setup
 
 Open a terminal and look at what survived:
 
@@ -67,9 +67,41 @@ bash scripts/setup_server.sh
 
 ```bash
 source ~/.callosum-env.sh
-cd "$CALLOSUM_REPO" && git pull
-bash scripts/setup_server.sh               # idempotent; quick when nothing changed
+cd "$CALLOSUM_REPO"
+bash scripts/update_server.sh              # fetch + hard-sync, then setup_server.sh
 ```
+
+`update_server.sh` updates the checkout to the latest pushed code and then re-runs
+`scripts/setup_server.sh` (idempotent; quick when nothing changed). It is a hard
+sync, not a `git pull`: `git fetch --prune origin` (time-bounded), then
+`git checkout -B <branch> origin/<branch>`, so a force-pushed (rewritten) remote
+history is no problem. It prints old → new commit and a `git diff --stat`.
+
+```bash
+bash scripts/update_server.sh                        # current branch
+bash scripts/update_server.sh --branch main          # switch branch (needed on a detached HEAD)
+bash scripts/update_server.sh --force                # discard uncommitted changes to tracked files
+bash scripts/update_server.sh --no-setup             # only update the code
+bash scripts/update_server.sh -- --smoke             # args after `--` go to setup_server.sh
+```
+
+Uncommitted changes to tracked files are refused (printed) unless `--force`; code is
+never edited on the server. Untracked and ignored files (the `runs` symlink, logs)
+are kept: there is no `git clean`. If `update_server.sh` itself changed in the
+update, the new version is re-executed automatically. The exit code is that of
+`setup_server.sh`.
+
+**One-time, for a checkout that predates this script or still tracks the rewritten
+history** (the script cannot run, or `git pull` complains about divergent branches):
+
+```bash
+cd "$CALLOSUM_REPO"
+git fetch origin && git checkout -B step/1.5-parallel-gripper origin/step/1.5-parallel-gripper
+bash scripts/update_server.sh              # from now on, use the script
+```
+
+(Add `-f` to `git checkout` if it refuses because of local changes to tracked files;
+they are disposable.)
 
 The script verifies driver, a real CUDA matmul, compute capability vs the torch
 CUDA build, ManiSkill + our `so101_pg` agent, and that both envs register. Stop and
@@ -171,7 +203,7 @@ pkill -f callosum.training                    # if the pid file is stale
 ```
 
 `stdout.log` lives in `$HOME` via the `runs/` symlink, so it survives a restart
-(the run itself does not). Do not `git pull` / switch branches mid-run: `callosum`
+(the run itself does not). Do not run `update_server.sh` / `git pull` / switch branches mid-run: `callosum`
 is installed editable, so later imports would see the new code.
 
 **Verify on the server first** that detaching really works: `setsid nohup sleep 600 &`,
@@ -256,8 +288,8 @@ Notes:
 Everything above that is not a measured fact, in the order it will bite:
 
 1. `bash scripts/setup_server.sh` completes: `uv sync --frozen` pulls the `cu128`
-   wheels (torch, CUDA libs) through `download-r2.pytorch.org`; `uv` installs from
-   `astral.sh`; uv's Python 3.12 download from GitHub works.
+   wheels (torch, CUDA libs) through `download-r2.pytorch.org`; `uv` installs via
+   `pip --user` from PyPI (fallback: the astral.sh installer, which fetches from github.com); uv's Python 3.12 download from GitHub works.
 2. Which of the quirk fixes (libcuda shim, Vulkan loader, PhysX download) the script
    actually had to apply; whether conda-forge is reachable.
 3. `~/.bashrc` is read by new JupyterHub terminals (so `~/.callosum-env.sh` loads).
