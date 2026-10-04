@@ -61,18 +61,25 @@ the uv cache is warm, so re-running it after a `git pull` is quick.
 ```bash
 uv run python scripts/smoke_env.py
 uv run python scripts/smoke_face_turn.py
+uv run python scripts/probe_face_turn.py
 ```
 
-Pre-check the same scripts on the Mac CPU sim first (`--sim-backend cpu
---num-envs 2`, command in [setup.md](setup.md#local-macos)); the arm-reach and
+Pre-check the same scripts on the Mac CPU sim first (`--sim-backend cpu`,
+one env, command in [setup.md](setup.md#local-macos)); the arm-reach and
 gripper questions below can already be answered there. The server run confirms
-them on the GPU backend.
+them on the GPU backend. `probe_face_turn.py` is a scripted two-arm expert (no
+teleporting): the holder clamps the cube body, the rotator clamps the face
+layer top-down and rolls its wrist by 90 degrees. It prints, per phase, the
+grasp flags, face angle, body drift and `success`, and exits non-zero unless
+every env ends with `success=True`. On the Mac CPU sim it succeeds (20/20 reset
+seeds); on the GPU backend it is still unverified.
 
 **Known open questions these answer** (all flagged in code as `TODO(review)`):
 
 | Question | Where | If it fails |
 |---|---|---|
-| Do both arms actually reach the cube at the arm spacing (±0.25 m, see the constant in `two_so101_base.py`)? Can check on the Mac CPU sim. | `smoke_env.py` | adjust the spacing constant in `two_so101_base.py`; SO-101 top-down reach at cube height is ~0.27 m |
+| Do both arms reach the cube in the 90-degree layout (holder 0.32 m on -y, rotator 0.24 m on +x, `ArmLayout` in `callosum/configs/layout.py`)? Can check on the Mac CPU sim. | `smoke_env.py`, `probe_face_turn.py` | adjust the radii/azimuths in `ArmLayout`; SO-101 top-down reach at cube height is ~0.27 m |
+| Can a holder and a rotator arm do the face turn together without colliding (holder clamps the body, rotator clamps the face and rolls 90 degrees, body stays put)? Can check on the Mac CPU sim. | `probe_face_turn.py` | check which arm links collide (the wrist housings are 12.8 cm wide); adjust the layout or the probe's grasp parameters |
 | Does the face articulation look/behave right (no jitter, face sits on the body)? | `smoke_face_turn.py` | check `disable_self_collisions`; review the joint pose |
 | Are the joint friction/damping sane at cube scale? | `smoke_face_turn.py` | tune `friction`/`damping` in `_turntable_cube.py` |
 | Does the parallel gripper actually close on the layer's side faces (`is_grasping`)? Can check on the Mac CPU sim. | `smoke_face_turn.py` | revisit the grasp target in `face_turn.compute_dense_reward` |
