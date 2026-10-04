@@ -154,27 +154,90 @@ Record the actual printed output; it is the evidence that phase 1 works.
 
 ### 3. First training run — the "does it learn at all" gate
 
-Start with the **easy** env, not the hard one: `TwoSO101-v0` has a pure reach
-reward, so if IPPO can't improve there, the problem is the trainer, not the
-task. Launch it detached (next section), e.g.:
+The trainer is `callosum/training/ippo.py` (step 2.1): two independent PPO learners, one per
+arm, on one shared GPU simulation (details in its module docstring; every flag is a field of
+`callosum/configs/ippo.py`, `--help` lists them). Both arms train on the env's shared
+*normalised dense* reward; each arm's policy input is cut out of the flat state observation
+(own joint state, own TCP pose, task state, plus the partner's TCP pose only for `--partner-obs full`), see
+`callosum/training/_agent_obs.py`. It prints, at start, the exact input fields of each arm: check
+that the lines look right before trusting a long run.
+
+Defaults worth knowing: `--num-envs 256` (raise on the A100 once it runs), `--num-steps 100`
+(batch 25 600), `--gamma 0.99` (not ManiSkill's 0.8: 5-step horizon), `--max-episode-steps`
+unset = the env's registered length (400 for FaceTurn-v0, since the scripted probe needs ~330
+steps; 100 for TwoSO101-v0; a number overrides both), evaluation every 20 iterations with
+16 envs over a full episode, `--partner-obs full`.
+
+Start with the **easy** env, not the hard one: `TwoSO101-v0` has a pure reach reward, so if
+IPPO can't improve there, the problem is the trainer, not the task. Launch both detached (see
+"Long runs" below for the details and how to stop a run):
 
 ```bash
-uv run python -m callosum.training.ippo --env-id TwoSO101-v0 --total-timesteps <short>
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+
+# 1. Sanity: reach only. 1M steps = 39 iterations (a few minutes on the A100).
+NAME=twoso101_sanity; mkdir -p runs/$NAME
+setsid nohup uv run python -m callosum.training.ippo \
+    --env-id TwoSO101-v0 --total-timesteps 1000000 --exp-name $NAME \
+    > runs/$NAME/stdout.log 2>&1 < /dev/null &
+echo $! > runs/$NAME/pid
+
+# 2. The real target, after the sanity run shows a rising reward.
+NAME=faceturn_s1; mkdir -p runs/$NAME
+setsid nohup uv run python -m callosum.training.ippo \
+    --env-id FaceTurn-v0 --total-timesteps 10000000 --seed 1 --exp-name $NAME \
+    > runs/$NAME/stdout.log 2>&1 < /dev/null &
+echo $! > runs/$NAME/pid
 ```
 
-Then the real target:
+`--exp-name` is the run directory name under `runs/`; the trainer reuses an existing directory
+(the shell created it for `stdout.log`). Watch it:
 
 ```bash
-uv run python -m callosum.training.ippo --env-id FaceTurn-v0
+tail -f runs/$NAME/stdout.log        # Ctrl-C leaves the run alone
 ```
 
-Success criterion (from `docs/implementation-plan.md`, step 2.1 / the
-experiment design): reward curve rises and success-rate becomes non-trivial.
-This is the gate that decides whether the whole approach is viable.
+One line per iteration: `iter 12/390 | step 307200 | sps 3700 | ret 31.2 | succ 0.04 (n=35) |
+ent a/b 5.1/5.2 | kl a/b 0.01/0.02 | eval_succ 0.00 | eval_ret 28.1`. `ret`/`succ` are the
+training episodes that finished during the iteration (`n` = how many; `ret -` / `n=0` until the
+first one ends, and `ret`/`succ` then keep their last value); `eval_*` are from the latest
+evaluation (an `eval @ iter ...` line is printed each time, also once before training starts
+as the untrained baseline). TensorBoard tags (section 4): `train/{return,success_once,...}`,
+`eval/{return,success_once,success_at_end,...}`, `losses/agent_{a,b}/{policy_loss,value_loss,
+entropy,approx_kl,clipfrac,explained_variance}`, `policy/agent_{a,b}/action_std`, `charts/SPS`.
+Files in `runs/$NAME/`: `config.json`, `events.out.tfevents.*`, `latest.pt` (every 20
+iterations and at the end), `best.pt` (best evaluation success, then return): about 2.3 MB each,
+both agents' weights plus the config, no optimizer state (`--checkpoint <file>` warm-starts from
+the weights).
+
+Local pre-check on the Mac CPU sim (one env, a few seconds; also what the trainer was
+verified with before the server run):
+
+```bash
+PYTHONPATH=. uv run -q --no-project --python 3.12 --with mani-skill==3.0.1 --with torch --with tensorboard \
+    python -m callosum.training.ippo --env-id FaceTurn-v0 --sim-backend cpu --num-envs 1 \
+    --total-timesteps 600 --num-minibatches 4 --eval-freq 3 --exp-name smoke   # then: rm -r runs/smoke
+```
+
+Success criterion (from `docs/implementation-plan.md`, step 2.1 / the experiment design):
+
+* `TwoSO101-v0`: `train/return` and `eval/return` rise clearly over the run (reach reward
+  only, no success flag; an early run on the old SO-100 went from -75 to -40 per 300-step
+  episode in 1M steps; for comparison the untrained policy scores about -26 per 100 steps on
+  the Mac CPU sim), `explained_variance` goes up towards 1, `approx_kl` stays below
+  `target_kl` (0.1).
+* `FaceTurn-v0`: reward rises and `eval/success_once` is non-trivial (clearly above 0).
+  This is the gate that decides whether the whole approach is viable. If the reward rises
+  but success stays 0, look at the reward terms before touching the trainer (see the notes in
+  the step-2.1 report: holder reward, body-drift penalty).
+
+Expected throughput: the archived SO-100 trainer measured about 3700 steps/s on the A100 with
+256 envs (2300 -> 3700 over the first iterations), i.e. 10M steps in under an hour; unmeasured
+for the SO-101 envs and for this trainer, so record the real `sps` here after the first run.
 
 **Rule: every state-based env must be created with `render_backend="none"`**
-(`gym.make(..., obs_mode="state", render_backend="none")`); a future trainer must
-pass it too. ManiSkill v3.0.1 defaults to `"gpu"`, which makes `BaseEnv._setup_scene`
+(`gym.make(..., obs_mode="state", render_backend="none")`); the trainer
+(`ippo.make_envs`) passes it. ManiSkill v3.0.1 defaults to `"gpu"`, which makes `BaseEnv._setup_scene`
 build `sapien.render.RenderSystem(<cuda device>)`; with `"none"` the render device is
 `None`, so no `RenderSystem`, lighting or sensors are created. Without it, `gym.make`
 fails with `RuntimeError: Failed to find a supported physical device "cuda:0"` on a
@@ -189,14 +252,15 @@ rendering (vision phase, wrist-camera videos) **only when setup printed
 #### Long runs (detached)
 
 A run started from a notebook cell dies with the kernel when the tab closes. In a
-**terminal**, detach it from the terminal with `setsid nohup`:
+**terminal**, detach it from the terminal with `setsid nohup` (the exact commands for the
+two runs are in section 3; the pattern is):
 
 ```bash
 source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
-NAME=twoso101_sanity                          # one directory per run
+NAME=<run name>                               # one directory per run
 mkdir -p runs/$NAME
 setsid nohup uv run python -m callosum.training.ippo \
-    --env-id TwoSO101-v0 --total-timesteps <short> \
+    --env-id <env> --exp-name $NAME [flags] \
     > runs/$NAME/stdout.log 2>&1 < /dev/null &
 echo $! > runs/$NAME/pid                      # best effort; see pgrep below
 ```
@@ -207,9 +271,12 @@ Check and stop it:
 tail -f runs/$NAME/stdout.log                 # Ctrl-C leaves the run alone
 pgrep -af callosum.training                   # alive? (pid, command line)
 nvidia-smi                                    # GPU utilisation and memory
-kill <pid>                                    # polite stop (SIGTERM)
-pkill -f callosum.training                    # if the pid file is stale
+pkill -TERM -f "python -m callosum.training.ippo"   # polite stop (SIGTERM), see below
+kill <pid>                                    # same, if the pid file is right
 ```
+
+SIGTERM makes the trainer finish the current iteration, run an evaluation and write
+`latest.pt` before exiting (`kill -9` loses everything since the last periodic save).
 
 `stdout.log` lives in `$HOME` via the `runs/` symlink, so it survives a restart
 (the run itself does not). Do not run `update_server.sh` / `git pull` / switch branches mid-run: `callosum`
@@ -235,13 +302,12 @@ TensorBoard has no SSH tunnel to ride on. Two options:
 
 1. **Through JupyterHub** — only if `jupyter-server-proxy` is installed (verify:
    `pip list 2>/dev/null | grep -i jupyter-server-proxy` and
-   `jupyter server extension list`). `tensorboard` is not in `uv.lock` on this
-   branch, so use the ephemeral `uvx` (PyPI is allowed) unless the trainer step
-   adds it:
+   `jupyter server extension list`). `tensorboard` is in the `train` extra
+   (installed by `setup_server.sh`):
 
    ```bash
    cd "$CALLOSUM_REPO"
-   uvx tensorboard --logdir runs --port 6006 --host 127.0.0.1 &   # or `uv run tensorboard …`
+   uv run tensorboard --logdir runs --port 6006 --host 127.0.0.1 &
    ```
 
    then open `<your JupyterHub URL>/user/<you>/proxy/6006/` (the standard

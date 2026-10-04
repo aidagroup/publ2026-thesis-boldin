@@ -8,10 +8,11 @@ The strategy (holder clamps the body, rotator clamps the face and rolls its wris
 four phases) is documented in `_face_turn_expert.py`, which `render_episode.py` shares.
 
 Joint targets come from a small numpy IK of the URDF (`ArmModel`); the cube pose is read from
-the sim (privileged). After every phase the script prints: whether the holder grasps the body,
-whether the rotator grasps the face, the face angle, the body drift (position, rotation) and the
-env's success flag. With several envs (GPU) floats are shown as min/mean/max and flags as
-`count/num_envs`.
+the sim (privileged). After every phase the script prints: the env step count, the dense reward
+(raw and normalised; the sanity check that the shaping rewards the phases in order), whether the
+holder grasps the body, whether the rotator grasps the face, the face angle, the body drift
+(position, rotation) and the env's success flag. With several envs (GPU) floats are shown as
+min/mean/max and flags as `count/num_envs`.
 
 Run it on either backend (`--sim-backend cpu` is one env, also on macOS). Exit status 1 if
 success is not reached in every env after the release.

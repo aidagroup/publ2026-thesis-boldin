@@ -20,12 +20,13 @@ sim = [
     "mani-skill ; sys_platform == 'linux'",
     "pettingzoo",
 ]
-# RL training stack (TorchRL + BenchMARL on PyTorch).
+# RL training stack (TorchRL + BenchMARL on PyTorch); tensorboard for the IPPO trainer's logs.
 train = [
     "torch",
     "tensordict",
     "torchrl",
     "benchmarl",
+    "tensorboard",
 ]
 dev = [
     "ruff",

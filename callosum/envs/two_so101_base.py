@@ -22,7 +22,7 @@ from transforms3d.euler import euler2quat
 
 from callosum.configs.cameras import SceneCameraConfig, look_at_pose
 from callosum.configs.layout import ArmLayout, base_xy_yaw
-from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner_obs
+from callosum.envs._partner_obs import tcp_pose_fields, validate_partner_obs
 from callosum.robots.so101_parallel_gripper import SO101ParallelGripper
 
 # ~5.7 cm real Rubik's cube edge length.
@@ -55,12 +55,12 @@ class TwoSO101Base(BaseEnv):
     actions, and reward shapes -- so it can be smoke-tested before the real
     articulated face-turn task (step 1.3) lands.
 
-    `partner_obs` (`"full"` or `"none"`) toggles whether both agents' TCP
-    poses are included in the shared extra-obs dict -- the oracle/no-partner
-    ends of the ablation triple from docs/thesis/04-experiment-design.md
-    (`"predicted"`, from Bi-JEPA, lands in a later phase). See
-    `callosum.envs._partner_obs` for exactly what this can and can't express
-    at this stage.
+    `partner_obs` (`"full"` or `"none"`, validated and stored) is the oracle/no-partner switch
+    of the ablation triple from docs/thesis/04-experiment-design.md (`"predicted"`, from
+    Bi-JEPA, lands in a later phase). It does NOT change the env's observation: both agents'
+    TCP poses are always in the shared extra-obs dict, and the per-agent input builder
+    `callosum.training._agent_obs` applies the visibility rule (own TCP always, partner TCP only
+    for "full"); see `callosum.envs._partner_obs`.
     """
 
     # `so101_pg_wristcam` is `so101_pg` plus a wrist camera per arm (for rendering / vision).
@@ -171,18 +171,15 @@ class TwoSO101Base(BaseEnv):
     def _get_obs_extra(self, info: dict):
         # Own qpos/qvel per agent already come from the default
         # _get_obs_agent (MultiAgent.get_proprioception, keyed per sub-agent
-        # uid) -- this only adds what BaseEnv doesn't already provide: TCP
-        # poses (gated by partner_obs) and cube pose (always present; it's
-        # task-object state, not "partner" info).
+        # uid) -- this only adds what BaseEnv doesn't already provide: both TCP
+        # poses (always; who may see which is decided per agent in
+        # callosum.training._agent_obs, see callosum.envs._partner_obs) and the
+        # cube pose (task-object state).
         #
         # obs_mode="state" flattens this whole dict into one combined tensor
-        # (mani_skill.utils.common.flatten_state_dict), so there is no
-        # per-agent split at this level either way -- see
-        # callosum.envs._partner_obs for exactly what partner_obs does and
-        # doesn't control here.
-        obs = partner_tcp_pose_fields(
-            self.partner_obs, self.agent_a.tcp_pose.raw_pose, self.agent_b.tcp_pose.raw_pose
-        )
+        # (mani_skill.utils.common.flatten_state_dict), so the env cannot split
+        # it per agent itself.
+        obs = tcp_pose_fields(self.agent_a.tcp_pose.raw_pose, self.agent_b.tcp_pose.raw_pose)
         if "state" in self.obs_mode:
             obs["cube_pose"] = self.cube.pose.raw_pose
         return obs
