@@ -6,6 +6,7 @@ from callosum.configs.ippo import (
     IPPOConfig,
     build_parser,
     clamp_envs_for_cpu_backend,
+    learning_rate_at,
     parse_args,
     resolve_episode_length,
 )
@@ -102,3 +103,23 @@ def test_cpu_backend_clamps_env_counts(capsys: pytest.CaptureFixture) -> None:
     assert clamp_envs_for_cpu_backend(values) is None and values["num_envs"] == 256
     values = {"sim_backend": "cpu", "num_envs": 1, "num_eval_envs": 1}
     assert clamp_envs_for_cpu_backend(values) is None
+
+
+def test_lr_anneals_linearly_to_zero_by_default() -> None:
+    cfg = IPPOConfig(
+        learning_rate=3e-4, num_envs=4, num_steps=100, num_minibatches=4, total_timesteps=4000
+    )
+    assert cfg.anneal_lr and cfg.num_iterations == 10
+    assert learning_rate_at(cfg, 1) == pytest.approx(3e-4)
+    assert learning_rate_at(cfg, 6) == pytest.approx(1.5e-4)
+    assert learning_rate_at(cfg, 10) == pytest.approx(3e-5)  # last iteration still > 0
+    lrs = [learning_rate_at(cfg, k) for k in range(1, cfg.num_iterations + 1)]
+    assert lrs == sorted(lrs, reverse=True)
+
+
+def test_lr_constant_without_annealing() -> None:
+    cfg = parse_args(
+        ["--no-anneal-lr", "--num-envs", "4", "--num-minibatches", "4", "--total-timesteps", "4000"]
+    )
+    assert cfg.anneal_lr is False
+    assert {learning_rate_at(cfg, k) for k in (1, 5, 10)} == {cfg.learning_rate}

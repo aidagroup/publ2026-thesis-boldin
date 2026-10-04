@@ -166,6 +166,10 @@ class Rig:
         self.q = [x[:, :NUM_ARM_JOINTS].copy() for x in qpos]
         self.grip = [np.full(self.n, GRIPPER_OPEN) for _ in self.agents]
         self.last_info: dict = {}
+        # (env step, reward returned by env.step on that step, previous step's reward) of the
+        # first step on which env 0 reports success; shows the success bonus as a one-step jump.
+        self.first_success: tuple[int, float, float] | None = None
+        self._last_reward = float("nan")
 
     def base_frame(self, arm: int) -> tuple[np.ndarray, np.ndarray]:
         """World poses of an arm's base: rotations (n, 3, 3) and positions (n, 3)."""
@@ -250,7 +254,11 @@ class Rig:
         for arm, uid in enumerate(self.uids):
             act = np.concatenate([self.q[arm], self.grip[arm][:, None]], axis=1)
             action[uid] = torch.as_tensor(act, dtype=torch.float32, device=self.base.device)
-        _, _, _, _, self.last_info = self.env.step(action)
+        _, reward, _, _, self.last_info = self.env.step(action)
+        reward0 = float(reward.reshape(-1)[0])
+        if self.first_success is None and bool(self.last_info["success"].reshape(-1)[0]):
+            self.first_success = (int(self.base.elapsed_steps[0]), reward0, self._last_reward)
+        self._last_reward = reward0
 
     def move(self, q_a=None, q_b=None, grip_a=None, grip_b=None, settle=SETTLE_STEPS) -> None:
         """Linearly interpolate the arms to new joint targets (and set grippers), then settle."""
@@ -366,6 +374,12 @@ def main() -> None:
 
     rig.move(grip_b=GRIPPER_OPEN, settle=20)
     final = rig.report("release")
+    if rig.first_success is not None:
+        step, reward, before = rig.first_success
+        print(
+            f"first success at env step {step}: env.step reward {reward:.2f} "
+            f"(the step before: {before:.2f})"
+        )
     print(f"target face angle: {math.degrees(TARGET_FACE_ANGLE):.1f} deg")
 
     env.close()

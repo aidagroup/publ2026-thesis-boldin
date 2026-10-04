@@ -198,17 +198,54 @@ tail -f runs/$NAME/stdout.log        # Ctrl-C leaves the run alone
 ```
 
 One line per iteration: `iter 12/390 | step 307200 | sps 3700 | ret 31.2 | succ 0.04 (n=35) |
-ent a/b 5.1/5.2 | kl a/b 0.01/0.02 | eval_succ 0.00 | eval_ret 28.1`. `ret`/`succ` are the
+ent a/b 5.1/5.2 | kl a/b 0.01/0.02 | lr 2.9e-04 | eval_succ 0.00 | eval_ret 28.1`. `lr` is
+the learning rate of that iteration: it decays linearly to 0 over the run (`anneal_lr`, on by
+default, `--no-anneal-lr` for a constant rate; with `--checkpoint` the schedule restarts from
+`--learning-rate` for the new run's iterations). `ret`/`succ` are the
 training episodes that finished during the iteration (`n` = how many; `ret -` / `n=0` until the
-first one ends, and `ret`/`succ` then keep their last value); `eval_*` are from the latest
+first one ends, and `ret`/`succ` then keep their last value). On `FaceTurn-v0` `ret` and
+`eval_ret` include the one-step success bonus (`success_bonus`, 100 in normalised units, see
+`callosum/configs/face_turn.py`), so a successful episode adds about 100 to its return and
+numbers are **not comparable with runs from before the bonus** (those had `ret` of 12 to 57
+late in training; successful episodes ended early and collected less); judge such runs by
+`succ` / `eval_succ` and `success_at_end`. Success is also a true terminal for value
+bootstrapping now (only time-limit truncations bootstrap). `eval_*` are from the latest
 evaluation (an `eval @ iter ...` line is printed each time, also once before training starts
 as the untrained baseline). TensorBoard tags (section 4): `train/{return,success_once,...}`,
 `eval/{return,success_once,success_at_end,...}`, `losses/agent_{a,b}/{policy_loss,value_loss,
-entropy,approx_kl,clipfrac,explained_variance}`, `policy/agent_{a,b}/action_std`, `charts/SPS`.
+entropy,approx_kl,clipfrac,explained_variance}`, `policy/agent_{a,b}/action_std`, `charts/{SPS,learning_rate}`.
 Files in `runs/$NAME/`: `config.json`, `events.out.tfevents.*`, `latest.pt` (every 20
 iterations and at the end), `best.pt` (best evaluation success, then return): about 2.3 MB each,
 both agents' weights plus the config, no optimizer state (`--checkpoint <file>` warm-starts from
 the weights).
+
+##### FaceTurn v2: three seeds from scratch (success bonus, LR annealing)
+
+30M steps each (1171 iterations of 256 x 100), seeds 1 to 3, **one detached job running the
+seeds one after another** (the envs share the GPU, three at once would slow each). After each
+run its directory is archived into `~/callosum-archive/<name>.tar.gz` (`runs/` is a symlink to
+`~/callosum-runs`; the archive holds the event files, `config.json`, `stdout.log` and both
+checkpoints, a few MB):
+
+```bash
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+mkdir -p "$HOME/callosum-archive"
+setsid nohup bash -c '
+for SEED in 1 2 3; do
+  NAME=faceturn_v2_s$SEED; mkdir -p runs/$NAME
+  uv run python -m callosum.training.ippo --env-id FaceTurn-v0 \
+      --total-timesteps 30000000 --seed $SEED --exp-name $NAME \
+      > runs/$NAME/stdout.log 2>&1 < /dev/null
+  tar czf "$HOME/callosum-archive/$NAME.tar.gz" -C runs $NAME
+done' > runs/faceturn_v2_driver.log 2>&1 < /dev/null &
+echo $! > runs/faceturn_v2_driver.pid
+```
+
+Watch the current seed with `tail -f runs/faceturn_v2_s1/stdout.log` (then `_s2`, `_s3`). To
+stop: first `kill $(cat runs/faceturn_v2_driver.pid)` (the driver, so no further seed starts),
+then `pkill -TERM -f "python -m callosum.training.ippo"` (polite stop of the running seed); the
+`tar` step is skipped in that case, archive by hand. Do not run `update_server.sh` mid-job
+(later seeds would import the new code).
 
 Local pre-check on the Mac CPU sim (one env, a few seconds; also what the trainer was
 verified with before the server run):

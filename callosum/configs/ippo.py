@@ -68,7 +68,13 @@ class IPPOConfig:
 
     # --- PPO -----------------------------------------------------------------------------
     learning_rate: float = 3e-4
-    anneal_lr: bool = False
+    anneal_lr: bool = True
+    """Linear learning-rate decay to 0 over this run's `num_iterations`, as ManiSkill's PPO
+    baseline (`--anneal_lr`): iteration `k` (1-based) uses `learning_rate * (1 - (k-1)/N)`. The
+    fixed rate was too large for the late, near-deterministic policy (KL above `target_kl` on
+    almost every iteration, cutting the PPO epochs short). The schedule belongs to the run: with
+    a warm start (`checkpoint`) it restarts from `learning_rate` for the new run's iterations
+    (the optimizer state is not restored either). Disable with `--no-anneal-lr`."""
     gamma: float = 0.99
     """0.99, not the baseline's 0.8: 0.8 is a 5-step horizon, tuned for 50-step tasks with an
     immediate reward. FaceTurn needs hundreds of steps and its grasp/turn reward comes late."""
@@ -140,6 +146,14 @@ class IPPOConfig:
     def num_iterations(self) -> int:
         """Number of PPO iterations (`total_timesteps // batch_size`)."""
         return self.total_timesteps // self.batch_size
+
+
+def learning_rate_at(cfg: IPPOConfig, iteration: int) -> float:
+    """Learning rate of the 1-based PPO `iteration`: linear decay from `learning_rate` towards 0
+    over `num_iterations` if `anneal_lr`, else constant."""
+    if not cfg.anneal_lr:
+        return cfg.learning_rate
+    return (1.0 - (iteration - 1.0) / cfg.num_iterations) * cfg.learning_rate
 
 
 def clamp_envs_for_cpu_backend(values: dict) -> str | None:

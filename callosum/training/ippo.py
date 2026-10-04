@@ -17,6 +17,9 @@ rollout/GAE/update structure, `ManiSkillVectorEnv` with partial resets and `reco
 * Rewards: both agents are trained on the env's one shared reward, the *normalised dense* reward
   (`reward_mode="normalized_dense"`, as in the ManiSkill baseline). Per-agent credit assignment
   is a later concern; the roles are encoded in the env's reward terms, not split per learner.
+* Success is a true terminal: only time-limit truncations bootstrap from the final observation
+  (the baseline bootstraps terminations too), see FaceTurnRewardConfig.success_bonus.
+* The learning rate decays linearly to 0 over the run by default (`anneal_lr`).
 * Logging to TensorBoard (`runs/<run_name>/`) and one compact line per iteration on stdout;
   checkpoints `latest.pt` and `best.pt` (by evaluation success) in the same directory.
 
@@ -40,7 +43,7 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from torch.utils.tensorboard import SummaryWriter
 
 import callosum.envs.face_turn  # noqa: F401  (registers TwoSO101-v0 and FaceTurn-v0)
-from callosum.configs.ippo import IPPOConfig, parse_args, resolve_episode_length
+from callosum.configs.ippo import IPPOConfig, learning_rate_at, parse_args, resolve_episode_length
 from callosum.envs._sim_compat import prepare_sim_backend
 from callosum.training._agent_obs import AgentObsBuilder
 from callosum.training._checkpoint import load_agent_weights, load_checkpoint, save_checkpoint
@@ -264,10 +267,9 @@ def _train(
     iteration = 0
 
     for iteration in range(1, cfg.num_iterations + 1):
-        if cfg.anneal_lr:
-            lr = (1.0 - (iteration - 1.0) / cfg.num_iterations) * cfg.learning_rate
-            for opt in optimizers:
-                opt.param_groups[0]["lr"] = lr
+        lr = learning_rate_at(cfg, iteration)
+        for opt in optimizers:
+            opt.param_groups[0]["lr"] = lr
 
         # --- Rollout ---------------------------------------------------------------------
         rollout_start = time.time()
@@ -293,13 +295,19 @@ def _train(
             rewards[step] = reward.view(-1) * cfg.reward_scale
 
             if train_stats.add(infos):
-                # Episodes that just ended were auto-reset: bootstrap from their true last obs.
-                # (Terminations on success are bootstrapped like truncations, as in the baseline.)
-                done_mask = infos["_final_info"]
-                with torch.no_grad():
-                    final_obs = builder(infos["final_observation"][done_mask])
-                    for i, agent in enumerate(agents):
-                        final_values[i][step, done_mask] = agent.get_value(final_obs[i]).view(-1)
+                # Episodes that just ended were auto-reset. Time-limit truncations bootstrap
+                # from their true last obs; terminations (success) are true terminals and keep
+                # final_values = 0. (The ManiSkill baseline bootstraps both. With the FaceTurn
+                # success bonus that would feed the bonus back through V(final obs) of the
+                # success state and inflate the value function.)
+                done_mask = infos["_final_info"] & ~terminations
+                if done_mask.any():
+                    with torch.no_grad():
+                        final_obs = builder(infos["final_observation"][done_mask])
+                        for i, agent in enumerate(agents):
+                            final_values[i][step, done_mask] = agent.get_value(final_obs[i]).view(
+                                -1
+                            )
         rollout_time = time.time() - rollout_start
 
         # --- Advantages and per-agent PPO updates ----------------------------------------
@@ -344,7 +352,7 @@ def _train(
         logger.log_many(train_stats.means(), global_step, prefix="train/")
         logger.log("train/episodes", train_stats.num_episodes, global_step)
         logger.log("rollout/step_reward", rewards.mean(), global_step)
-        logger.log("charts/learning_rate", optimizers[0].param_groups[0]["lr"], global_step)
+        logger.log("charts/learning_rate", lr, global_step)
         logger.log("charts/SPS", sps, global_step)
         logger.log("time/rollout_time", rollout_time, global_step)
         logger.log("time/update_time", update_time, global_step)

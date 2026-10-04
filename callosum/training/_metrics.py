@@ -105,6 +105,7 @@ def progress_line(
             f"succ {format_value(logger.get('train/success_once'), '.3f')} (n={train_episodes})",
             f"ent a/b {entropy[0]}/{entropy[1]}",
             f"kl a/b {kl[0]}/{kl[1]}",
+            f"lr {format_value(logger.get('charts/learning_rate'), '.2e')}",
             f"eval_succ {format_value(logger.get('eval/success_once'), '.3f')}",
             f"eval_ret {format_value(logger.get('eval/return'))}",
         ]

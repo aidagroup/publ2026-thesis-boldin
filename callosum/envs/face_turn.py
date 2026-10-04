@@ -150,7 +150,7 @@ class FaceTurn(TwoSO101Base):
             pos_drift = (pos_drift - cfg.body_pos_tol).clamp(min=0)
             rot_drift = (rot_drift - cfg.body_rot_tol).clamp(min=0)
 
-        return (
+        dense = (
             cfg.weight_rotator_reach * rotator_reach
             + cfg.weight_grasp * gate * rotator_grasp
             + cfg.weight_angle_progress * gate * angle_progress
@@ -159,6 +159,11 @@ class FaceTurn(TwoSO101Base):
             - cfg.weight_body_pos_drift * pos_drift
             - cfg.weight_body_rot_drift * rot_drift
         )
+        # One-step bonus on the step where the episode terminates with success (see
+        # FaceTurnRewardConfig.success_bonus): finishing must beat lingering near the goal.
+        # The dense reward carries it in raw units, so the normalised reward (dense / divisor)
+        # carries exactly `success_bonus`.
+        return cfg.add_success_bonus(dense, info["success"])
 
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
         # The divisor comes from the config weights (single source of truth).

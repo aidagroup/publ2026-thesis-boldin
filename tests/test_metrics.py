@@ -37,7 +37,8 @@ def test_logger_and_progress_line() -> None:
     logger.log("losses/agent_a/entropy", float("nan"), 10)  # kept locally, not written
     logger.log_many({"success_once": 0.25}, 10, prefix="eval/")
     assert writer.calls == [("train/return", 0.5, 10), ("eval/success_once", 0.25, 10)]
+    logger.log("charts/learning_rate", 1.5e-4, 10)
     line = progress_line(logger, 3, 10, 7680, 1234.4, train_episodes=4)
     assert "iter 3/10" in line and "step 7680" in line and "sps 1234" in line
     assert "ret 0.5" in line and "(n=4)" in line and "eval_succ 0.250" in line
-    assert "ent a/b nan/-" in line
+    assert "ent a/b nan/-" in line and "lr 1.50e-04" in line
