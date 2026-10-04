@@ -2,8 +2,9 @@
 
 The ordered checklist for a GPU session on the lab server (see
 [setup.md](setup.md) for the machine, network allowlist and environment).
-Write and verify everything possible on macOS first; use server time for things
-that genuinely need a GPU.
+Write and verify everything possible on macOS first (including CPU-sim smoke
+checks, see [setup.md](setup.md#local-macos)); use server time for things that
+genuinely need a GPU.
 
 ## Before the session
 
@@ -51,37 +52,42 @@ bash scripts/setup_server.sh
 ```
 
 Verifies driver, a real CUDA matmul, compute capability vs the torch CUDA
-build, ManiSkill + the SO-100 agent, and that both envs register. Stop and fix
+build, ManiSkill + our `so101_pg` agent, and that both envs register. Stop and fix
 if anything here fails — everything below depends on it. After the first run
 the uv cache is warm, so re-running it after a `git pull` is quick.
 
-### 2. Phase-1 debt: the checks that cannot run on macOS
+### 2. Phase-1 debt: the GPU-backend checks
 
 ```bash
 uv run python scripts/smoke_env.py
 uv run python scripts/smoke_face_turn.py
 ```
 
+Pre-check the same scripts on the Mac CPU sim first (`--sim-backend cpu
+--num-envs 2`, command in [setup.md](setup.md#local-macos)); the arm-reach and
+gripper questions below can already be answered there. The server run confirms
+them on the GPU backend.
+
 **Known open questions these answer** (all flagged in code as `TODO(review)`):
 
 | Question | Where | If it fails |
 |---|---|---|
-| Do both arms actually reach the cube at `y = ±0.3`? | `smoke_env.py` | shrink the spacing (`two_so100_base._load_agent`); reach is ~0.5 m max, so 0.25 m is the obvious next try |
+| Do both arms actually reach the cube at the arm spacing (±0.25 m, see the constant in `two_so101_base.py`)? Can check on the Mac CPU sim. | `smoke_env.py` | adjust the spacing constant in `two_so101_base.py`; SO-101 top-down reach at cube height is ~0.27 m |
 | Does the face articulation look/behave right (no jitter, face sits on the body)? | `smoke_face_turn.py` | check `disable_self_collisions`; review the joint pose |
 | Are the joint friction/damping sane at cube scale? | `smoke_face_turn.py` | tune `friction`/`damping` in `_turntable_cube.py` |
-| Does the gripper actually close on the layer's side faces? | `smoke_face_turn.py` | revisit the grasp target in `face_turn.compute_dense_reward` |
+| Does the parallel gripper actually close on the layer's side faces (`is_grasping`)? Can check on the Mac CPU sim. | `smoke_face_turn.py` | revisit the grasp target in `face_turn.compute_dense_reward` |
 | Does the scripted turn flip `success` on, and body displacement flip it off? | `smoke_face_turn.py` | success logic bug — fix before any training |
 
 Record the actual printed output; it is the evidence that phase 1 works.
 
 ### 3. First training run — the "does it learn at all" gate
 
-Start with the **easy** env, not the hard one: `TwoSO100-v0` has a pure reach
+Start with the **easy** env, not the hard one: `TwoSO101-v0` has a pure reach
 reward, so if IPPO can't improve there, the problem is the trainer, not the
 task.
 
 ```bash
-uv run python -m callosum.training.ippo --env-id TwoSO100-v0 --total-timesteps <short>
+uv run python -m callosum.training.ippo --env-id TwoSO101-v0 --total-timesteps <short>
 ```
 
 Then the real target:

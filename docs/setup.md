@@ -4,7 +4,7 @@ Two machine roles:
 
 | Role | Machine | Does |
 |------|---------|------|
-| **Dev / authoring** | this macOS box | edit code, lint, type-check, light CPU checks. **No GPU sim** – ManiSkill/SAPIEN GPU needs Linux+CUDA. |
+| **Dev / authoring** | this macOS box | edit code, lint, type-check, light CPU checks, **CPU simulation** in a throwaway env (see [Local](#local-macos)). **No GPU sim** – ManiSkill/SAPIEN GPU needs Linux+CUDA. |
 | **Training** | lab GPU server (`culab.ru`): 1× NVIDIA A100-SXM4-80GB, driver 570.172.08 (CUDA ≤ 12.8) | run ManiSkill sim + MARL training. Deployed via `git pull`. |
 
 The training server is a persistent machine (not a rented pod): the checkout,
@@ -26,6 +26,19 @@ uv sync                       # base only (numpy, gymnasium)
 make dev                      # + train + dev  (installs torch MPS build)
 ```
 
+The project venv does **not** include ManiSkill on macOS (`pyproject.toml` marks
+it Linux-only). ManiSkill 3.0.1 does install and run **CPU simulation** on the
+Mac in a throwaway env, which is the first check for anything sim-related
+(scene loads, rest pose is stable, both arms reach the cube, gripper grasp):
+
+```bash
+PYTHONPATH=. uv run --no-project --python 3.12 --with mani-skill==3.0.1 --with torch \
+    python scripts/smoke_env.py --sim-backend cpu --num-envs 2
+```
+
+The smoke scripts take `--sim-backend` / `--num-envs`. GPU simulation and
+training still need the server.
+
 ### Server (Linux + CUDA)
 
 ```bash
@@ -42,9 +55,9 @@ It:
 2. installs uv (if missing) + Python 3.12 and syncs `sim` + `train` + `dev`;
 3. **verifies**: torch CUDA build, a real CUDA matmul (not just
    `is_available()`), the GPU's compute capability against the torch CUDA
-   version, `mani_skill` import, the SO-100 agent, and that `TwoSO100-v0` /
+   version, `mani_skill` import, our custom `so101_pg` agent (SO-ARM101 + parallel gripper), and that `TwoSO101-v0` /
    `FaceTurn-v0` actually register;
-4. with `--smoke`, runs the GPU checks that cannot run on macOS
+4. with `--smoke`, runs the GPU-backend checks that cannot run on macOS
    (`smoke_env.py`, `smoke_face_turn.py`).
 
 Rendering (needed later, for the vision phase, not for state-based training)
