@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bootstrap AIDA on a Linux + NVIDIA (CUDA) machine — a RunPod pod, or any
-# CUDA box. Idempotent: safe to re-run on an existing pod.
+# Bootstrap AIDA on a Linux + NVIDIA (CUDA) machine — the lab training server,
+# or any CUDA box. Idempotent: safe to re-run after every `git pull`.
 #
 #   bash scripts/setup_server.sh            # set up + verify
 #   bash scripts/setup_server.sh --smoke    # ... and run the GPU smoke scripts
@@ -30,35 +30,9 @@ else
   die "nvidia-smi not found — no NVIDIA driver visible. GPU sim will not work."
 fi
 
-# ------------------------------------------------------- 2. persistent caches
-# On RunPod, /workspace survives pod restarts while / does not. Keeping the uv
-# cache (and HF cache, for V-JEPA weights later) there avoids re-downloading
-# multi-GB torch/CUDA wheels on every fresh pod.
-say "Caches"
-PERSIST=""
-for d in /workspace /runpod-volume; do
-  [ -d "$d" ] && [ -w "$d" ] && { PERSIST="$d"; break; }
-done
-if [ -n "$PERSIST" ]; then
-  export UV_CACHE_DIR="${UV_CACHE_DIR:-$PERSIST/.cache/uv}"
-  export HF_HOME="${HF_HOME:-$PERSIST/.cache/huggingface}"
-  mkdir -p "$UV_CACHE_DIR" "$HF_HOME"
-  ok "persistent volume: $PERSIST"
-  ok "UV_CACHE_DIR=$UV_CACHE_DIR"
-  # Persist for future shells on this pod.
-  PROFILE="$HOME/.bashrc"
-  if ! grep -q 'UV_CACHE_DIR' "$PROFILE" 2>/dev/null; then
-    {
-      echo "export UV_CACHE_DIR=$UV_CACHE_DIR"
-      echo "export HF_HOME=$HF_HOME"
-    } >> "$PROFILE"
-    ok "exported into $PROFILE for future shells"
-  fi
-else
-  warn "no persistent volume found — wheels will be re-downloaded on a fresh pod"
-fi
-
-# --------------------------------------------------------------------- 3. uv
+# --------------------------------------------------------------------- 2. uv
+# The server is persistent, so uv's default cache (~/.cache/uv) survives
+# between sessions; set UV_CACHE_DIR yourself to put it elsewhere.
 say "uv"
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -66,7 +40,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 ok "$(uv --version)"
 
-# ------------------------------------------------------------- 4. environment
+# ------------------------------------------------------------- 3. environment
 # Python 3.12: SAPIEN publishes no wheels for 3.13+.
 say "Environment (Python 3.12 + locked deps)"
 uv python install 3.12
@@ -75,7 +49,7 @@ uv python install 3.12
 uv sync --frozen --extra sim --extra train --extra dev
 ok "synced from uv.lock"
 
-# ----------------------------------------------------------- 5. verification
+# ----------------------------------------------------------- 4. verification
 say "Verification"
 uv run python - <<'PY'
 import sys
@@ -93,7 +67,8 @@ else:
     total = torch.cuda.get_device_properties(0).total_memory / 1024**3
     print(f"   \033[32m✓\033[0m {name} | compute {major}.{minor} | {total:.1f} GiB")
 
-    # Blackwell (sm_120, e.g. RTX 5090) needs a CUDA >= 12.8 build.
+    # Blackwell (sm_120) needs a CUDA >= 12.8 build. Not triggered on the lab
+    # A100 (sm_80); kept so the script stays correct on any newer GPU.
     cuda_ver = tuple(int(x) for x in (torch.version.cuda or "0.0").split(".")[:2])
     if major >= 12 and cuda_ver < (12, 8):
         fail.append(f"GPU is compute {major}.{minor} but torch is a CUDA {torch.version.cuda} build (<12.8)")
@@ -134,7 +109,7 @@ if fail:
     sys.exit(1)
 PY
 
-# ------------------------------------------------------------- 6. smoke tests
+# ------------------------------------------------------------- 5. smoke tests
 if [ "$RUN_SMOKE" = "1" ]; then
   say "GPU smoke tests (the checks that could not run on macOS)"
   echo "--- scripts/smoke_env.py: two SO-100 arms, per-agent obs/actions, arm reach ---"

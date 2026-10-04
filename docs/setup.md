@@ -5,12 +5,15 @@ Two machine roles:
 | Role | Machine | Does |
 |------|---------|------|
 | **Dev / authoring** | this macOS box | edit code, lint, type-check, light CPU checks. **No GPU sim** – ManiSkill/SAPIEN GPU needs Linux+CUDA. |
-| **Training** | Linux + NVIDIA server (RTX 5090 / Blackwell) | run ManiSkill sim + MARL training. Deployed via `git pull`. |
+| **Training** | lab GPU server (`culab.ru`): 1× NVIDIA A100-SXM4-80GB, driver 570.172.08 (CUDA ≤ 12.8) | run ManiSkill sim + MARL training. Deployed via `git pull`. |
+
+The training server is a persistent machine (not a rented pod): the checkout,
+`.venv`, uv cache and `runs/` survive between sessions.
 
 ## Environment (uv)
 
 - Python is pinned to **3.12** (`.python-version`). SAPIEN has no wheels for 3.13+.
-- PyTorch: `cu128` build on Linux (Blackwell / RTX 50xx needs CUDA ≥12.8), CPU/MPS on macOS – handled automatically by `pyproject.toml` (`[tool.uv.sources]`).
+- PyTorch: `cu128` build on Linux, CPU/MPS on macOS – handled automatically by `pyproject.toml` (`[tool.uv.sources]`). See [CUDA index](#cuda-index-why-cu128) for why `cu128`.
 - Dependencies are split into extras so the Mac doesn't try to install the Linux-only sim stack:
   - `sim`  – ManiSkill (Linux-only), PettingZoo
   - `train` – torch, tensordict, torchrl, benchmarl
@@ -23,44 +26,56 @@ uv sync                       # base only (numpy, gymnasium)
 make dev                      # + train + dev  (installs torch MPS build)
 ```
 
-### Server (Linux + CUDA, e.g. a RunPod pod)
+### Server (Linux + CUDA)
 
 ```bash
-git clone git@github.com:aidagroup/callosum.git
+git clone git@github.com:aidagroup/callosum.git   # first time only
 cd callosum
 bash scripts/setup_server.sh --smoke
 ```
 
-The script is idempotent (safe to re-run on an existing pod) and never resolves
-dependencies — `uv sync --frozen` installs exactly what `uv.lock` pins. It:
+The script is idempotent (safe to re-run after every `git pull`) and never
+resolves dependencies — `uv sync --frozen` installs exactly what `uv.lock` pins.
+It:
 
 1. checks Linux + `nvidia-smi`, prints GPU and driver;
-2. points `UV_CACHE_DIR` / `HF_HOME` at a persistent volume (`/workspace` on
-   RunPod) and exports them into `~/.bashrc`, so multi-GB torch/CUDA wheels are
-   downloaded once rather than on every fresh pod;
-3. installs uv + Python 3.12 and syncs `sim` + `train` + `dev`;
-4. **verifies**: torch CUDA build, a real CUDA matmul (not just
+2. installs uv (if missing) + Python 3.12 and syncs `sim` + `train` + `dev`;
+3. **verifies**: torch CUDA build, a real CUDA matmul (not just
    `is_available()`), the GPU's compute capability against the torch CUDA
-   version (Blackwell/sm_120 needs ≥12.8), `mani_skill` import, the SO-100
-   agent, and that `TwoSO100-v0` / `FaceTurn-v0` actually register;
-5. with `--smoke`, runs the GPU checks that cannot run on macOS
+   version, `mani_skill` import, the SO-100 agent, and that `TwoSO100-v0` /
+   `FaceTurn-v0` actually register;
+4. with `--smoke`, runs the GPU checks that cannot run on macOS
    (`smoke_env.py`, `smoke_face_turn.py`).
-
-**Image choice:** any CUDA ≥ 12.8 Linux image works — e.g.
-`runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`. The image's own PyTorch is
-irrelevant: `uv sync` installs our locked build into `.venv`. Only the CUDA
-runtime and driver matter.
 
 Rendering (needed later, for the vision phase, not for state-based training)
 additionally requires GL/EGL libs, e.g.
-`apt-get install -y libgl1 libglvnd0 libegl1-mesa libgles2-mesa libopengl0`.
+`apt-get install -y libgl1 libglvnd0 libegl1-mesa libgles2-mesa libopengl0`
+(ask the server owner if there is no root access).
 
-## Packaging
+## Network access on the server
 
-`callosum` is a real (hatchling-built) package, installed **editable** into the venv by
-`uv sync`. That makes `import callosum` behave identically from pytest, `scripts/*.py`,
-notebooks, and on the server — no `sys.path`/cwd juggling — while edits still take effect
-immediately without reinstalling.
+Outbound internet on the server is **allowlisted**, not open. Currently reachable:
+
+| Host | Used for |
+|------|----------|
+| `github.com` | `git clone` / `git pull` |
+| `pypi.org`, `files.pythonhosted.org` | `uv sync` (regular packages) |
+| `download.pytorch.org` | `uv sync` (torch `cu128` wheels) |
+| `astral.sh` | uv installer in `setup_server.sh` |
+| `huggingface.co` | model weights (V-JEPA, phase 2) |
+| `llm-proxy.spirit.culab.ru` | LLM access via the lab proxy |
+| `ultralytics.com`, `kaggle.com` | not used by this project |
+
+Anything else (notably `wandb.ai`) is blocked; the server owner can open
+additional hosts on request. Before adding a dependency or service that
+downloads from a new host, check it is reachable from the server:
+
+```bash
+curl -sI https://<host> | head -1
+```
+
+If `git@github.com` (SSH, port 22) is blocked while HTTPS works, clone via
+`https://github.com/aidagroup/callosum.git` instead.
 
 ## CI
 
@@ -69,25 +84,36 @@ immediately without reinstalling.
 extra — the `sim`/`train` extras pull ManiSkill and a multi-GB CUDA torch build, so
 anything touching the simulator is verified on the training server instead.
 
+## Packaging
+
+`callosum` is a real (hatchling-built) package, installed **editable** into the venv by
+`uv sync`. That makes `import callosum` behave identically from pytest, `scripts/*.py`,
+notebooks, and on the server — no `sys.path`/cwd juggling — while edits still take effect
+immediately without reinstalling.
+
 ## Deploy loop (git-based)
 
 ```
 edit locally  →  git commit  →  git push        (dev / macOS)
                                      │
                                      ▼
-        git pull  →  uv sync --extra sim --extra train  →  run training   (server)
+        git pull  →  bash scripts/setup_server.sh  →  run training   (server)
 ```
 
 - **Code** flows dev → server via git push/pull (this repo).
-- **Results** (checkpoints, logs) stay on the server; pull metrics via Weights & Biases or copy artifacts back with `rsync`/`scp`. Large artifacts are git-ignored (see `.gitignore`).
+- **Results** (checkpoints, TensorBoard logs) are written to `runs/` on the server and are git-ignored. View them live through an SSH tunnel (see [server-runbook.md](server-runbook.md)) or copy them back with `rsync`. There is no hosted experiment tracker: `wandb.ai` is not on the server's allowlist.
 - The state-based baseline needs **no rendering**, so the server only needs PhysX/CUDA – no Vulkan/EGL display setup. Add that later when vision observations come in.
 
 > Note: `uv.lock` is committed for reproducibility – the same resolved versions install on both machines.
 
-## CUDA index: why `cu128`, and when to revisit
+## CUDA index: why `cu128`
 
-**Finding (audited 2026-07-28):** the `cu128` wheel index tops out at **torch 2.11.0**. Newer
-CUDA indexes carry newer torch:
+The server's driver (570.172.08) supports CUDA **up to 12.8**. A torch build for a
+newer CUDA installs fine but fails at runtime on this driver, so `cu128` is the
+ceiling. The A100 (Ampere, compute capability 8.0) is supported by every current
+CUDA build, so the GPU itself imposes no lower bound.
+
+The `cu128` wheel index tops out at **torch 2.11.0** (audited 2026-07-28):
 
 | Index | Newest torch |
 |-------|--------------|
@@ -95,15 +121,11 @@ CUDA indexes carry newer torch:
 | `cu129` | 2.13.0 |
 | `cu130` | 2.13.0 |
 
-`cu128` is the **oldest CUDA that supports Blackwell / RTX 5090** (sm_120), so it has the
-**lowest NVIDIA driver requirement**. We deliberately stay on it until the training server
-exists and its driver version is known — a newer CUDA build installs fine but fails at
-runtime on an older driver.
+Moving to `cu129`/`cu130` (torch ≥2.13) requires the server owner to upgrade the
+NVIDIA driver first. If that happens, `torch` + `torchrl` + `tensordict` must move
+**together** (they are released in lockstep), and the result must be verified against
+ManiSkill/SAPIEN on the server.
 
-**TODO when server access lands:** run `nvidia-smi`, check the driver version, and if it
-supports CUDA 12.9/13.0, consider moving to `cu129`/`cu130` for torch ≥2.13. That upgrade
-must move `torch` + `torchrl` + `tensordict` **together** (they are released in lockstep),
-and be verified against ManiSkill/SAPIEN on the server.
-
-Bonus: torch ≥2.13 also clears GHSA-rrmf-rvhw-rf47 (`torch.jit.script` memory corruption —
-local-only, negligible for our use since we never script untrusted input).
+Bonus of a future upgrade: torch ≥2.13 also clears GHSA-rrmf-rvhw-rf47
+(`torch.jit.script` memory corruption — local-only, negligible for our use since we
+never script untrusted input).

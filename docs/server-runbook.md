@@ -1,59 +1,59 @@
-# Server runbook (rented GPU session)
+# Server runbook (training session)
 
-The GPU is rented **by the hour**, so the goal is: write and verify everything
-possible beforehand, and spend paid time only on things that genuinely need a
-GPU. This file is the ordered checklist for a session — follow it top to bottom.
+The ordered checklist for a GPU session on the lab server (see
+[setup.md](setup.md) for the machine, network allowlist and environment).
+Write and verify everything possible on macOS first; use server time for things
+that genuinely need a GPU.
 
-## Before starting the pod
+## Before the session
 
 - [ ] All code for the session is merged into `main` and pushed.
 - [ ] CI green on `main`; `make dev && uv run pytest -q` passes locally.
 - [ ] `uv.lock` committed and in sync with `pyproject.toml` (the server installs
       with `--frozen` and will refuse to re-resolve).
-- [ ] You know which experiments you intend to run (below), so the pod isn't
-      idle while we decide.
+- [ ] Any new dependency or download comes from a host on the server's
+      allowlist (see [setup.md](setup.md#network-access-on-the-server)); if not,
+      ask the server owner to open it first.
+- [ ] You know which experiments you intend to run (below).
 
-## Pod spec
+## Server
 
 | Setting | Value |
 |---|---|
-| Image | any CUDA ≥ 12.8 Linux image, e.g. `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` |
-| GPU | RTX 5090 (32 GB) or any ≥24 GB NVIDIA card |
-| Volume | persistent volume mounted at `/workspace` (keeps the uv cache between pods) |
-
-The image's own PyTorch is unused — `uv sync` installs our locked build.
+| GPU | 1× NVIDIA A100-SXM4-80GB |
+| Driver | 570.172.08 (CUDA ≤ 12.8 → torch `cu128`) |
+| Internet | allowlist only (GitHub, PyPI, PyTorch, Hugging Face, …) |
 
 ## SSH access
 
-Add the pod to `~/.ssh/config` on the dev machine under a stable alias, so the
-key never has to be passed around and every session uses the same command:
+Add the server to `~/.ssh/config` on the dev machine under a stable alias:
 
 ```
 Host aida-gpu
-    HostName <pod-host>
-    Port <pod-port>
-    User root
+    HostName <server-host>
+    Port <port>
+    User <user>
     IdentityFile ~/.ssh/<your-key>
     ServerAliveInterval 30
 ```
 
-Then everything runs as `ssh aida-gpu '<command>'`. Update `HostName`/`Port`
-when a new pod is created — the alias stays the same.
+Then everything runs as `ssh aida-gpu '<command>'`.
 
 ## Session order
 
-### 1. Environment (target: a few minutes, mostly download)
+### 1. Environment
 
 ```bash
 ssh aida-gpu
-git clone git@github.com:aidagroup/callosum.git   # first pod only
+git clone git@github.com:aidagroup/callosum.git   # first time only
 cd callosum && git pull
 bash scripts/setup_server.sh
 ```
 
 Verifies driver, a real CUDA matmul, compute capability vs the torch CUDA
 build, ManiSkill + the SO-100 agent, and that both envs register. Stop and fix
-if anything here fails — everything below depends on it.
+if anything here fails — everything below depends on it. After the first run
+the uv cache is warm, so re-running it after a `git pull` is quick.
 
 ### 2. Phase-1 debt: the checks that cannot run on macOS
 
@@ -94,10 +94,23 @@ Success criterion (from `docs/implementation-plan.md`, step 2.1 / the
 experiment design): reward curve rises and success-rate becomes non-trivial.
 This is the gate that decides whether the whole approach is viable.
 
-### 4. Capture results before killing the pod
+Run long trainings inside `tmux` (or `nohup`) so an SSH drop doesn't kill them.
 
-Checkpoints and logs live under `runs/` and are git-ignored, so they do **not**
-come back via git. Pull anything worth keeping:
+### 4. Watching and collecting results
+
+Checkpoints and TensorBoard logs live under `runs/` on the server and are
+git-ignored, so they do **not** come back via git. `wandb.ai` is not reachable
+from the server, so metrics stay local.
+
+Watch training live through an SSH tunnel:
+
+```bash
+ssh aida-gpu 'cd callosum && uv run tensorboard --logdir runs --port 6006'   # on the server
+ssh -N -L 6006:localhost:6006 aida-gpu                                        # on the Mac
+# then open http://localhost:6006
+```
+
+Copy anything worth keeping back to the Mac:
 
 ```bash
 rsync -avz aida-gpu:~/callosum/runs/ ./runs/
@@ -105,9 +118,3 @@ rsync -avz aida-gpu:~/callosum/runs/ ./runs/
 
 Metrics worth writing into `docs/thesis/` while fresh: success-rate, steps to
 converge, and any layout/tuning constants that had to change.
-
-## Cost control
-
-- Stop the pod as soon as the session's questions are answered.
-- Long training runs: use `nohup`/`tmux` so an SSH drop doesn't kill them.
-- Keep `/workspace` as the volume so the next pod skips the multi-GB download.

@@ -44,7 +44,7 @@ dev = [
 # and never publish an sdist, so it does not apply. Revisit when torch drops the pin.
 # See docs/setup.md ("CUDA index") for the related torch/CUDA ceiling.
 
-# PyTorch wheels: CUDA 12.8 build on the Linux server (RTX 5090 / Blackwell needs cu128+);
+# PyTorch wheels: CUDA 12.8 build on the Linux server (its driver 570 caps CUDA at 12.8);
 # on macOS (dev, no GPU sim) torch resolves from PyPI as the CPU/MPS build.
 [[tool.uv.index]]
 name = "pytorch-cu128"
