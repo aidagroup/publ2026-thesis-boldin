@@ -4,7 +4,7 @@
 dependency, so most of this runs in CI (numpy only); the tests that slice real tensors are
 skipped when torch is absent. The structured observations mirror what the real envs return
 for `obs_mode="state"` (checked on the Mac CPU sim): per-uid `qpos` (7) / `qvel` (7), `extra`
-with the TCP poses (only for `partner_obs="full"`), `cube_pose` (7) and, for FaceTurn,
+with both TCP poses (always, under either `partner_obs`), `cube_pose` (7) and, for FaceTurn,
 `face_angle` (a `(n,)` leaf) and `face_pose` (7).
 """
 
@@ -22,17 +22,18 @@ N = 3  # batch size
 UID_A, UID_B = AGENT_UIDS
 
 
-def make_obs(partner_obs: str, face_turn: bool = True, seed: int = 0) -> dict:
-    """A structured observation shaped like the env's, with random content."""
+def make_obs(partner_obs: str = "none", face_turn: bool = True, seed: int = 0) -> dict:
+    """A structured observation shaped like the env's, with random content.
+
+    `partner_obs` is accepted for call-site readability only: the env emits both TCP poses
+    under either mode (the visibility rule lives in the per-agent input builder).
+    """
     rng = np.random.default_rng(seed)
 
     def rnd(*shape: int) -> np.ndarray:
         return rng.normal(size=(N, *shape)).astype(np.float32)
 
-    extra: dict = {}
-    if partner_obs == "full":
-        extra["agent_a_tcp_pose"] = rnd(7)
-        extra["agent_b_tcp_pose"] = rnd(7)
+    extra: dict = {"agent_a_tcp_pose": rnd(7), "agent_b_tcp_pose": rnd(7)}
     extra["cube_pose"] = rnd(7)
     if face_turn:
         extra["face_angle"] = rnd()
@@ -77,37 +78,36 @@ def column_ranges(layout: list, prefix: str) -> set[int]:
 
 
 def test_layout_matches_env_widths() -> None:
-    # 49 / 35 for TwoSO101-v0 and 57 / 43 for FaceTurn-v0 are the flat sizes the real envs give.
-    sizes = {
-        (po, ft): sum(w for _, w in obs_layout(make_obs(po, ft)))
-        for po in ("full", "none")
-        for ft in (False, True)
-    }
-    assert sizes == {
-        ("full", False): 49,
-        ("none", False): 35,
-        ("full", True): 57,
-        ("none", True): 43,
-    }
-    for (po, ft), size in sizes.items():
-        assert flatten(make_obs(po, ft)).shape == (N, size)
+    # 49 for TwoSO101-v0 and 57 for FaceTurn-v0 are the flat sizes the real envs give (both TCP
+    # poses are always emitted, whatever `partner_obs` is).
+    for partner_obs in ("full", "none"):
+        for face_turn, size in ((False, 49), (True, 57)):
+            structured = make_obs(partner_obs, face_turn)
+            assert sum(w for _, w in obs_layout(structured)) == size
+            assert flatten(structured).shape == (N, size)
 
 
 def test_input_dims() -> None:
-    # own qpos+qvel (14) + cube (7) [+ face_angle, face_pose (8)] [+ both TCP poses (14)]
-    expected = {("full", False): 35, ("none", False): 21, ("full", True): 43, ("none", True): 29}
+    # own qpos+qvel (14) + own TCP pose (7) + cube (7) [+ face_angle, face_pose (8)]
+    # [+ the partner's TCP pose (7), "full" only]
+    expected = {("full", False): 35, ("none", False): 28, ("full", True): 43, ("none", True): 36}
     for (partner_obs, face_turn), dim in expected.items():
         assert build(partner_obs, face_turn).obs_dims == [dim, dim]
 
 
-def test_none_fields_are_exactly_own_state_and_task_state() -> None:
+def test_none_fields_are_own_state_own_tcp_and_task_state() -> None:
     builder = build("none")
     shared = ["extra/cube_pose", "extra/face_angle", "extra/face_pose"]
-    assert builder.fields[0] == [f"agent/{UID_A}/qpos", f"agent/{UID_A}/qvel", *shared]
-    assert builder.fields[1] == [f"agent/{UID_B}/qpos", f"agent/{UID_B}/qvel", *shared]
+    for agent_idx, role in ((0, "a"), (1, "b")):
+        assert builder.fields[agent_idx] == [
+            f"agent/{AGENT_UIDS[agent_idx]}/qpos",
+            f"agent/{AGENT_UIDS[agent_idx]}/qvel",
+            f"extra/agent_{role}_tcp_pose",
+            *shared,
+        ]
 
 
-def test_full_fields_add_both_tcp_poses_but_no_partner_joint_state() -> None:
+def test_full_fields_add_the_partner_tcp_pose_but_no_partner_joint_state() -> None:
     builder = build("full")
     for agent_idx in (0, 1):
         fields = builder.fields[agent_idx]
@@ -117,22 +117,23 @@ def test_full_fields_add_both_tcp_poses_but_no_partner_joint_state() -> None:
 
 
 @pytest.mark.parametrize("agent_idx", [0, 1])
-def test_no_partner_leakage_when_none(agent_idx: int) -> None:
-    """With partner_obs="none" no column of the partner's state can reach the input."""
-    partner = "ab"[1 - agent_idx]
+def test_own_tcp_always_in_partner_tcp_only_under_full(agent_idx: int) -> None:
+    """Own TCP pose in both modes; the partner's TCP pose and joint state only never / "full"."""
+    own, partner = "ab"[agent_idx], "ab"[1 - agent_idx]
     partner_uid = AGENT_UIDS[1 - agent_idx]
-    # (1) The env's own "none" layout has no TCP poses at all; the partner's joint state is out.
-    layout = obs_layout(make_obs("none"))
-    columns = set(build("none").columns[agent_idx])
-    assert not columns & column_ranges(layout, f"agent/{partner_uid}/")
+    layout = obs_layout(make_obs())
+    own_tcp = column_ranges(layout, f"extra/agent_{own}_tcp_pose")
+    partner_tcp = column_ranges(layout, f"extra/agent_{partner}_tcp_pose")
+    assert len(own_tcp) == len(partner_tcp) == 7
 
-    # (2) The trainer's "none" also holds on an env that does emit TCP poses ("full"): the
-    # partner's TCP pose is dropped, the agent's own one is kept.
-    layout = obs_layout(make_obs("full"))
-    columns = set(AgentObsBuilder(layout, "none", AGENT_UIDS).columns[agent_idx])
-    assert not columns & column_ranges(layout, f"agent/{partner_uid}/")
-    assert not columns & column_ranges(layout, f"extra/agent_{partner}_")
-    assert columns & column_ranges(layout, f"extra/agent_{'ab'[agent_idx]}_tcp_pose")
+    none_cols = set(build("none").columns[agent_idx])
+    assert own_tcp <= none_cols
+    assert not none_cols & partner_tcp
+    assert not none_cols & column_ranges(layout, f"agent/{partner_uid}/")
+
+    full_cols = set(build("full").columns[agent_idx])
+    assert own_tcp <= full_cols and partner_tcp <= full_cols
+    assert not full_cols & column_ranges(layout, f"agent/{partner_uid}/")
 
 
 @pytest.mark.parametrize("partner_obs", ["full", "none"])
@@ -150,7 +151,7 @@ def test_changing_partner_state_does_not_change_input(partner_obs: str) -> None:
         assert np.array_equal(flatten(changed)[:, builder.columns[agent_idx]], reference)
 
 
-def test_none_hides_partner_tcp_value_even_if_present() -> None:
+def test_none_hides_partner_tcp_value_but_shows_own() -> None:
     base = make_obs("full", seed=2)
     builder = AgentObsBuilder(obs_layout(base), "none", AGENT_UIDS)
     changed = make_obs("full", seed=2)
@@ -162,6 +163,12 @@ def test_none_hides_partner_tcp_value_even_if_present() -> None:
     changed["extra"]["agent_a_tcp_pose"] = np.full((N, 7), 9.0, dtype=np.float32)
     assert np.array_equal(
         flatten(changed)[:, builder.columns[1]], flatten(base)[:, builder.columns[1]]
+    )
+    # ... while a change of an agent's own TCP pose does reach its own input.
+    changed = make_obs("full", seed=2)
+    changed["extra"]["agent_a_tcp_pose"] = np.full((N, 7), 9.0, dtype=np.float32)
+    assert not np.array_equal(
+        flatten(changed)[:, builder.columns[0]], flatten(base)[:, builder.columns[0]]
     )
 
 
@@ -203,7 +210,7 @@ def test_builder_slices_tensors_like_the_numpy_reference() -> None:
         builder(torch.zeros(N, 5))
 
 
-def test_none_input_content_is_own_proprio_then_shared_state() -> None:
+def test_none_input_content_is_own_proprio_own_tcp_then_shared_state() -> None:
     torch = pytest.importorskip("torch")
     structured = make_obs("none")
     out_a, out_b = build("none")(torch.from_numpy(flatten(structured)))
@@ -218,8 +225,9 @@ def test_none_input_content_is_own_proprio_then_shared_state() -> None:
     own_a = np.concatenate(
         [structured["agent"][UID_A]["qpos"], structured["agent"][UID_A]["qvel"]], axis=-1
     )
-    assert np.array_equal(out_a.numpy(), np.concatenate([own_a, shared], axis=-1))
-    assert np.array_equal(out_b.numpy()[:, 14:], shared)
+    tcp_a, tcp_b = structured["extra"]["agent_a_tcp_pose"], structured["extra"]["agent_b_tcp_pose"]
+    assert np.array_equal(out_a.numpy(), np.concatenate([own_a, tcp_a, shared], axis=-1))
+    assert np.array_equal(out_b.numpy()[:, 14:], np.concatenate([tcp_b, shared], axis=-1))
 
 
 def test_check_layout_catches_wrong_order_and_size() -> None:

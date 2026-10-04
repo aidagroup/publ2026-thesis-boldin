@@ -158,14 +158,14 @@ The trainer is `callosum/training/ippo.py` (step 2.1): two independent PPO learn
 arm, on one shared GPU simulation (details in its module docstring; every flag is a field of
 `callosum/configs/ippo.py`, `--help` lists them). Both arms train on the env's shared
 *normalised dense* reward; each arm's policy input is cut out of the flat state observation
-(own joint state, task state, TCP poses according to `--partner-obs`), see
+(own joint state, own TCP pose, task state, plus the partner's TCP pose only for `--partner-obs full`), see
 `callosum/training/_agent_obs.py`. It prints, at start, the exact input fields of each arm: check
 that the lines look right before trusting a long run.
 
 Defaults worth knowing: `--num-envs 256` (raise on the A100 once it runs), `--num-steps 100`
-(batch 25 600), `--gamma 0.99` (not ManiSkill's 0.8: 5-step horizon), `--max-episode-steps 300`
-(the registered 100 is too short for the face turn: the scripted probe needs ~330 steps, and
-`--max-episode-steps none` keeps the registered value), evaluation every 20 iterations with
+(batch 25 600), `--gamma 0.99` (not ManiSkill's 0.8: 5-step horizon), `--max-episode-steps`
+unset = the env's registered length (400 for FaceTurn-v0, since the scripted probe needs ~330
+steps; 100 for TwoSO101-v0; a number overrides both), evaluation every 20 iterations with
 16 envs over a full episode, `--partner-obs full`.
 
 Start with the **easy** env, not the hard one: `TwoSO101-v0` has a pure reach reward, so if

@@ -23,7 +23,11 @@ TARGET_FACE_ANGLE = math.pi / 2  # a quarter turn
 _DEFAULT_REWARD_CONFIG = FaceTurnRewardConfig()
 
 
-@register_env("FaceTurn-v0", max_episode_steps=100)
+# 400 control steps: the scripted holder-then-rotator expert (scripts/probe_face_turn.py, CPU sim)
+# first reaches success after 329 steps (350 incl. the release), so 300 would cut it off. It is
+# deliberately slow (waypoint paths, settling steps), but a learned policy needs room for
+# exploration and regrasps too. TwoSO101-v0 (reach only) stays at 100.
+@register_env("FaceTurn-v0", max_episode_steps=400)
 class FaceTurn(TwoSO101Base):
     """Bimanual face-turn task on top of TwoSO101Base's two-arm plumbing.
 
@@ -33,10 +37,10 @@ class FaceTurn(TwoSO101Base):
     have stayed within its initial pose's position/rotation tolerance --
     turning the face by knocking the whole cube around does not count.
 
-    Inherits TwoSO101Base's `partner_obs` flag unchanged: `compute_dense_reward`
-    and `evaluate` always read TCP poses straight off `self.agent_a`/`agent_b`
-    (privileged, CTDE-style access, not the observation dict), so they are
-    unaffected by it either way -- only the shared extra-obs dict changes.
+    `partner_obs` does not change this env's observation (both TCP poses are always in the
+    shared extra-obs dict; who sees which one is decided in `callosum.training._agent_obs`), and
+    `compute_dense_reward` / `evaluate` read TCP poses straight off `self.agent_a`/`agent_b`
+    (privileged, CTDE-style access).
     """
 
     def __init__(
@@ -59,6 +63,7 @@ class FaceTurn(TwoSO101Base):
         self.table_scene.build()
 
         self.cube = build_turntable_cube(self.scene, name="turntable_cube")
+        self.body_link = self.cube.links_map["body"]
         self.face_link = self.cube.links_map["face"]
 
         # Filled in per env_idx in _initialize_episode; used by evaluate() and
@@ -115,41 +120,49 @@ class FaceTurn(TwoSO101Base):
         holder_to_body = torch.linalg.norm(self.agent_a.tcp_pos - self.cube.pose.p, dim=1)
         holder_reach = 1 - torch.tanh(5 * holder_to_body)
 
-        # (b) grasping the face.
-        is_grasped = self.agent_b.is_grasping(self.face_link)
+        # (b) the rotator grasping the face, (f) the holder grasping the body.
+        rotator_grasp = self.agent_b.is_grasping(self.face_link).float()
+        holder_grasp = self.agent_a.is_grasping(self.body_link).float()
 
-        # (c) progress of the face angle toward the target. Shape (and the
-        # 2.0 scale) matches turn_faucet.py's own (commented-out, unshipped)
-        # draft reward for this same family of task -- the closest available
-        # precedent, since that file's shipped compute_dense_reward is a
-        # "TODO (stao, tmu): finalize a dense reward" stub.
+        # (c) progress of the face angle toward the target, in [0, 1].
         angle_remaining = (TARGET_FACE_ANGLE - info["face_angle"]).clamp(min=0)
-        angle_progress = 1 - torch.tanh(2 * angle_remaining)
+        if cfg.angle_progress_shape == "linear":
+            # Constant gradient over the whole 0..90 deg range.
+            angle_progress = (1 - angle_remaining / TARGET_FACE_ANGLE).clamp(0, 1)
+        else:
+            # turn_faucet.py's own (commented-out, unshipped) draft shape; ~0.004 at 0 deg.
+            angle_progress = 1 - torch.tanh(2 * angle_remaining)
+
+        # Order gate: the rotator's grasp and turn count in full only while the holder holds
+        # the body (see FaceTurnRewardConfig.rotator_gate_floor for hard vs soft). The rotator's
+        # reach term is not gated, so it still gets pulled toward the face meanwhile.
+        if cfg.gate_rotator_on_holder:
+            gate = cfg.rotator_gate_floor + (1 - cfg.rotator_gate_floor) * holder_grasp
+        else:
+            gate = torch.ones_like(holder_grasp)
 
         # (e) penalty for the body drifting from its initial pose. Separate
         # weights since position (m) and rotation (rad) drift aren't on
-        # commensurate scales.
+        # commensurate scales. Hinged at the success tolerances if configured.
         pos_drift = torch.linalg.norm(self.cube.pose.p - self.body_init_pos, dim=1)
         rot_drift = common.quat_diff_rad(self.cube.pose.q, self.body_init_q)
+        if cfg.hinge_drift_penalty:
+            pos_drift = (pos_drift - cfg.body_pos_tol).clamp(min=0)
+            rot_drift = (rot_drift - cfg.body_rot_tol).clamp(min=0)
 
         return (
             cfg.weight_rotator_reach * rotator_reach
-            + cfg.weight_grasp * is_grasped
-            + cfg.weight_angle_progress * angle_progress
+            + cfg.weight_grasp * gate * rotator_grasp
+            + cfg.weight_angle_progress * gate * angle_progress
             + cfg.weight_holder_reach * holder_reach
+            + cfg.weight_holder_grasp * holder_grasp
             - cfg.weight_body_pos_drift * pos_drift
             - cfg.weight_body_rot_drift * rot_drift
         )
 
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        cfg = self.reward_config
-        # Sum of the positive, bounded ([0, 1]-ish) term weights; the drift
-        # penalty is excluded since it is unbounded and ~0 in the successful
-        # (no-drift) case this normalization targets.
-        max_reward = (
-            cfg.weight_rotator_reach
-            + cfg.weight_grasp
-            + cfg.weight_angle_progress
-            + cfg.weight_holder_reach
+        # The divisor comes from the config weights (single source of truth).
+        return (
+            self.compute_dense_reward(obs=obs, action=action, info=info)
+            / self.reward_config.max_positive_reward
         )
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

@@ -65,6 +65,29 @@ def test_ppo_update_improves_a_trivial_problem() -> None:
     }  # fmt: skip
 
 
+def test_ppo_update_survives_single_sample_minibatches() -> None:
+    torch.manual_seed(0)
+    cfg = IPPOConfig(num_envs=1, num_steps=5, num_minibatches=1, target_kl=None)
+    cfg.num_minibatches = 5  # bypass the config validation: every minibatch has one sample
+    assert cfg.minibatch_size == 1
+    agent = ActorCritic(obs_dim=5, action_dim=6)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=3e-3, eps=1e-5)
+    obs = torch.randn(cfg.batch_size, 5)
+    with torch.no_grad():
+        actions, logprobs, _, values = agent.get_action_and_value(obs)
+    batch = {
+        "obs": obs,
+        "actions": actions,
+        "logprobs": logprobs,
+        "advantages": torch.randn(cfg.batch_size),
+        "returns": torch.randn(cfg.batch_size),
+        "values": values.flatten(),
+    }
+    metrics = ppo_update(agent, optimizer, batch, cfg)
+    assert all(math.isfinite(v) for k, v in metrics.items() if k != "explained_variance")
+    assert all(torch.isfinite(p).all() for p in agent.parameters())
+
+
 def test_checkpoint_roundtrip(tmp_path) -> None:
     cfg = IPPOConfig()
     agents = [ActorCritic(10, 6), ActorCritic(12, 6)]

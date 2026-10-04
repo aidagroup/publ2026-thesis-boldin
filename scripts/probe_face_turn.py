@@ -19,9 +19,10 @@ Strategy (arms stand 90 degrees apart around the cube, see `callosum.configs.lay
   4. `release`: the rotator opens its jaws; success is evaluated again.
 
 Joint targets come from a small numpy IK of the URDF (`ArmModel`); the cube pose is read from
-the sim (privileged). After every phase the script prints: whether the holder grasps the body,
-whether the rotator grasps the face, the face angle, the body drift (position, rotation) and the
-env's success flag. With several envs (GPU) floats are shown as min/mean/max and flags as
+the sim (privileged). After every phase the script prints: the env step count, the dense reward
+(raw and normalised; the sanity check that the shaping rewards the phases in order), whether the
+holder grasps the body, whether the rotator grasps the face, the face angle, the body drift
+(position, rotation) and the env's success flag. With several envs (GPU) floats are shown as min/mean/max and flags as
 `count/num_envs`.
 
 Run it on either backend (`--sim-backend cpu` is one env, also on macOS). Exit status 1 if
@@ -279,7 +280,11 @@ class Rig:
         face = b.face_link
         pos_drift = torch.linalg.norm(b.cube.pose.p - b.body_init_pos, dim=1)
         rot_drift = common.quat_diff_rad(b.cube.pose.q, b.body_init_q)
+        reward = b.compute_dense_reward(obs=None, action=None, info=info)
         row = {
+            "env_steps": np.array([int(b.elapsed_steps[0])]),
+            "dense_reward": reward.cpu().numpy(),
+            "normalized_reward": (reward / b.reward_config.max_positive_reward).cpu().numpy(),
             "holder_grasps_body": self.agents[0].is_grasping(body).cpu().numpy(),
             "rotator_grasps_face": self.agents[1].is_grasping(face).cpu().numpy(),
             "face_angle_deg": np.rad2deg(info["face_angle"].cpu().numpy()),
@@ -289,7 +294,9 @@ class Rig:
         }
         print(f"[{phase}]")
         for key, val in row.items():
-            if val.dtype.kind == "b":
+            if key == "env_steps":
+                shown = str(int(val[0]))
+            elif val.dtype.kind == "b":
                 shown = str(bool(val[0])) if len(val) == 1 else f"{int(val.sum())}/{len(val)}"
             elif len(val) == 1:
                 shown = f"{val[0]:.2f}"

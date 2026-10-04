@@ -45,6 +45,8 @@ def test_parse_overrides() -> None:
 
 def test_parse_defaults_equal_dataclass_defaults() -> None:
     assert parse_args([]) == IPPOConfig()
+    # Default: use the env's registered episode length (400 FaceTurn-v0, 100 TwoSO101-v0).
+    assert IPPOConfig().max_episode_steps is None
 
 
 def test_max_episode_steps_none_keeps_env_registration() -> None:
@@ -62,6 +64,22 @@ def test_rejects_bad_values() -> None:
         IPPOConfig(total_timesteps=10)
 
 
+def test_batch_must_divide_into_equal_minibatches() -> None:
+    # 1 * 101 // 4 = 25 would leave a 1-sample last minibatch (advantage std is NaN).
+    with pytest.raises(ValueError, match="divisible by num_minibatches") as err:
+        IPPOConfig(num_envs=1, num_steps=101, num_minibatches=4, total_timesteps=1000)
+    assert "Valid num_minibatches: [1]" in str(err.value)
+    with pytest.raises(ValueError, match=r"Valid num_minibatches: \[1, 2, 3, 4, 6, 8, 12\]"):
+        IPPOConfig(num_envs=1, num_steps=24, num_minibatches=5, total_timesteps=1000)
+    assert IPPOConfig(num_envs=1, num_steps=100, num_minibatches=4).minibatch_size == 25
+
+
+def test_cpu_defaults_need_a_dividing_num_minibatches() -> None:
+    # The CPU clamp makes the effective batch 1 * num_steps, which is what gets validated.
+    with pytest.raises(ValueError, match="divisible by num_minibatches"):
+        parse_args(["--sim-backend", "cpu", "--num-steps", "100", "--total-timesteps", "300"])
+
+
 def test_eval_must_cover_a_full_episode() -> None:
     with pytest.raises(ValueError, match="full episode"):
         IPPOConfig(max_episode_steps=300, num_eval_steps=50)
@@ -74,7 +92,10 @@ def test_eval_must_cover_a_full_episode() -> None:
 
 
 def test_cpu_backend_clamps_env_counts(capsys: pytest.CaptureFixture) -> None:
-    cfg = parse_args(["--sim-backend", "cpu", "--total-timesteps", "300", "--num-steps", "100"])
+    cfg = parse_args(
+        ["--sim-backend", "cpu", "--total-timesteps", "300", "--num-steps", "100"]
+        + ["--num-minibatches", "4"]
+    )
     assert (cfg.num_envs, cfg.num_eval_envs) == (1, 1)
     assert "single env" in capsys.readouterr().out
     values = {"sim_backend": "gpu", "num_envs": 256}

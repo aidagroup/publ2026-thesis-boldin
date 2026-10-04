@@ -15,12 +15,11 @@ start-up instead of silently feeding the wrong numbers to a policy.
 Field rules (a field is a path such as `agent/so101_pg-0/qpos` or `extra/cube_pose`):
 
 * `agent/<own uid>/*` (qpos, qvel of the own arm): always in.
-* `agent/<partner uid>/*`: never in, under either `partner_obs`. The env flag only governs TCP
+* `agent/<partner uid>/*`: never in, under either `partner_obs`. `partner_obs` only governs TCP
   poses, and the partner's joint state is exactly the partner information the Bi-JEPA work
   later adds back in a controlled way.
-* `extra/agent_<x>_*` (the TCP poses): the agent's own is in whenever the env provides it; the
-  partner's only for `partner_obs="full"`. With `partner_obs="none"` the env does not emit any
-  TCP pose at all, so an agent then has to infer its own TCP from its qpos.
+* `extra/agent_<x>_*` (the TCP poses, always emitted by the env under both modes): the agent's
+  own is always in; the partner's only for `partner_obs="full"` (`tcp_pose_visible`).
 * every other `extra/*` field (`cube_pose`, `face_angle`, `face_pose`) is task state shared by
   both agents, so it is in both inputs.
 * Anything else (another top-level key, an unknown `agent/*` entry) raises: a new field must be
@@ -37,7 +36,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from callosum.envs._partner_obs import validate_partner_obs
+from callosum.envs._partner_obs import tcp_pose_visible, validate_partner_obs
 
 AGENT_UIDS = ("so101_pg-0", "so101_pg-1")
 """ManiSkill uids of agent_a (holder in FaceTurn-v0) and agent_b (rotator), in that order."""
@@ -135,11 +134,10 @@ def select_fields(
             keep = path[1] == own_uid
         elif group == "extra":
             name = path[-1]
-            if name.startswith(_ROLE_PREFIX[1 - agent_idx]):
-                keep = partner_obs == "full"
-            else:
-                # The agent's own fields and the shared task fields.
-                keep = True
+            owner = next((i for i, p in enumerate(_ROLE_PREFIX) if name.startswith(p)), None)
+            # A role-prefixed field is visible per the partner_obs rule; the rest is shared
+            # task state (cube / face).
+            keep = True if owner is None else tcp_pose_visible(partner_obs, agent_idx, owner)
         else:
             raise ValueError(f"unexpected observation group {'/'.join(path)}")
         if keep:

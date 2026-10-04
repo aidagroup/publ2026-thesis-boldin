@@ -38,17 +38,18 @@ class IPPOConfig:
     sim_backend: str = "gpu"
     """"gpu" (server) or "cpu" (macOS smoke runs; forces a single env and a single eval env)."""
     partner_obs: str = "full"
-    """Env flag: "full" puts both TCP poses into the observation (each agent then sees its own
-    and its partner's TCP), "none" puts neither (see `callosum.training._agent_obs`)."""
+    """Who sees which TCP pose in the per-agent inputs (`callosum.training._agent_obs`): "full"
+    = own and partner's, "none" = own only. The env always emits both poses; the visibility rule
+    is applied by the trainer's input builder, not by the env."""
     control_mode: str | None = "pd_joint_delta_pos"
     reward_mode: str = "normalized_dense"
     """Both agents learn from this one shared reward (per-agent rewards are a later concern).
     "normalized_dense" is what ManiSkill's PPO baseline uses; the reward scale is the env's
     `compute_normalized_dense_reward` (FaceTurn: dense reward / sum of the positive weights)."""
-    max_episode_steps: int | None = 300
-    """Episode length (control steps). `None` keeps the env's registered value (100 for
-    TwoSO101-v0 / FaceTurn-v0), which is too short for the face turn: the scripted probe needs
-    ~330 steps and the arm travel alone (3 rad of wrist flex at 0.05 rad/step) takes >= 60."""
+    max_episode_steps: int | None = None
+    """Episode length (control steps). `None` (default) keeps the env's registered value: 400 for
+    FaceTurn-v0 (the scripted expert needs ~330 steps), 100 for TwoSO101-v0. Set a number to
+    override both."""
 
     # --- Rollout / evaluation ------------------------------------------------------------
     total_timesteps: int = 10_000_000
@@ -110,6 +111,14 @@ class IPPOConfig:
             raise ValueError(
                 f"minibatch_size = num_envs * num_steps // num_minibatches = {self.minibatch_size}"
                 " must be >= 2 (advantage normalisation needs more than one sample)"
+            )
+        if self.batch_size % self.num_minibatches != 0:
+            valid = [n for n in range(1, self.batch_size // 2 + 1) if self.batch_size % n == 0]
+            raise ValueError(
+                f"batch size num_envs * num_steps = {self.num_envs} * {self.num_steps} = "
+                f"{self.batch_size} must be divisible by num_minibatches ({self.num_minibatches}); "
+                "otherwise the last minibatch is smaller (possibly a single sample, whose "
+                f"advantage std is undefined). Valid num_minibatches: {valid}"
             )
         if self.total_timesteps < self.batch_size:
             raise ValueError(

@@ -150,7 +150,7 @@ def ppo_update(
                 break
 
             advantages = batch["advantages"][idx]
-            if cfg.norm_adv:
+            if cfg.norm_adv and advantages.numel() > 1:  # std of one sample is NaN
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             pg_loss = torch.max(
                 -advantages * ratio,
