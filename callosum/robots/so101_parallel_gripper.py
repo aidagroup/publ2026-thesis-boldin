@@ -24,9 +24,12 @@ from mani_skill.agents.controllers import (
     PDJointPosMimicControllerConfig,
 )
 from mani_skill.agents.registration import register_agent
+from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils import common
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
+
+from callosum.configs.cameras import WristCameraConfig
 
 _ASSET_DIR = Path(__file__).resolve().parent.parent / "assets" / "so101_parallel_gripper"
 
@@ -182,3 +185,43 @@ class SO101ParallelGripper(BaseAgent):
         """True where all arm joints (gripper excluded) move slower than `threshold` rad/s."""
         qvel = self.robot.get_qvel()[:, :-2]  # exclude the 2 gripper joints
         return torch.max(torch.abs(qvel), 1)[0] <= threshold
+
+
+@register_agent()
+class SO101ParallelGripperWristCam(SO101ParallelGripper):
+    """`SO101ParallelGripper` plus a wrist camera on the gripper housing (uid `so101_pg_wristcam`).
+
+    Opt-in on purpose: state-only training (`render_backend="none"`) keeps using `so101_pg`,
+    which has no sensors, so nothing is rendered there. With this agent every arm adds one
+    camera, which a `MultiAgent` env exposes as `<agent uid>-<index>-<camera uid>`, e.g.
+    `so101_pg_wristcam-0-wrist`, in `obs["sensor_data"]` (for a visual `obs_mode`).
+
+    The mount pose, image size and field of view come from `wrist_camera`
+    (`callosum.configs.cameras.WristCameraConfig`; override on a subclass to change the camera).
+    Per episode they can also be overridden through the env's `sensor_configs` argument, e.g.
+    `sensor_configs=dict(width=320, height=240)` for all cameras.
+    """
+
+    uid = "so101_pg_wristcam"
+
+    wrist_camera: ClassVar[WristCameraConfig] = WristCameraConfig()
+
+    # TODO(review): the mount pose was checked geometrically only (jaw pads project into the
+    # image, the camera is outside the housing/jaw meshes, see tests/test_wrist_camera.py); the
+    # rendered images could not be checked on the Mac. The camera body itself is not modelled.
+    @property
+    def _sensor_configs(self):
+        cfg = self.wrist_camera
+        position, quat = cfg.pose_in_mount()
+        return [
+            CameraConfig(
+                uid=cfg.uid,
+                pose=sapien.Pose(p=position, q=quat),
+                width=cfg.width,
+                height=cfg.height,
+                fov=cfg.fov_y,
+                near=cfg.near,
+                far=cfg.far,
+                mount=self.robot.links_map[cfg.mount_link],
+            )
+        ]

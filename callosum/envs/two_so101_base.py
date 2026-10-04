@@ -12,6 +12,7 @@ import sapien
 import torch
 from mani_skill.agents.multi_agent import MultiAgent
 from mani_skill.envs.sapien_env import BaseEnv
+from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils import common
 from mani_skill.utils.building import actors
 from mani_skill.utils.registration import register_env
@@ -19,6 +20,7 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.pose import Pose
 from transforms3d.euler import euler2quat
 
+from callosum.configs.cameras import SceneCameraConfig, look_at_pose
 from callosum.configs.layout import ArmLayout, base_xy_yaw
 from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner_obs
 from callosum.robots.so101_parallel_gripper import SO101ParallelGripper
@@ -27,6 +29,7 @@ from callosum.robots.so101_parallel_gripper import SO101ParallelGripper
 CUBE_HALF_SIZE = 0.0285
 
 _DEFAULT_ARM_LAYOUT = ArmLayout()
+_DEFAULT_SCENE_CAMERA = SceneCameraConfig()
 # Number of arm (non-gripper) joints; the gripper joints come after them in qpos.
 NUM_ARM_JOINTS = len(SO101ParallelGripper.arm_joint_names)
 # Max distance from the shoulder (joint 2) to the TCP over the joint limits: ~0.494 m (numpy FK
@@ -40,6 +43,11 @@ class TwoSO101Base(BaseEnv):
 
     The bases stand 90 degrees apart on circles around the table centre (the cube), both
     pointing at it; the placement is the `arm_layout` argument (`ArmLayout`).
+
+    `robot_uids` is `("so101_pg", "so101_pg")` (no sensors; use this for state-only training with
+    `render_backend="none"`) or `("so101_pg_wristcam", "so101_pg_wristcam")` (one wrist camera per
+    arm). The fixed third-person "human render camera" (`render_camera`, used by
+    `render_mode="rgb_array"`) is the `scene_camera` argument (`SceneCameraConfig`).
 
     Both arms observe their own proprioception plus the cube pose (see
     `_get_obs_extra`); the dense reward simply pulls both TCPs toward the
@@ -55,7 +63,11 @@ class TwoSO101Base(BaseEnv):
     at this stage.
     """
 
-    SUPPORTED_ROBOTS: ClassVar[list[tuple[str, str]]] = [("so101_pg", "so101_pg")]
+    # `so101_pg_wristcam` is `so101_pg` plus a wrist camera per arm (for rendering / vision).
+    SUPPORTED_ROBOTS: ClassVar[list[tuple[str, str]]] = [
+        ("so101_pg", "so101_pg"),
+        ("so101_pg_wristcam", "so101_pg_wristcam"),
+    ]
     agent: MultiAgent[tuple[SO101ParallelGripper, SO101ParallelGripper]]
 
     def __init__(
@@ -65,25 +77,41 @@ class TwoSO101Base(BaseEnv):
         robot_init_qpos_noise=0.02,
         partner_obs="full",
         arm_layout: ArmLayout = _DEFAULT_ARM_LAYOUT,
+        scene_camera: SceneCameraConfig = _DEFAULT_SCENE_CAMERA,
         **kwargs,
     ):
         validate_partner_obs(partner_obs)
         self.arm_layout = arm_layout
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.partner_obs = partner_obs
+        self.scene_camera = scene_camera
         # No explicit control_mode: SO101ParallelGripper's first configured controller is
         # already "pd_joint_delta_pos" (5 arm deltas + 1 gripper target), which BaseAgent
         # picks by default whenever control_mode is None.
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
+    def _default_human_render_camera_configs(self):
+        cfg = self.scene_camera
+        position, quat = look_at_pose(cfg.eye, cfg.target)
+        return CameraConfig(
+            "render_camera",
+            sapien.Pose(p=position, q=quat),
+            cfg.width,
+            cfg.height,
+            cfg.fov_y,
+            cfg.near,
+            cfg.far,
+        )
+
+    @property
     def agent_a(self) -> SO101ParallelGripper:
-        """The first arm (uid `so101_pg-0`)."""
+        """The first arm (uid `so101_pg-0`, or `so101_pg_wristcam-0`)."""
         return self.agent.agents[0]
 
     @property
     def agent_b(self) -> SO101ParallelGripper:
-        """The second arm (uid `so101_pg-1`)."""
+        """The second arm (uid `so101_pg-1`, or `so101_pg_wristcam-1`)."""
         return self.agent.agents[1]
 
     def _load_agent(self, options: dict):
@@ -117,8 +145,8 @@ class TwoSO101Base(BaseEnv):
         with torch.device(self.device):
             b = len(env_idx)
             # Resets the table/ground pose. TableSceneBuilder.initialize() has
-            # no branch for robot_uids == ("so101_pg", "so101_pg") as of
-            # mani-skill 3.0.1, so it silently skips robot placement -- both
+            # no branch for robot_uids == ("so101_pg", "so101_pg") (nor the wristcam
+            # variant) as of mani-skill 3.0.1, so it silently skips robot placement -- both
             # arms' qpos are reset explicitly below instead. Base poses are
             # fixed (set once in _load_agent) and do not need resetting per
             # episode.

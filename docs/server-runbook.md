@@ -260,6 +260,42 @@ Weights go the same way, one checkpoint at a time (`tar czf` or direct Download)
 Metrics worth writing into `docs/thesis/` while fresh: success-rate, steps to
 converge, and any layout/tuning constants that had to change.
 
+### 5. Rendering a video (wrist cameras + scene view)
+
+`scripts/render_episode.py` runs one `FaceTurn-v0` episode with the `so101_pg_wristcam` agent
+(a camera on each gripper housing) and writes **one composite frame per sim step**: the
+fixed scene camera on the left, the holder's wrist view over the rotator's on the right,
+every panel labelled, with the step index and sim time in a footer. All panels come from the
+same sim step.
+
+```bash
+cd "$CALLOSUM_REPO"
+uv run python scripts/render_episode.py --name face_turn_scripted      # scripted expert, ~350 steps
+uv run python scripts/render_episode.py --policy random --max-steps 60 --name look   # quick look
+# options: --max-steps N, --seed, --fps (default 20 = real time), --width/--height (wrist panel,
+# default 320x240; the scene panel is 2x that), --dry-run (no rendering)
+```
+
+The file appears at `runs/videos/<name>.mp4` (→ `~/callosum-runs/videos/`, git-ignored). Get
+it out like the other results: right-click → Download in the JupyterHub file browser, or play
+it inline in a notebook:
+
+```python
+from IPython.display import Video
+
+Video(
+    "runs/videos/face_turn_scripted.mp4", embed=True
+)  # embed=True: the browser cannot reach files outside the notebook dir
+```
+
+Expect it to be **slow**: only the lavapipe software Vulkan ICD exists, so the script creates
+the env with `render_backend="cpu"` and `sim_backend="cpu"` (one env). Three images are
+rendered per step; budget seconds per frame, i.e. several minutes for the ~350-step scripted
+episode (progress with frames/s is printed every 10 frames); start with `--max-steps 40` or a
+smaller `--width/--height`. GPU sim with CPU rendering is not supported by ManiSkill 3.0.1
+(GPU-sim camera images come from CUDA buffers), so the script refuses it. On macOS there is no
+Vulkan at all: `--dry-run` only steps the policy and reports the frame layout.
+
 ## Server quirks (SAPIEN, PhysX, Vulkan)
 
 Carried over from the earlier SO-100-era setup of this same server (an archived

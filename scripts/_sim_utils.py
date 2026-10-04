@@ -74,7 +74,9 @@ def make_env(env_id: str, args: argparse.Namespace, **env_kwargs):
     then skips `sapien.render.RenderSystem` (and lighting/sensor setup), which fails on a
     machine without a hardware Vulkan device. Any trainer must pass `render_backend="none"` too.
 
-    Extra keyword arguments (e.g. `control_mode="pd_joint_pos"`) are passed on to the env.
+    Extra keyword arguments (e.g. `control_mode="pd_joint_pos"`) are passed on to the env; they
+    may also override the defaults `obs_mode="state"` and `render_mode=None` (the video script
+    asks for `obs_mode="rgb"` and `render_mode="rgb_array"`).
     """
     num_envs = args.num_envs
     if args.sim_backend in ("cpu", "physx_cpu"):
@@ -83,12 +85,11 @@ def make_env(env_id: str, args: argparse.Namespace, **env_kwargs):
             num_envs = 1
         if sys.platform == "darwin":
             _stub_rendering_for_macos()
+    env_kwargs = {"obs_mode": "state", "render_mode": None} | env_kwargs
     return gym.make(
         env_id,
         num_envs=num_envs,
-        obs_mode="state",
         sim_backend=args.sim_backend,
         render_backend=args.render_backend,
-        render_mode=None,
         **env_kwargs,
     )

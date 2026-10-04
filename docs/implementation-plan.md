@@ -73,6 +73,7 @@ scripts/                 # smoke-скрипты запуска (сервер)
 | 1.3 | `step/1.3-face-turn`          | `main` (после 1.2)                                   |
 | 1.4 | `step/1.4-partner-flag`       | `main` (после 1.3)                                   |
 | 1.5 | `step/1.5-parallel-gripper`   | `main` (после 1.4)                                   |
+| 1.6 | `step/1.6-wrist-cameras-video` | `main` (после 1.5)                                  |
 | 2.1 | `step/2.1-ippo`               | `main` (после 1.5; старая ветка с SO-100 – только архив) |
 | 2.2 | `step/2.2-benchmarl`          | `main` (после 2.1)                                   |
 | 3.1 | `step/3.1-bijepa-module`      | `main` (после 1.1) – чистый torch, можно параллельно |
@@ -151,6 +152,17 @@ scripts/                 # smoke-скрипты запуска (сервер)
 **Критерий готовности:**
 - **Мак, CPU-сим** (команда из раздела 0): сцена загружается; поза покоя устойчива и руки в ней не сталкиваются; обе руки достают кубик; тест захвата – `is_grasping` = True; **`scripts/probe_face_turn.py` завершается с `success=True`** (holder держит корпус, rotator поворачивает грань на 90°, корпус не смещается).
 - **СЕРВЕР:** `smoke_env.py`, `smoke_face_turn.py` и `probe_face_turn.py` отрабатывают на GPU-бэкенде.
+
+### Шаг 1.6 – Камеры на запястьях + видео эпизода
+> Нужно *видеть*, как двигаются обе руки и что они видят – в одном кадре и синхронно по времени. Заодно задел под визуальные наблюдения.
+
+**Файлы:** `callosum/configs/cameras.py` (`WristCameraConfig`, `SceneCameraConfig`, `look_at_pose` – чистый Python, без `mani_skill`), `callosum/robots/so101_parallel_gripper.py` (агент `SO101ParallelGripperWristCam`), `callosum/envs/two_so101_base.py` (`SUPPORTED_ROBOTS`, аргумент `scene_camera`, камера `render_camera`), `scripts/_face_turn_expert.py` (скриптовый эксперт, вынесенный из `probe_face_turn.py`), `scripts/render_episode.py`, `tests/test_wrist_camera.py`, `docs/server-runbook.md` (раздел «Rendering a video»).
+**Что сделать:**
+- Агент `so101_pg_wristcam` – подкласс `so101_pg` с одной камерой на руку (`_sensor_configs`, монтаж на `link5_1` – корпус захвата, взгляд вдоль пальцев и вниз на ~34°, обе площадки губок и зазор между ними в кадре; как RealSense D405, горизонтальный fov 87° при 4:3). Камера – **opt-in**: `so101_pg` без сенсоров не меняется, обучение по состоянию (`render_backend="none"`) не затронуто. Среда принимает `robot_uids=("so101_pg_wristcam",) * 2`. Размер/fov/поза задаются датаклассом (по умолчанию 128×128 для будущего обучения; видео-скрипт просит 320×240 через `sensor_configs`). В `obs["sensor_data"]` ключи `so101_pg_wristcam-<i>-wrist`.
+- `scripts/render_episode.py`: один эпизод `FaceTurn-v0` → `runs/videos/<имя>.mp4`; **один составной кадр на шаг симуляции**: слева – фиксированная камера сцены (видны обе руки и кубик), справа – holder (сверху) и rotator (снизу) wrist; панели подписаны, в подвале номер шага и время симуляции (`шаг / control_freq`). Все панели из одного шага (картинки запястий – часть `obs` после `env.step`, сцена рендерится сразу после него). Источник движения: `--policy scripted` (эксперт из `_face_turn_expert.py`, общий с `probe_face_turn.py`) или `--policy random`; `--checkpoint` – заглушка под шаг 2.1. Рендер: `render_backend="cpu"` (на сервере только lavapipe), `obs_mode="rgb"`, `render_mode="rgb_array"`; на macOS Vulkan нет – скрипт падает с понятным сообщением, а `--dry-run` прогоняет политику без рендера и печатает раскладку кадра.
+**Критерий готовности:**
+- **Мак:** `ruff` и `pytest` зелёные (в т. ч. проверка проекции площадок губок в кадр камеры); `probe_face_turn.py --sim-backend cpu` по-прежнему `success=True`, угол грани ~90° (рефакторинг эксперта ничего не меняет); `render_episode.py --dry-run` отрабатывает.
+- **СЕРВЕР:** `uv run python scripts/render_episode.py` создаёт mp4, где видны сцена и два вида с запястий синхронно; площадки губок видны на видах с запястий; обе камеры не упираются в корпус захвата.
 
 ---
 
