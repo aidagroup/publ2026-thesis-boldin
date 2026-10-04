@@ -24,7 +24,8 @@
 #
 # Network needs (allowlisted server): github.com (SAPIEN downloads its PhysX GPU
 # library from a GitHub release on first use; uv downloads Python from GitHub),
-# astral.sh, pypi.org, files.pythonhosted.org, download.pytorch.org.
+# pypi.org (uv itself, via pip), astral.sh (installer fallback), files.pythonhosted.org,
+# download.pytorch.org. Downloads are time-bounded: a non-allowlisted host may hang.
 # shellcheck disable=SC2016,SC2030,SC2031  # single quotes in printf are intentional; subshell probes
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -125,14 +126,52 @@ fi
 VENV_PY="$VENV_DIR/bin/python"
 
 # --------------------------------------------------------------------- 3. uv
-# No root: uv goes to ~/.local/bin (~50 MB). It survives a scratch wipe, so the
-# installer only runs the first time.
+# No root: uv goes to ~/.local/bin (~50 MB). It survives a scratch wipe, so this
+# only installs the first time. The server's outbound access is an allowlist and
+# a blocked host can HANG instead of refusing, so every download here is bounded.
+#   1. pip --user (PyPI is allowlisted; pip has its own timeout/retries)
+#   2. the astral.sh installer, pinned to github.com release downloads. By default
+#      the installer tries releases.astral.sh first with a curl that has no
+#      timeout, which hangs when that host is not allowlisted.
 say "uv"
 export PATH="$HOME/.local/bin:$PATH"
+
+# Run "$@" under `timeout $1` seconds when coreutils timeout exists, else unbounded.
+with_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi
+}
+
+install_uv_pip() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -m pip install --user --quiet --timeout 30 --retries 1 uv || return 1
+  # pip --user puts the script in <user base>/bin (usually ~/.local/bin).
+  local ub
+  ub="$(python3 -m site --user-base 2>/dev/null || true)"
+  if [ -n "$ub" ]; then export PATH="$ub/bin:$PATH"; fi
+}
+
+install_uv_astral() {
+  command -v curl >/dev/null 2>&1 || return 1
+  (
+    export UV_NO_MODIFY_PATH=1
+    export UV_INSTALLER_GITHUB_BASE_URL="https://github.com"   # skip releases.astral.sh
+    set -o pipefail
+    curl -LsSf --connect-timeout 10 --max-time 120 https://astral.sh/uv/install.sh \
+      | with_timeout 300 sh
+  )
+}
+
 if ! command -v uv >/dev/null 2>&1; then
-  if ! { curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh; }; then
-    warn "astral.sh installer failed; falling back to 'pip install --user uv' (PyPI)"
-    python3 -m pip install --user --quiet uv || die "could not install uv (astral.sh and PyPI both failed)"
+  if install_uv_pip; then
+    ok "uv installed via pip --user (PyPI)"
+  else
+    warn "pip install --user uv failed; trying the astral.sh installer (github.com release)"
+    if install_uv_astral; then
+      ok "uv installed via astral.sh installer"
+    else
+      die "could not install uv (PyPI and astral.sh both failed or timed out); install it manually (pip install --user uv) and re-run"
+    fi
   fi
   command -v uv >/dev/null 2>&1 || die "uv installed but not on PATH — check ~/.local/bin"
 fi
@@ -190,7 +229,7 @@ fi
 # into ~/.sapien/physx/<version>/. Do it now so a network problem shows up here
 # and not three frames inside the first gym.make(). Best effort: not fatal.
 say "PhysX GPU library"
-if "$VENV_PY" -c 'import sapien; sapien.physx.enable_gpu()' 2>"$WORK/physx.log"; then
+if with_timeout 600 "$VENV_PY" -c 'import sapien; sapien.physx.enable_gpu()' 2>"$WORK/physx.log"; then
   ok "physx.enable_gpu() works ($(du -sh "$HOME/.sapien" 2>/dev/null | cut -f1) in ~/.sapien)"
 else
   warn "physx.enable_gpu() failed (last lines of $WORK/physx.log):"
@@ -238,7 +277,7 @@ else
       warn "installing a current Vulkan loader (+ lavapipe) with conda into $MESA (needs conda-forge)"
       # conda's package cache defaults to ~/.conda/pkgs: keep it off the small $HOME.
       CONDA_PKGS_DIRS="$WORK/conda-pkgs" \
-        conda create -y -q -p "$MESA" -c conda-forge mesalib vulkan-tools >/dev/null 2>&1 \
+        with_timeout 900 conda create -y -q -p "$MESA" -c conda-forge mesalib vulkan-tools >/dev/null 2>&1 \
         || warn "conda install failed (conda-forge not reachable from the server?)"
     fi
     if [ -e "$MESA/lib/libvulkan.so.1" ]; then
