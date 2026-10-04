@@ -221,6 +221,9 @@ __marimo__/
 # Experiment outputs, logs, checkpoints
 outputs/
 runs/
+# On the lab server runs/ is a symlink into $HOME (see docs/server-runbook.md); a
+# trailing-slash pattern does not match a symlink, so ignore the bare name too.
+runs
 logs/
 wandb/
 multirun/

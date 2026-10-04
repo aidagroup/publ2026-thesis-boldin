@@ -1,10 +1,10 @@
 # Server runbook (training session)
 
 The ordered checklist for a GPU session on the lab server (see
-[setup.md](setup.md) for the machine, network allowlist and environment).
-Write and verify everything possible on macOS first (including CPU-sim smoke
-checks, see [setup.md](setup.md#local-macos)); use server time for things that
-genuinely need a GPU.
+[setup.md](setup.md) for the machine, network allowlist, disk layout and
+environment). Write and verify everything possible on macOS first (including
+CPU-sim smoke checks, see [setup.md](setup.md#local-macos)); use server time
+for things that genuinely need a GPU.
 
 ## Before the session
 
@@ -23,42 +23,75 @@ genuinely need a GPU.
 |---|---|
 | GPU | 1× NVIDIA A100-SXM4-80GB |
 | Driver | 570.172.08 (CUDA ≤ 12.8 → torch `cu128`) |
-| Internet | allowlist only (GitHub, PyPI, PyTorch, Hugging Face, …) |
+| Access | JupyterHub web UI + its terminal only; **no SSH**; user `jovyan`, no root |
+| Internet | allowlist only (GitHub, PyPI, PyTorch, Hugging Face, lab LLM proxy, …) |
+| `$HOME` | 4.0 GB total, 888 MB free (2026-10-04); persistent (assumed) |
+| `/` overlay (`/tmp`) | 291 GB, 76 GB free (2026-10-04); assumed wiped on restart |
+| Missing tools | `uv` (setup installs it), `tmux`, `screen` |
 
-## SSH access
+## Access (JupyterHub, no SSH)
 
-Add the server to `~/.ssh/config` on the dev machine under a stable alias:
+Everything runs in a **terminal** opened from the JupyterHub UI
+(File → New → Terminal), not in notebook cells: the notebook kernel dies when the
+browser tab closes, and so does anything it started. Files move only through the
+JupyterHub file browser (upload / right-click → Download); code moves through
+`git` from GitHub. There is no SSH alias, `scp` or `rsync` to the server.
 
-```
-Host aida-gpu
-    HostName <server-host>
-    Port <port>
-    User <user>
-    IdentityFile ~/.ssh/<your-key>
-    ServerAliveInterval 30
-```
-
-Then everything runs as `ssh aida-gpu '<command>'`.
+Layout (details in [setup.md](setup.md#disk-layout-on-the-server-scratch-mode)):
+checkout, venv and caches in scratch `/tmp/<user>-callosum` (big, assumed wiped on
+restart), results in `~/callosum-runs` (small, persistent) reached through the
+`runs/` symlink in the checkout.
 
 ## Session order
 
-### 1. Environment
+### 1. Environment: clone or pull, then setup
+
+Open a terminal and look at what survived:
 
 ```bash
-ssh aida-gpu
-git clone git@github.com:aidagroup/callosum.git   # first time only
-cd callosum && git pull
+ls ~/.callosum-env.sh ~/callosum-runs      # these persist across restarts
+ls -d /tmp/$(id -un)-callosum/callosum    # scratch checkout: gone after a restart
+```
+
+**Scratch is gone (first session, or after a restart)** — start from a fresh clone:
+
+```bash
+S=/tmp/$(id -un)-callosum                  # or export CALLOSUM_SCRATCH=<dir> first
+mkdir -p "$S" && cd "$S"
+git clone https://github.com/aidagroup/callosum.git && cd callosum
+# git checkout <branch>                    # if the session is not on main
 bash scripts/setup_server.sh
 ```
 
-Verifies driver, a real CUDA matmul, compute capability vs the torch CUDA
-build, ManiSkill + our `so101_pg` agent, and that both envs register. Stop and fix
-if anything here fails — everything below depends on it. After the first run
-the uv cache is warm, so re-running it after a `git pull` is quick.
+**Scratch is still there** — update in place:
+
+```bash
+source ~/.callosum-env.sh
+cd "$CALLOSUM_REPO" && git pull
+bash scripts/setup_server.sh               # idempotent; quick when nothing changed
+```
+
+The script verifies driver, a real CUDA matmul, compute capability vs the torch
+CUDA build, ManiSkill + our `so101_pg` agent, and that both envs register. Stop and
+fix if anything here fails — everything below depends on it. The very first
+`uv sync` is also the confirmation that the `cu128` torch wheels download from
+`download.pytorch.org` (see the network notes in [setup.md](setup.md#network-access-on-the-server)).
+After a restart the uv cache is gone, so setup re-downloads torch and the CUDA
+libraries (several GB); expect it to take minutes, not seconds.
+
+If the repository turns out to be private, `git clone` over HTTPS asks for a
+username and a read-only token (verify on the server).
+
+In every **new** terminal, `~/.callosum-env.sh` is sourced automatically via
+`~/.bashrc` (verify that terminals read it; otherwise `source` it by hand). It
+sets `UV_PROJECT_ENVIRONMENT`, the caches, `MS_ASSET_DIR` and the Vulkan/libcuda
+variables. A notebook kernel that was started before setup does not have them;
+restart it or work in the terminal.
 
 ### 2. Phase-1 debt: the GPU-backend checks
 
 ```bash
+bash scripts/setup_server.sh --smoke       # or, once set up:
 uv run python scripts/smoke_env.py
 uv run python scripts/smoke_face_turn.py
 uv run python scripts/probe_face_turn.py
@@ -91,7 +124,7 @@ Record the actual printed output; it is the evidence that phase 1 works.
 
 Start with the **easy** env, not the hard one: `TwoSO101-v0` has a pure reach
 reward, so if IPPO can't improve there, the problem is the trainer, not the
-task.
+task. Launch it detached (next section), e.g.:
 
 ```bash
 uv run python -m callosum.training.ippo --env-id TwoSO101-v0 --total-timesteps <short>
@@ -107,27 +140,129 @@ Success criterion (from `docs/implementation-plan.md`, step 2.1 / the
 experiment design): reward curve rises and success-rate becomes non-trivial.
 This is the gate that decides whether the whole approach is viable.
 
-Run long trainings inside `tmux` (or `nohup`) so an SSH drop doesn't kill them.
+For state-based training, build the env with `render_backend="none"` (no
+camera renderer in the scene; ManiSkill v3.0.1 default is `"gpu"`). A Vulkan
+device is still required, see [Server quirks](#server-quirks-sapien-physx-vulkan).
+The smoke scripts on this branch use the default backend.
+
+#### Long runs (detached)
+
+A run started from a notebook cell dies with the kernel when the tab closes. In a
+**terminal**, detach it from the terminal with `setsid nohup`:
+
+```bash
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+NAME=twoso101_sanity                          # one directory per run
+mkdir -p runs/$NAME
+setsid nohup uv run python -m callosum.training.ippo \
+    --env-id TwoSO101-v0 --total-timesteps <short> \
+    > runs/$NAME/stdout.log 2>&1 < /dev/null &
+echo $! > runs/$NAME/pid                      # best effort; see pgrep below
+```
+
+Check and stop it:
+
+```bash
+tail -f runs/$NAME/stdout.log                 # Ctrl-C leaves the run alone
+pgrep -af callosum.training                   # alive? (pid, command line)
+nvidia-smi                                    # GPU utilisation and memory
+kill <pid>                                    # polite stop (SIGTERM)
+pkill -f callosum.training                    # if the pid file is stale
+```
+
+`stdout.log` lives in `$HOME` via the `runs/` symlink, so it survives a restart
+(the run itself does not). Do not `git pull` / switch branches mid-run: `callosum`
+is installed editable, so later imports would see the new code.
+
+**Verify on the server first** that detaching really works: `setsid nohup sleep 600 &`,
+close the browser tab, reopen a terminal, `pgrep sleep`. It must still be there. Also
+unknown: whether the lab kills long-running processes or idle containers; make
+trainers save a checkpoint periodically rather than only at the end.
+
+If a notebook is more convenient than a terminal for reading, `!tail -40
+runs/<name>/stdout.log` in a cell is fine (reading only; never start the run there).
 
 ### 4. Watching and collecting results
 
-Checkpoints and TensorBoard logs live under `runs/` on the server and are
+Checkpoints and TensorBoard logs live under `runs/` (→ `~/callosum-runs`) and are
 git-ignored, so they do **not** come back via git. `wandb.ai` is not reachable
-from the server, so metrics stay local.
+from the server, so metrics stay local. **`$HOME` has < 1 GB free**: check
+`du -sh runs/*` after each run, delete checkpoints you will not use, and download
+the keepers promptly (the quota is shared with everything else in `$HOME`).
 
-Watch training live through an SSH tunnel:
+TensorBoard has no SSH tunnel to ride on. Two options:
 
-```bash
-ssh aida-gpu 'cd callosum && uv run tensorboard --logdir runs --port 6006'   # on the server
-ssh -N -L 6006:localhost:6006 aida-gpu                                        # on the Mac
-# then open http://localhost:6006
-```
+1. **Through JupyterHub** — only if `jupyter-server-proxy` is installed (verify:
+   `pip list 2>/dev/null | grep -i jupyter-server-proxy` and
+   `jupyter server extension list`). `tensorboard` is not in `uv.lock` on this
+   branch, so use the ephemeral `uvx` (PyPI is allowed) unless the trainer step
+   adds it:
 
-Copy anything worth keeping back to the Mac:
+   ```bash
+   cd "$CALLOSUM_REPO"
+   uvx tensorboard --logdir runs --port 6006 --host 127.0.0.1 &   # or `uv run tensorboard …`
+   ```
 
-```bash
-rsync -avz aida-gpu:~/callosum/runs/ ./runs/
-```
+   then open `<your JupyterHub URL>/user/<you>/proxy/6006/` (the standard
+   jupyter-server-proxy path; verify). Stop it with `pkill -f tensorboard`.
+2. **Copy the logs out and view them on the Mac** — works regardless of any proxy.
+   Event files are small; leave the weights out:
+
+   ```bash
+   tar czf ~/runs-logs.tar.gz --exclude='*.pt' -C "$CALLOSUM_REPO" runs
+   du -sh ~/runs-logs.tar.gz                   # must fit in the 888 MB quota
+   ```
+
+   Download `runs-logs.tar.gz` from the file browser (right-click → Download),
+   `rm` it on the server, then locally: `tar xzf runs-logs.tar.gz && uvx tensorboard --logdir runs`.
+
+Weights go the same way, one checkpoint at a time (`tar czf` or direct Download).
+`runs/<name>/stdout.log` is the always-available fallback for watching a run.
 
 Metrics worth writing into `docs/thesis/` while fresh: success-rate, steps to
 converge, and any layout/tuning constants that had to change.
+
+## Server quirks (SAPIEN, PhysX, Vulkan)
+
+Carried over from the earlier SO-100-era setup of this same server (an archived
+branch, probed 2026-08-30). `scripts/setup_server.sh` applies them only when the
+stock configuration fails; **none has been re-verified yet on the current
+environment** — treat the first setup run as the verification.
+
+| Symptom | Cause | What setup does |
+|---|---|---|
+| `OSError: libcuda.so: cannot open shared object file` from `sapien/physx/__init__.py` (`enable_gpu`), while torch sees the GPU | SAPIEN loads the *unversioned* `libcuda.so`; the container runtime only injects `libcuda.so.1` | symlinks `libcuda.so.1` into `<scratch>/lib/libcuda.so`, prepends it to `LD_LIBRARY_PATH` |
+| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"` | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) was too old for the 570.x NVIDIA ICD | tries the stock setup, then each ICD manifest with the system loader, then installs a current loader with `conda create -p <scratch>/mesa -c conda-forge mesalib vulkan-tools` (conda package cache moved off `$HOME`), symlinks **only** `libvulkan.so.1` into `<scratch>/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch), and picks the first working manifest by actually constructing a `RenderMaterial`; lavapipe (software) is the last resort — fine for state training, not for vision |
+| First `gym.make(..., sim_backend="gpu")` hangs/fails while downloading | SAPIEN fetches `libPhysXGpu_64.so` (~240 MB unpacked) from a `github.com` release into `~/.sapien/physx/<version>/` | `~/.sapien` is a symlink into scratch; setup pre-fetches via `physx.enable_gpu()`. Manual fallback: download the `linux-so.zip` named in SAPIEN's message elsewhere, upload, unzip into that directory |
+
+Notes:
+
+- `SAPIEN_VULKAN_LIBRARY_PATH` looked like the knob for a custom loader but was
+  ignored when a system `libvulkan` exists (observed earlier); the loader is
+  swapped through `LD_LIBRARY_PATH` instead. The loader is chosen at process
+  start, so run from a terminal that sourced `~/.callosum-env.sh`.
+- The conda fallback needs `conda.anaconda.org` (conda-forge) — **not** on the
+  owner's list of open hosts; verify on the server, or ask the owner to open it.
+- ManiSkill's own asset directory is controlled by `MS_ASSET_DIR` (v3.0.1;
+  default `~/.maniskill`). The table, robot URDFs/meshes and our procedural cube
+  ship inside the `mani_skill` wheel (checked for 3.0.1 earlier), so nothing
+  extra should be downloaded for these envs; verify no `~/.maniskill` appears.
+- `torch` is **not** to be installed from PyPI as a workaround for a blocked
+  `download-r2.pytorch.org`: PyPI's default Linux build targets CUDA 13, which
+  driver 570 cannot run. Ask the owner to open the host instead.
+
+## Verify on the server first
+
+Everything above that is not a measured fact, in the order it will bite:
+
+1. `bash scripts/setup_server.sh` completes: `uv sync --frozen` pulls the `cu128`
+   wheels (torch, CUDA libs) through `download-r2.pytorch.org`; `uv` installs from
+   `astral.sh`; uv's Python 3.12 download from GitHub works.
+2. Which of the quirk fixes (libcuda shim, Vulkan loader, PhysX download) the script
+   actually had to apply; whether conda-forge is reachable.
+3. `~/.bashrc` is read by new JupyterHub terminals (so `~/.callosum-env.sh` loads).
+4. `setsid nohup` runs survive closing the tab; whether the lab kills long processes.
+5. `jupyter-server-proxy` present? (for TensorBoard)
+6. Is `/tmp` really wiped on restart, and is `$HOME` really kept? Is the repo public
+   (HTTPS clone without credentials)?
+7. How long a from-scratch setup takes after a wipe (add the number here).
