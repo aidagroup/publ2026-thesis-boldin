@@ -39,6 +39,7 @@ def build_turntable_cube(
     color=(1, 0, 0, 1),
     face_color=(1, 1, 0, 1),
     scene_idxs=None,
+    initial_pose: sapien.Pose | None = None,
 ) -> Articulation:
     """Build a "turntable cube": a box body plus a revolute-jointed top face.
 
@@ -56,6 +57,11 @@ def build_turntable_cube(
         color: RGBA of the body.
         face_color: RGBA of the face, so it's visually distinguishable.
         scene_idxs: which parallel envs to build this in (None = all envs).
+        initial_pose: pose of the body (root link) at build time. Default: resting on the
+            table (z=0) at the table centre, i.e. body root at z=cube_half_size (the body box
+            spans local z in [-cube_half_size, cube_half_size - face_thickness], so its
+            bottom sits exactly cube_half_size below the root). This matches the nominal
+            reset pose in TwoSO101Base._initialize_episode; ManiSkill warns if it is unset.
 
     Returns:
         The built Articulation. Its root link is named "body" and its
@@ -65,6 +71,9 @@ def build_turntable_cube(
 
     builder = scene.create_articulation_builder()
     builder.set_scene_idxs(scene_idxs)
+    builder.initial_pose = (
+        sapien.Pose(p=[0, 0, cube_half_size]) if initial_pose is None else initial_pose
+    )
 
     body = builder.create_link_builder(parent=None)
     body.set_name("body")
