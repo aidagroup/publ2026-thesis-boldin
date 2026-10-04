@@ -6,9 +6,10 @@ when they are run as `python scripts/<name>.py`.
 """
 
 import argparse
-import sys
 
 import gymnasium as gym
+
+from callosum.envs._sim_compat import is_cpu_backend, prepare_sim_backend
 
 
 def parse_args(description: str, extra_args=None) -> argparse.Namespace:
@@ -37,36 +38,6 @@ def parse_args(description: str, extra_args=None) -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _stub_rendering_for_macos() -> None:
-    """Let the CPU sim run on a Mac without Vulkan.
-
-    ManiSkill 3.0.1 assumes rendering is possible on macOS (`can_render` always returns True
-    there), but SAPIEN has no Vulkan device on a Mac, so building any render material raises.
-    `render_backend="none"` does not help here: ManiSkill 3.0.1 forces the CPU render backend on
-    Darwin (`parse_sim_and_render_backend`) and `can_render` returns True there. These smoke
-    scripts never render, so turn rendering off and replace the render-material
-    classes with inert stubs. Only call this on macOS, before creating an env.
-    """
-    import mani_skill.render.utils as render_utils
-    import sapien
-    from sapien.pysapien import render as pysapien_render
-    from sapien.wrapper import urdf_loader
-
-    class _InertRenderObject:
-        def __init__(self, *args, **kwargs):
-            self.base_color = (1.0, 1.0, 1.0, 1.0)
-
-        def __getitem__(self, idx):
-            return (1.0, 1.0, 1.0, 1.0)[idx]
-
-    render_utils.can_render = lambda device: False
-    for name in ("RenderMaterial", "RenderTexture2D", "RenderTexture"):
-        setattr(sapien.render, name, _InertRenderObject)
-        setattr(pysapien_render, name, _InertRenderObject)
-    urdf_loader.RenderMaterial = _InertRenderObject
-    urdf_loader.RenderTexture2D = _InertRenderObject
-
-
 def make_env(env_id: str, args: argparse.Namespace, **env_kwargs):
     """`gym.make` the env with the CLI flags applied (CPU sim is limited to one env).
 
@@ -77,12 +48,10 @@ def make_env(env_id: str, args: argparse.Namespace, **env_kwargs):
     Extra keyword arguments (e.g. `control_mode="pd_joint_pos"`) are passed on to the env.
     """
     num_envs = args.num_envs
-    if args.sim_backend in ("cpu", "physx_cpu"):
-        if num_envs != 1:
-            print(f"note: the CPU sim backend supports a single env; using num_envs=1 ({num_envs})")
-            num_envs = 1
-        if sys.platform == "darwin":
-            _stub_rendering_for_macos()
+    if is_cpu_backend(args.sim_backend) and num_envs != 1:
+        print(f"note: the CPU sim backend supports a single env; using num_envs=1 ({num_envs})")
+        num_envs = 1
+    prepare_sim_backend(args.sim_backend)
     return gym.make(
         env_id,
         num_envs=num_envs,

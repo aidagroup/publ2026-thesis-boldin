@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 University thesis project (package `callosum`): two SO-ARM101 robot arms with Robonine parallel grippers, each a decentralized agent, cooperatively turn a Rubik's-cube-like object in ManiSkill GPU simulation. The coordination mechanism is **Bi-JEPA** (each agent predicts its partner's latent state, no message passing), with sim2real as a later goal. The README and `docs/` are written in Russian; **code, comments and docstrings must be in English**.
 
-Phase 1 (ManiSkill envs) is implemented. The `callosum/agents/` (Bi-JEPA) and `callosum/training/` (IPPO/BenchMARL) packages are still empty stubs. [docs/implementation-plan.md](docs/implementation-plan.md) is the step-by-step spec (steps 1.1 to 3.3); thesis background lives in [docs/thesis/](docs/thesis/README.md) (glossary in `docs/thesis/glossary.md`).
+Phase 1 (ManiSkill envs) is implemented, and step 2.1 adds the IPPO trainer `callosum/training/ippo.py` (`python -m callosum.training.ippo`, config in `callosum/configs/ippo.py`, per-agent policy inputs cut from the flat state obs in `callosum/training/_agent_obs.py`); the server run is still pending. `callosum/agents/` (Bi-JEPA) and BenchMARL (step 2.2) are still empty stubs. [docs/implementation-plan.md](docs/implementation-plan.md) is the step-by-step spec (steps 1.1 to 3.3); thesis background lives in [docs/thesis/](docs/thesis/README.md) (glossary in `docs/thesis/glossary.md`).
 
 ## Two-machine workflow (drives most constraints)
 
@@ -29,6 +29,7 @@ uv run pytest tests/test_partner_obs.py::<test_name> -q   # single test
 uv run python scripts/smoke_env.py
 uv run python scripts/smoke_face_turn.py
 uv run python scripts/probe_face_turn.py   # scripted two-arm face turn (needs scipy, which ManiSkill brings)
+uv run python -m callosum.training.ippo --env-id TwoSO101-v0   # IPPO trainer (GPU; Mac CPU smoke: see docs/server-runbook.md)
 ```
 
 CI (`.github/workflows/ci.yml`) installs only the `dev` extra and runs ruff check, ruff format check, an import smoke check of all subpackages, and pytest. Run these locally before pushing; red CI means the PR isn't ready.
