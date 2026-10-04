@@ -11,7 +11,8 @@ def test_defaults() -> None:
     cfg = FaceTurnRewardConfig()
     assert cfg.gate_rotator_on_holder and cfg.hinge_drift_penalty
     assert cfg.angle_progress_shape == "linear"
-    assert cfg.rotator_gate_floor == 0.5
+    assert cfg.rotator_grasp_gate_floor == 0.5
+    assert cfg.angle_gate_floor == 0.0  # hard gate: no angle reward without the holder
 
 
 def test_max_positive_reward_is_the_sum_of_the_bounded_weights() -> None:
@@ -22,8 +23,12 @@ def test_max_positive_reward_is_the_sum_of_the_bounded_weights() -> None:
 
 
 def test_rejects_bad_options() -> None:
-    with pytest.raises(ValueError, match="rotator_gate_floor"):
-        FaceTurnRewardConfig(rotator_gate_floor=1.5)
+    with pytest.raises(ValueError, match="rotator_grasp_gate_floor"):
+        FaceTurnRewardConfig(rotator_grasp_gate_floor=1.5)
+    with pytest.raises(ValueError, match="angle_gate_floor"):
+        FaceTurnRewardConfig(angle_gate_floor=-0.1)
+    with pytest.raises(ValueError, match="angle_gate_floor"):
+        FaceTurnRewardConfig(angle_gate_floor=1.5)
     with pytest.raises(ValueError, match="angle_progress_shape"):
         FaceTurnRewardConfig(angle_progress_shape="cubic")  # type: ignore[arg-type]
 
@@ -54,3 +59,36 @@ def test_success_bonus_is_applied_exactly_on_success_steps() -> None:
     assert torch.equal(
         FaceTurnRewardConfig(success_bonus=0.0).add_success_bonus(dense, success), dense
     )
+
+
+def test_angle_term_is_hard_gated_but_the_rotator_grasp_term_is_soft() -> None:
+    torch = pytest.importorskip("torch")
+    cfg = FaceTurnRewardConfig()
+    holder_grasp = torch.tensor([0.0, 1.0])
+    # Holder released: no angle reward at all (a partially turned face must not keep paying),
+    # while the rotator's grasp term keeps its soft floor. Holder grasping: both in full.
+    assert torch.equal(cfg.order_gate(cfg.angle_gate_floor, holder_grasp), torch.tensor([0.0, 1.0]))
+    assert torch.equal(
+        cfg.order_gate(cfg.rotator_grasp_gate_floor, holder_grasp), torch.tensor([0.5, 1.0])
+    )
+    # The floors are independent, and a positive angle floor re-opens the loophole.
+    soft = FaceTurnRewardConfig(angle_gate_floor=0.25, rotator_grasp_gate_floor=0.0)
+    assert torch.equal(
+        soft.order_gate(soft.angle_gate_floor, holder_grasp), torch.tensor([0.25, 1])
+    )
+    assert torch.equal(
+        soft.order_gate(soft.rotator_grasp_gate_floor, holder_grasp), torch.tensor([0.0, 1.0])
+    )
+    # Gating off: both terms ungated.
+    off = FaceTurnRewardConfig(gate_rotator_on_holder=False)
+    assert torch.equal(off.order_gate(off.angle_gate_floor, holder_grasp), torch.ones(2))
+
+
+def test_gated_terms_keep_the_normalised_reward_bounded() -> None:
+    cfg = FaceTurnRewardConfig()
+    # Gates are in [0, 1], so every gated term stays <= its weight and the positive sum is
+    # still the divisor.
+    for floor in (cfg.rotator_grasp_gate_floor, cfg.angle_gate_floor):
+        for grasp in (0.0, 1.0):
+            assert 0.0 <= cfg.order_gate(floor, grasp) <= 1.0
+    assert cfg.max_positive_reward == 7.0

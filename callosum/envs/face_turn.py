@@ -68,7 +68,7 @@ class FaceTurn(TwoSO101Base):
     penetration kick each substep; both only happen while the holder is not grasping, i.e. in
     states the rule exists to make unproductive. The decision uses the contact forces of the
     previous control step, so a grasp is noticed one step late. `is_grasping` can flicker
-    while the face is being turned (see `FaceTurnRewardConfig.rotator_gate_floor`); every
+    while the face is being turned (see `FaceTurnRewardConfig.rotator_grasp_gate_floor`); every
     flicker re-latches the lock at the current angle, which is a brief stall, not a reset.
     """
 
@@ -221,13 +221,13 @@ class FaceTurn(TwoSO101Base):
             # turn_faucet.py's own (commented-out, unshipped) draft shape; ~0.004 at 0 deg.
             angle_progress = 1 - torch.tanh(2 * angle_remaining)
 
-        # Order gate: the rotator's grasp and turn count in full only while the holder holds
-        # the body (see FaceTurnRewardConfig.rotator_gate_floor for hard vs soft). The rotator's
-        # reach term is not gated, so it still gets pulled toward the face meanwhile.
-        if cfg.gate_rotator_on_holder:
-            gate = cfg.rotator_gate_floor + (1 - cfg.rotator_gate_floor) * holder_grasp
-        else:
-            gate = torch.ones_like(holder_grasp)
+        # Order gates (see FaceTurnRewardConfig.rotator_grasp_gate_floor / angle_gate_floor): the
+        # rotator's grasp counts in full only while the holder holds the body (soft floor), and the
+        # face-angle progress is paid only then (hard gate by default: a partially turned face must
+        # not keep earning after the holder lets go). The rotator's reach term is not gated, so it
+        # still gets pulled toward the face meanwhile.
+        grasp_gate = cfg.order_gate(cfg.rotator_grasp_gate_floor, holder_grasp)
+        angle_gate = cfg.order_gate(cfg.angle_gate_floor, holder_grasp)
 
         # (e) penalty for the body drifting from its initial pose. Separate
         # weights since position (m) and rotation (rad) drift aren't on
@@ -240,8 +240,8 @@ class FaceTurn(TwoSO101Base):
 
         dense = (
             cfg.weight_rotator_reach * rotator_reach
-            + cfg.weight_grasp * gate * rotator_grasp
-            + cfg.weight_angle_progress * gate * angle_progress
+            + cfg.weight_grasp * grasp_gate * rotator_grasp
+            + cfg.weight_angle_progress * angle_gate * angle_progress
             + cfg.weight_holder_reach * holder_reach
             + cfg.weight_holder_grasp * holder_grasp
             - cfg.weight_body_pos_drift * pos_drift

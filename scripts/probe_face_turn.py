@@ -301,10 +301,23 @@ class Rig:
         pos_drift = torch.linalg.norm(b.cube.pose.p - b.body_init_pos, dim=1)
         rot_drift = common.quat_diff_rad(b.cube.pose.q, b.body_init_q)
         reward = b.compute_dense_reward(obs=None, action=None, info=info)
+        # The face-angle term alone (normalised): weight * hard-gate(holder grasp) * progress,
+        # to check that it drops to 0 once the holder lets go.
+        cfg = b.reward_config
+        holder_grasp = self.agents[0].is_grasping(body).float()
+        remaining = (TARGET_FACE_ANGLE - info["face_angle"]).clamp(min=0)
+        progress = (1 - remaining / TARGET_FACE_ANGLE).clamp(0, 1)
+        angle_term = (
+            cfg.weight_angle_progress
+            * cfg.order_gate(cfg.angle_gate_floor, holder_grasp)
+            * progress
+            / cfg.max_positive_reward
+        )
         row = {
             "env_steps": np.array([int(b.elapsed_steps[0])]),
             "dense_reward": reward.cpu().numpy(),
             "normalized_reward": (reward / b.reward_config.max_positive_reward).cpu().numpy(),
+            "angle_term_norm": angle_term.cpu().numpy(),
             "holder_grasps_body": self.agents[0].is_grasping(body).cpu().numpy(),
             "rotator_grasps_face": self.agents[1].is_grasping(face).cpu().numpy(),
             "face_angle_deg": np.rad2deg(info["face_angle"].cpu().numpy()),

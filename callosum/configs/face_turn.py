@@ -26,16 +26,29 @@ class FaceTurnRewardConfig:
 
     # Shaping options.
     gate_rotator_on_holder: bool = True
-    """Scale the rotator's grasp and angle-progress terms by a gate that depends on the holder
+    """Scale the rotator's grasp and angle-progress terms by gates that depend on the holder
     grasping the body (the rotator's reach term stays ungated). The order matters physically:
-    two open grippers next to the cube collide, so the holder has to clamp the body first."""
-    rotator_gate_floor: float = 0.5
-    """Gate value while the holder is NOT grasping: `gate = floor + (1 - floor) * holder_grasp`.
-    0.0 is a hard 0/1 gate, 1.0 no gate. A soft floor is the default: a hard gate leaves the
-    rotator without any grasp/turn gradient until the holder has found its (binary, contact- and
-    force-based) grasp, and `is_grasping` can flicker while the face is being turned, which would
-    make the rotator's reward flicker with it. With 0.5 the right order is still worth twice as
-    much, but the rotator can learn to grasp and turn while the holder is still learning."""
+    two open grippers next to the cube collide, so the holder has to clamp the body first.
+    Each gate is `floor + (1 - floor) * holder_grasp`, with a separate floor per term (below)."""
+    rotator_grasp_gate_floor: float = 0.5
+    """Gate floor of the rotator's grasp term while the holder is NOT grasping. 0.0 is a hard
+    0/1 gate, 1.0 no gate. A soft floor is the default: a hard gate leaves the rotator without
+    any grasp gradient until the holder has found its (binary, contact- and force-based)
+    grasp, and `is_grasping` can flicker while the face is being turned, which would make the
+    rotator's reward flicker with it. With 0.5 the right order is still worth twice as much,
+    but the rotator can learn to grasp the face while the holder is still learning."""
+    angle_gate_floor: float = 0.0
+    """Gate floor of the face-angle progress term while the holder is NOT grasping. The default
+    0.0 is a hard gate: the angle reward is paid only on steps where the holder grasps the body.
+    The face lock (`FaceTurnPhysicsConfig.lock_face_unless_held`) already makes turning
+    impossible without the holder, but it does not stop a *partially turned* face from earning:
+    with a soft floor the policy could grasp with the holder, turn the face to 45 deg, release
+    the holder and keep collecting the angle reward of the locked 45 deg at `floor` of its
+    value for the rest of the episode. With the hard gate that reward stops the moment the
+    holder lets go, so the angle term can only be earned by actually holding the body. (The
+    rotator's grasp gradient is kept alive by the soft floor above, so this does not starve
+    exploration: the angle term is unreachable without the holder anyway, the lock sees to it.)
+    A floor > 0 re-opens the release loophole."""
     hinge_drift_penalty: bool = True
     """Penalise body drift only beyond the success tolerances: `max(0, drift - tol)`. Without
     the hinge any contact-induced micro-drift is punished (and the holder is taught to let go)
@@ -76,8 +89,9 @@ class FaceTurnRewardConfig:
     body_rot_tol: float = 0.1  # rad (~6 deg) of body rotation from its initial pose
 
     def __post_init__(self) -> None:
-        if not 0.0 <= self.rotator_gate_floor <= 1.0:
-            raise ValueError(f"rotator_gate_floor must be in [0, 1], got {self.rotator_gate_floor}")
+        for name in ("rotator_grasp_gate_floor", "angle_gate_floor"):
+            if not 0.0 <= getattr(self, name) <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1], got {getattr(self, name)}")
         if self.success_bonus < 0:
             raise ValueError(f"success_bonus must be >= 0, got {self.success_bonus}")
         if self.angle_progress_shape not in ("linear", "tanh"):
@@ -89,7 +103,7 @@ class FaceTurnRewardConfig:
     def max_positive_reward(self) -> float:
         """Sum of the positive, bounded ([0, 1]) term weights: the divisor of the normalised
         dense reward. The drift penalty is excluded (it is ~0 in the successful case) and the
-        gate only scales terms down, so the normalised reward stays <= 1 (not counting the one-step
+        gates only scale terms down, so the normalised reward stays <= 1 (not counting the one-step
         success bonus)."""
         return (
             self.weight_rotator_reach
@@ -103,6 +117,14 @@ class FaceTurnRewardConfig:
     def dense_success_bonus(self) -> float:
         """The success bonus in raw dense-reward units (`success_bonus * max_positive_reward`)."""
         return self.success_bonus * self.max_positive_reward
+
+    def order_gate(self, floor: float, holder_grasp):
+        """Gate on the holder grasping: `floor + (1 - floor) * holder_grasp` (1 everywhere if
+        `gate_rotator_on_holder` is off). `holder_grasp` is a 0/1 tensor-like (no torch import
+        here); `floor` is `rotator_grasp_gate_floor` or `angle_gate_floor`."""
+        if not self.gate_rotator_on_holder:
+            return holder_grasp * 0 + 1
+        return floor + (1 - floor) * holder_grasp
 
     def add_success_bonus(self, dense_reward, success):
         """`dense_reward` plus the dense success bonus on the entries where `success` is True.
