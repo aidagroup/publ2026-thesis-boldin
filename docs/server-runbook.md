@@ -178,10 +178,13 @@ pass it too. ManiSkill v3.0.1 defaults to `"gpu"`, which makes `BaseEnv._setup_s
 build `sapien.render.RenderSystem(<cuda device>)`; with `"none"` the render device is
 `None`, so no `RenderSystem`, lighting or sensors are created. Without it, `gym.make`
 fails with `RuntimeError: Failed to find a supported physical device "cuda:0"` on a
-machine that only has the lavapipe software ICD (as the lab A100 does, see
-[Server quirks](#server-quirks-sapien-physx-vulkan)). The smoke/probe scripts pass it
-via `--render-backend` (default `none`); use `--render-backend gpu` only for
-rendering/vision, which needs a working hardware Vulkan device.
+machine that only has the lavapipe software ICD (the fallback if setup could not get
+hardware Vulkan, see [Server quirks](#server-quirks-sapien-physx-vulkan)). The
+smoke/probe scripts pass it via `--render-backend` (default `none`, which stays the
+default for state training everywhere). Use `--render-backend gpu` for camera
+rendering (vision phase, wrist-camera videos) **only when setup printed
+`Vulkan: HARDWARE NVIDIA Vulkan on ...`** (or `RenderSystem('cuda:0'): OK` from
+`bash scripts/diagnose_vulkan.sh`).
 
 #### Long runs (detached)
 
@@ -299,14 +302,17 @@ Vulkan at all: `--dry-run` only steps the policy and reports the frame layout.
 ## Server quirks (SAPIEN, PhysX, Vulkan)
 
 Carried over from the earlier SO-100-era setup of this same server (an archived
-branch, probed 2026-08-30). `scripts/setup_server.sh` applies them only when the
-stock configuration fails; **none has been re-verified yet on the current
-environment** — treat the first setup run as the verification.
+branch, probed 2026-08-30). `scripts/setup_server.sh` applies them (the libcuda shim only when needed;
+Vulkan is re-probed on every run); **none has been fully re-verified yet on the current
+environment** — treat the setup output as the verification. What to look for in the
+Vulkan part of `bash scripts/update_server.sh`: `✓ ... GPU render device (NVIDIA A100...)` and
+`✓ Vulkan: HARDWARE NVIDIA Vulkan on NVIDIA A100... via generated NVIDIA manifest + current loader`.
+`! Vulkan: SOFTWARE ...` means the fallback; run `bash scripts/diagnose_vulkan.sh` and send its output.
 
 | Symptom | Cause | What setup does |
 |---|---|---|
 | `OSError: libcuda.so: cannot open shared object file` from `sapien/physx/__init__.py` (`enable_gpu`), while torch sees the GPU | SAPIEN loads the *unversioned* `libcuda.so`; the container runtime only injects `libcuda.so.1` | symlinks `libcuda.so.1` into `<scratch>/lib/libcuda.so`, prepends it to `LD_LIBRARY_PATH` |
-| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"` | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) was too old for the 570.x NVIDIA ICD | tries the stock setup, then each ICD manifest with the system loader, then installs a current loader with `conda create -p <scratch>/mesa -c conda-forge mesalib vulkan-tools` (conda package cache moved off `$HOME`), symlinks **only** `libvulkan.so.1` into `<scratch>/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch), and picks the first working manifest by actually constructing a `RenderMaterial`; lavapipe (software) is the last resort — fine for state training with `render_backend="none"`, not for vision. **Observed 2026-10-04 on the lab A100: hardware Vulkan did not work, setup fell back to lavapipe (`VK_ICD_FILENAMES=lvp_icd...`)**; `RenderMaterial()` works with it, but `gym.make(..., sim_backend="gpu")` with the default `render_backend` fails in `_setup_scene` (`Failed to find a supported physical device "cuda:0"`), hence the `render_backend="none"` rule above |
+| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"`; or `Failed to find a supported physical device "cuda:0"` (lavapipe) | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) is too old for the 570.x NVIDIA ICD; the pod has the NVIDIA user-space libs (`libGLX_nvidia.so.0`, despite `NVIDIA_DRIVER_CAPABILITIES=compute,utility`) but a usable ICD manifest may be missing, and when `/usr/share/vulkan/icd.d/nvidia_icd.json` is absent SAPIEN swaps in its own bundled manifest (api 1.2.140), which hides the driver | **Expected result: hardware NVIDIA Vulkan** via a manifest generated at `<scratch>/vulkan/icd.d/nvidia_icd.json` (absolute path to `libGLX_nvidia.so.0`) plus a current loader: `conda create -p <scratch>/mesa -c conda-forge mesalib vulkan-tools` (conda cache moved off `$HOME`), only `libvulkan.so.1` symlinked into `<scratch>/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch). Setup **probes** candidates in order (generated manifest + current loader, + system loader, stock, other system manifests, lavapipe) in fresh processes and takes the first that constructs `RenderMaterial()` **and** `RenderSystem("cuda:0")` (proof it is the GPU). It is re-evaluated on every run (a past lavapipe pick is not sticky; inherited `VK_ICD_FILENAMES`/`vklib` are ignored) and `~/.callosum-env.sh` is rewritten. Lavapipe (software) is only the fallback: fine for state training with `render_backend="none"`, not for vision. **History:** hardware worked on this server in Aug 2026 (archived `step/2.1-ippo`); on 2026-10-04 the first `setup_server.sh` run ended on lavapipe (that version only scanned manifests already on disk and never wrote its own for `libGLX_nvidia.so.0`; the exact cause on the new pod is unconfirmed, the probe log will tell). Check the current state with `bash scripts/diagnose_vulkan.sh` (NVIDIA libs, manifests, loader versions, `vulkaninfo --summary` per candidate, SAPIEN's view); every probe's stderr is in `<scratch>/vulkan-probe.log` |
 | First `gym.make(..., sim_backend="gpu")` hangs/fails while downloading | SAPIEN fetches `libPhysXGpu_64.so` (~240 MB unpacked) from a `github.com` release into `~/.sapien/physx/<version>/` | `~/.sapien` is a symlink into scratch; setup pre-fetches via `physx.enable_gpu()`. Manual fallback: download the `linux-so.zip` named in SAPIEN's message elsewhere, upload, unzip into that directory |
 
 Notes:

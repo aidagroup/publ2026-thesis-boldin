@@ -205,6 +205,9 @@ say "libcuda.so"
 SHIM_DIR=""
 if "$VENV_PY" -c 'import ctypes; ctypes.CDLL("libcuda.so")' 2>/dev/null; then
   ok "libcuda.so resolves"
+  # It may resolve only because this terminal sourced the env file written by an
+  # earlier run: keep that shim in the rewritten file instead of silently dropping it.
+  if [ -e "$WORK/lib/libcuda.so" ]; then SHIM_DIR="$WORK/lib"; fi
 else
   LIBCUDA=""
   if command -v ldconfig >/dev/null 2>&1; then
@@ -245,72 +248,221 @@ fi
 # ManiSkill cannot build ANY environment without a Vulkan render device, even
 # with obs_mode="state": SAPIEN's URDF loader constructs RenderMaterial()
 # unconditionally (render_backend="none" removes the renderer from the scene but
-# not the global device). Try the stock configuration first; only if it fails,
-# search for a working ICD manifest + loader pair by actually constructing a
-# RenderMaterial with each. Known failure on this image (probed 2026-08-30): the
-# system libvulkan (1.3.275) is too old for the 570.x NVIDIA ICD, so
-# vkCreateInstance returns NULL; a current loader from conda-forge fixes it.
+# not the global device). Camera rendering (vision phase, wrist-camera videos) in
+# addition needs the device to be the GPU: SAPIEN matches a Vulkan physical device
+# to "cuda:0", which lavapipe (CPU) can never satisfy.
+#
+# What worked on this very server in Aug 2026 (archived branch step/2.1-ippo, see
+# docs/server-runbook.md): the container ships the NVIDIA user-space libs
+# (libGLX_nvidia.so.0, ...) despite NVIDIA_DRIVER_CAPABILITIES=compute,utility, but
+# (a) the system libvulkan (1.3.275) is too old for the 570.x ICD (vkCreateInstance
+# returns NULL) and (b) a usable NVIDIA ICD manifest may be missing or hidden:
+# SAPIEN replaces the loader's search with its own bundled manifest when
+# /usr/share/vulkan/icd.d/nvidia_icd.json is absent. So: write OUR manifest next to
+# the driver library, pair it with a current loader (conda-forge) on
+# LD_LIBRARY_PATH, and PROVE the result instead of assuming it. Nothing is trusted
+# until a probe process has constructed RenderMaterial() and, for "hardware",
+# RenderSystem("cuda:0"). Candidates, best first:
+#   our NVIDIA manifest + current loader, ... + system loader, stock setup,
+#   other system manifests (both loaders), lavapipe (software, last resort).
+# The result is re-evaluated on EVERY run (a lavapipe pick from an earlier run is
+# not remembered) and the env file below is rewritten from it.
 say "Vulkan render device"
-ICD=""; VKLIB=""
-render_ok() {  # $1 = ICD manifest ("" = leave default), $2 = extra loader dir ("" = none)
-  (
+
+# $1 = ':'-separated list, $2 = entry to drop.
+strip_path() {
+  local out="" p
+  local -a parts=()
+  IFS=: read -ra parts <<< "$1"
+  for p in ${parts[@]+"${parts[@]}"}; do
+    if [ -n "$p" ] && [ "$p" != "$2" ]; then out="${out:+$out:}$p"; fi
+  done
+  printf '%s' "$out"
+}
+
+# Start from a clean slate: a terminal that sourced ~/.callosum-env.sh after an
+# earlier run carries that run's VK_ICD_FILENAMES (e.g. lavapipe) and loader dir,
+# which would make every probe below test the OLD answer.
+if [ -n "${VK_ICD_FILENAMES:-}" ]; then
+  warn "ignoring inherited VK_ICD_FILENAMES=$VK_ICD_FILENAMES (re-evaluating from scratch)"
+fi
+unset VK_ICD_FILENAMES VK_DRIVER_FILES VK_ADD_DRIVER_FILES
+LD_LIBRARY_PATH="$(strip_path "${LD_LIBRARY_PATH:-}" "$WORK/vklib")"
+if [ -n "$LD_LIBRARY_PATH" ]; then export LD_LIBRARY_PATH; else unset LD_LIBRARY_PATH; fi
+
+# --- NVIDIA user-space libraries (ldconfig, then well-known directories) ---
+LDCONFIG="$(command -v ldconfig 2>/dev/null || true)"
+[ -n "$LDCONFIG" ] || LDCONFIG=/sbin/ldconfig
+find_nv_lib() {  # $1 = file name -> prints the path, returns 1 when not found
+  local p="" d
+  if [ -x "$LDCONFIG" ]; then
+    p="$("$LDCONFIG" -p 2>/dev/null | awk -v n="$1" '$1 == n {print $NF; exit}' || true)"
+  fi
+  if [ -n "$p" ] && [ -e "$p" ]; then printf '%s' "$p"; return 0; fi
+  for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /usr/local/nvidia/lib64 \
+           /usr/local/nvidia/lib /usr/lib/nvidia; do
+    if [ -e "$d/$1" ]; then printf '%s' "$d/$1"; return 0; fi
+  done
+  return 1
+}
+
+LIBGLX="$(find_nv_lib libGLX_nvidia.so.0 || true)"
+NV_ICD=""
+if [ -n "$LIBGLX" ]; then
+  ok "NVIDIA Vulkan driver library: $LIBGLX"
+  # libGLX_nvidia dlopen()s its Vulkan back-end at init, so ldd cannot show a gap.
+  if ! ls "$(dirname "$LIBGLX")"/libnvidia-glvkspirv.so.* >/dev/null 2>&1; then
+    warn "libnvidia-glvkspirv.so.* is missing next to it: the NVIDIA Vulkan path will likely fail"
+  fi
+  # Our own manifest, with an ABSOLUTE library path (independent of the loader's
+  # search path inside child processes). Format and api_version as in NVIDIA's
+  # stock nvidia_icd.json for the 570.x driver (the lab server had api 1.4.303).
+  mkdir -p "$WORK/vulkan/icd.d"
+  NV_ICD="$WORK/vulkan/icd.d/nvidia_icd.json"
+  cat > "$NV_ICD" <<JSON
+{
+    "file_format_version": "1.0.1",
+    "ICD": {
+        "library_path": "$LIBGLX",
+        "api_version": "1.4.303"
+    }
+}
+JSON
+  ok "wrote $NV_ICD"
+else
+  warn "libGLX_nvidia.so.0 not found (ldconfig, /usr/lib*, /usr/local/nvidia): no hardware Vulkan possible"
+  warn "if it is absent the pod lacks NVIDIA_DRIVER_CAPABILITIES=graphics; see docs/server-runbook.md"
+fi
+
+# --- a current Vulkan loader (+ lavapipe, vulkaninfo) from conda-forge ---
+MESA="$WORK/mesa"
+if [ ! -e "$MESA/lib/libvulkan.so.1" ] && command -v conda >/dev/null 2>&1; then
+  warn "installing a current Vulkan loader (+ lavapipe, vulkaninfo) with conda into $MESA (needs conda-forge)"
+  # conda's package cache defaults to ~/.conda/pkgs: keep it off the small $HOME.
+  CONDA_PKGS_DIRS="$WORK/conda-pkgs" \
+    with_timeout 900 conda create -y -q -p "$MESA" -c conda-forge mesalib vulkan-tools >/dev/null 2>&1 \
+    || warn "conda install failed (conda-forge not reachable from the server?)"
+fi
+VKLIB_DIR=""
+if [ -e "$MESA/lib/libvulkan.so.1" ]; then
+  # A directory holding ONLY the loader: prepending conda's whole lib/ would
+  # also shadow libstdc++/libgcc and can break torch.
+  VKLIB_DIR="$WORK/vklib"
+  mkdir -p "$VKLIB_DIR"
+  ln -sfn "$MESA/lib/libvulkan.so.1" "$VKLIB_DIR/libvulkan.so.1"
+  ok "current Vulkan loader: $(readlink -f "$MESA/lib/libvulkan.so.1" 2>/dev/null || echo "$MESA/lib/libvulkan.so.1")"
+else
+  warn "no current Vulkan loader (conda unavailable or failed): only the system loader can be tried"
+fi
+
+# --- candidate list: "manifest|extra loader dir|label" ("" manifest = stock) ---
+CANDS=()
+add_cand() { CANDS+=("$1|$2|$3"); }
+if [ -n "$NV_ICD" ]; then
+  if [ -n "$VKLIB_DIR" ]; then add_cand "$NV_ICD" "$VKLIB_DIR" "generated NVIDIA manifest + current loader"; fi
+  add_cand "$NV_ICD" "" "generated NVIDIA manifest + system loader"
+fi
+add_cand "" "" "stock configuration (SAPIEN default)"
+for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
+  [ -e "$icd" ] || continue
+  if [ -n "$VKLIB_DIR" ]; then add_cand "$icd" "$VKLIB_DIR" "$icd + current loader"; fi
+  add_cand "$icd" "" "$icd + system loader"
+done
+for icd in "$MESA"/share/vulkan/icd.d/*.json; do
+  [ -e "$icd" ] || continue
+  if [ -n "$VKLIB_DIR" ]; then add_cand "$icd" "$VKLIB_DIR" "$(basename "$icd") (software rasteriser) + current loader"; fi
+  add_cand "$icd" "" "$(basename "$icd") (software rasteriser) + system loader"
+done
+
+# Probe = a fresh process (the loader and ICD are chosen at process start). It
+# prints "L1" once RenderMaterial() works (any Vulkan device suffices for state
+# training) and "HW <name>" once RenderSystem("cuda:0") works, which only a GPU
+# Vulkan device that SAPIEN can pair with the CUDA device passes.
+PROBE_PY='
+import sys
+from sapien.render import RenderMaterial, RenderSystem
+RenderMaterial()
+print("L1", flush=True)
+try:
+    import sapien
+    RenderSystem("cuda:0")
+    try:
+        name = sapien.Device("cuda:0").name
+    except Exception:
+        name = "cuda:0"
+    print("HW", name, flush=True)
+except Exception as e:
+    print("NOHW", str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__, flush=True)
+'
+VK_LOG="$WORK/vulkan-probe.log"
+: > "$VK_LOG"
+probe() {  # $1 manifest ("" = leave unset), $2 extra loader dir -> prints hw|<name>, soft|<why> or none
+  local out
+  printf '### manifest=%s loader_dir=%s\n' "${1:-<stock>}" "${2:-<system>}" >> "$VK_LOG"
+  out="$(
     if [ -n "$1" ]; then export VK_ICD_FILENAMES="$1"; fi
     ld="$(join_path "$2" "${LD_LIBRARY_PATH:-}")"
     if [ -n "$ld" ]; then export LD_LIBRARY_PATH="$ld"; fi
-    "$VENV_PY" -c 'from sapien.render import RenderMaterial; RenderMaterial()' >/dev/null 2>&1
-  )
-}
-pick() {  # $1 manifest, $2 loader dir, $3 label -> sets ICD / VKLIB on success
-  [ -e "$1" ] || return 1
-  render_ok "$1" "$2" || return 1
-  ICD="$1"; VKLIB="$2"; ok "render device via $3"
+    with_timeout 120 "$VENV_PY" -c "$PROBE_PY" 2>>"$VK_LOG" || true
+  )"
+  local hw nohw
+  hw="$(printf '%s\n' "$out" | sed -n 's/^HW //p' | head -n 1)"
+  nohw="$(printf '%s\n' "$out" | sed -n 's/^NOHW //p' | head -n 1)"
+  if [ -n "$hw" ]; then printf 'hw|%s' "$hw"
+  elif printf '%s\n' "$out" | grep -q '^L1$'; then printf 'soft|%s' "$nohw"
+  else printf 'none'
+  fi
 }
 
-if render_ok "" ""; then
-  ok "stock configuration works (no Vulkan override needed)"
-else
-  warn "stock Vulkan configuration has no render device; searching for a working one"
-  MESA="$WORK/mesa"
-  found=0
-  for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
-    if pick "$icd" "" "$(basename "$icd") + system loader"; then found=1; break; fi
-  done
-  if [ "$found" = "0" ]; then
-    if [ ! -e "$MESA/lib/libvulkan.so.1" ] && command -v conda >/dev/null 2>&1; then
-      warn "installing a current Vulkan loader (+ lavapipe) with conda into $MESA (needs conda-forge)"
-      # conda's package cache defaults to ~/.conda/pkgs: keep it off the small $HOME.
-      CONDA_PKGS_DIRS="$WORK/conda-pkgs" \
-        with_timeout 900 conda create -y -q -p "$MESA" -c conda-forge mesalib vulkan-tools >/dev/null 2>&1 \
-        || warn "conda install failed (conda-forge not reachable from the server?)"
-    fi
-    if [ -e "$MESA/lib/libvulkan.so.1" ]; then
-      # A directory holding ONLY the loader: prepending conda's whole lib/ would
-      # also shadow libstdc++/libgcc and can break torch.
-      mkdir -p "$WORK/vklib"
-      ln -sfn "$MESA/lib/libvulkan.so.1" "$WORK/vklib/libvulkan.so.1"
-      for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
-        if pick "$icd" "$WORK/vklib" "$(basename "$icd") + current loader"; then found=1; break; fi
-      done
-      if [ "$found" = "0" ]; then
-        for icd in "$MESA"/share/vulkan/icd.d/*.json; do
-          if pick "$icd" "$WORK/vklib" "$(basename "$icd") (software rasteriser: slow, fine for state training)"; then
-            found=1; break
-          fi
-        done
-      fi
-    fi
+ICD=""; VKLIB=""; VK_KIND=""; VK_DEVICE=""; VK_LABEL=""
+SOFT_ICD=""; SOFT_LIB=""; SOFT_LABEL=""
+echo "   probing ${#CANDS[@]} candidate(s), best first (details: $VK_LOG)"
+for c in "${CANDS[@]}"; do
+  IFS='|' read -r c_icd c_lib c_label <<< "$c"
+  if [ -n "$c_icd" ] && [ ! -e "$c_icd" ]; then continue; fi
+  r="$(probe "$c_icd" "$c_lib")"
+  case "$r" in
+    hw\|*)
+      printf '     \033[32m✓\033[0m %s: GPU render device (%s)\n' "$c_label" "${r#hw|}"
+      ICD="$c_icd"; VKLIB="$c_lib"; VK_KIND="hardware"; VK_DEVICE="${r#hw|}"; VK_LABEL="$c_label"
+      break ;;
+    soft\|*)
+      why="${r#soft|}"
+      printf '     ~ %s: Vulkan device works, but not the CUDA GPU%s\n' "$c_label" "${why:+ ($why)}"
+      if [ -z "$SOFT_LABEL" ]; then SOFT_ICD="$c_icd"; SOFT_LIB="$c_lib"; SOFT_LABEL="$c_label"; fi ;;
+    *)
+      printf '     - %s: no render device\n' "$c_label" ;;
+  esac
+done
+
+if [ "$VK_KIND" != "hardware" ]; then
+  if [ -z "$SOFT_LABEL" ]; then
+    tail -n 6 "$VK_LOG" | sed 's/^/     /'
+    die "no Vulkan ICD gives a render device; run: bash scripts/diagnose_vulkan.sh (see docs/server-runbook.md, Vulkan)"
   fi
-  [ "$found" = "1" ] || die "no Vulkan ICD gives a render device — see docs/server-runbook.md (Vulkan)"
-  export VK_ICD_FILENAMES="$ICD"
+  ICD="$SOFT_ICD"; VKLIB="$SOFT_LIB"; VK_KIND="software"; VK_LABEL="$SOFT_LABEL"
+  # The first lines of loader/driver complaints explain WHY hardware failed.
+  if grep -qiE 'error|fail|warn' "$VK_LOG" 2>/dev/null; then
+    warn "loader/driver messages from the probes (full log: $VK_LOG):"
+    grep -iE 'error|fail|warn' "$VK_LOG" | sort -u | head -n 6 | sed 's/^/     /'
+  fi
+fi
+
+if [ -n "$ICD" ]; then export VK_ICD_FILENAMES="$ICD"; fi
+if [ -n "$VKLIB" ]; then
   export LD_LIBRARY_PATH
   LD_LIBRARY_PATH="$(join_path "$VKLIB" "${LD_LIBRARY_PATH:-}")"
-  case "$ICD" in
-    *lvp*|*lavapipe*)
-      warn "lavapipe is a CPU rasteriser, not a GPU render device: state-based training must pass"
-      warn "render_backend=\"none\" to gym.make (the smoke scripts do); camera rendering (vision phase)"
-      warn "needs a working hardware Vulkan device. See docs/server-runbook.md (Vulkan)"
-      ;;
-  esac
+fi
+
+if [ "$VK_KIND" = "hardware" ]; then
+  ok "Vulkan: HARDWARE NVIDIA Vulkan on $VK_DEVICE via $VK_LABEL"
+  ok "camera rendering works: use render_backend=\"gpu\" for vision / wrist-camera videos"
+  ok "state training: render_backend=\"none\" stays the default (no renderer needed)"
+else
+  warn "Vulkan: SOFTWARE / no CUDA-matched GPU device ($VK_LABEL): RenderMaterial() works, which is enough to build envs"
+  warn "state-based training must pass render_backend=\"none\" to gym.make (the smoke scripts and the trainer do);"
+  warn "camera rendering (vision phase) needs hardware Vulkan: run bash scripts/diagnose_vulkan.sh and"
+  warn "see docs/server-runbook.md (Vulkan)"
 fi
 
 # ------------------------------------------------------------ 5. env file, runs/
@@ -335,11 +487,15 @@ say "Environment file"
   if [ -n "$SHIM_DIR" ]; then
     printf 'export LD_LIBRARY_PATH=%q"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' "$SHIM_DIR"
   fi
+  echo "# Vulkan: $VK_KIND (${VK_DEVICE:-no GPU device}) via $VK_LABEL"
   if [ -n "$VKLIB" ]; then
     printf 'export LD_LIBRARY_PATH=%q"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' "$VKLIB"
   fi
   if [ -n "$ICD" ]; then
     printf 'export VK_ICD_FILENAMES=%q\n' "$ICD"
+  else
+    # Stock config won: drop any VK_ICD_FILENAMES left over from an earlier run.
+    echo 'unset VK_ICD_FILENAMES'
   fi
   if [ "$SCRATCH_MODE" = "1" ]; then
     printf '[ -d %q ] || echo "callosum: scratch was wiped; re-run: bash scripts/setup_server.sh (see docs/server-runbook.md)" >&2\n' "$VENV_DIR"
