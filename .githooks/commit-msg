@@ -1,0 +1,102 @@
+#!/bin/sh
+# commit-msg hook: rewrite the subject of every new commit to
+#
+#     <branch> (<action>): <msg>
+#
+# where <action> is the conventional-commit type the author wrote, e.g. on
+# branch step/1.5-parallel-gripper:
+#
+#     fix: clamp box sizes            -> step/1.5-parallel-gripper (fix): clamp box sizes
+#     feat(robots)!: add so101 agent  -> step/1.5-parallel-gripper (feat!): add so101 agent
+#
+# This has to be a commit-msg hook: a pre-commit hook runs before the message
+# exists and cannot change it. commit-msg gets the path of the message file
+# and may edit it in place.
+#
+# Rules:
+#   - allowed types (case-insensitive, emitted lowercase):
+#       feat fix docs style refactor perf test build ci chore revert
+#   - no `type:` prefix -> reject (exit 1)
+#   - already `<current-branch> (type): ...` -> unchanged (amend, cherry-pick)
+#   - `<other-branch> (type): ...` -> prefix replaced with current branch
+#   - left untouched: detached HEAD, merges, fixup!/squash!/amend!, Revert "..."
+#   - the subject is the first non-empty, non-comment line; body and trailers
+#     are preserved as-is.
+#
+# Enable with:  make hooks   (git config core.hooksPath .githooks)
+
+msgfile=$1
+types='feat fix docs style refactor perf test build ci chore revert'
+types_re='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+
+# Detached HEAD (rebase, bisect, ...): no branch name to use.
+branch=$(git symbolic-ref --short -q HEAD) || exit 0
+[ -n "$branch" ] || exit 0
+
+# Merge in progress.
+merge_head=$(git rev-parse --git-path MERGE_HEAD 2>/dev/null)
+[ -n "$merge_head" ] && [ -e "$merge_head" ] && exit 0
+
+# Comment character (single char only; "auto" or longer values fall back to #).
+cc=$(git config --get core.commentChar 2>/dev/null)
+case $cc in
+    ?) ;;
+    *) cc='#' ;;
+esac
+
+# Line number of the subject: first non-empty, non-comment line.
+n=$(awk -v c="$cc" 'substr($0, 1, 1) != c && $0 !~ /^[ \t\r]*$/ { print NR; exit }' "$msgfile")
+[ -n "$n" ] || exit 0
+
+subject=$(sed -n "${n}p" "$msgfile" | sed -E 's/^[[:space:]]+//')
+
+# Machine-generated subjects.
+case $subject in
+    "Merge "* | "fixup! "* | "squash! "* | "amend! "* | 'Revert "'*) exit 0 ;;
+esac
+
+# Already prefixed with some branch: "<branch> (type[!]): msg".
+pre_re="^([^[:space:]]*[^[:space:]:]) \\(($types_re)(!?)\\): (.*)\$"
+if printf '%s\n' "$subject" | grep -Eq "$pre_re"; then
+    old=$(printf '%s\n' "$subject" | sed -E "s/$pre_re/\\1/")
+    [ "$old" = "$branch" ] && exit 0
+    action=$(printf '%s\n' "$subject" | sed -E "s/$pre_re/\\2\\3/")
+    msg=$(printf '%s\n' "$subject" | sed -E "s/$pre_re/\\4/")
+else
+    typed_re='^([A-Za-z]+)(\([^)]*\))?(!?):[[:space:]]*(.*)$'
+    if ! printf '%s\n' "$subject" | grep -Eq "$typed_re"; then
+        ok=0
+    else
+        ok=1
+        t=$(printf '%s\n' "$subject" | sed -E "s/$typed_re/\\1/" | tr '[:upper:]' '[:lower:]')
+        bang=$(printf '%s\n' "$subject" | sed -E "s/$typed_re/\\3/")
+        msg=$(printf '%s\n' "$subject" | sed -E "s/$typed_re/\\4/")
+        case " $types " in
+            *" $t "*) ;;
+            *) ok=0 ;;
+        esac
+    fi
+    if [ "$ok" -ne 1 ]; then
+        {
+            echo "commit-msg: subject must look like  type: message  (or  type(scope): message)"
+            echo "  allowed types: $types"
+            echo "  got: $subject"
+            echo "  it is rewritten to  $branch (type): message"
+        } >&2
+        exit 1
+    fi
+    if [ -z "$msg" ]; then
+        echo "commit-msg: empty description after '$t:'" >&2
+        exit 1
+    fi
+    action=$t$bang
+fi
+
+new="$branch ($action): $msg"
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/commit-msg.XXXXXX") || exit 1
+NEWSUBJ=$new awk -v n="$n" 'NR == n { print ENVIRON["NEWSUBJ"]; next } { print }' "$msgfile" > "$tmp" \
+    && cat "$tmp" > "$msgfile"
+status=$?
+rm -f "$tmp"
+exit $status
