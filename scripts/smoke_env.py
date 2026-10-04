@@ -1,20 +1,21 @@
-"""Smoke-check the TwoSO100-v0 plumbing: agents, observations, actions, reward.
+"""Smoke-check the TwoSO101-v0 plumbing: agents, observations, actions, reward.
 
-Server-only (GPU sim) -- cannot run on macOS. See docs/implementation-plan.md,
-step 1.2, "Критерий готовности (СЕРВЕР)".
+Meant for the GPU server; `--sim-backend cpu` runs a single env locally (also on macOS).
+See docs/implementation-plan.md, step 1.2, "Критерий готовности (СЕРВЕР)".
 """
 
-import gymnasium as gym
+from _sim_utils import make_env, parse_args
 
 # Importing the module (not just the callosum.envs package) runs its
-# @register_env("TwoSO100-v0", ...) decorator. callosum.envs itself stays
+# @register_env("TwoSO101-v0", ...) decorator. callosum.envs itself stays
 # import-clean on macOS/CI (no mani_skill there), so it deliberately does not
 # re-export this submodule -- see docs/implementation-plan.md section 0.
-import callosum.envs.two_so100_base  # noqa: F401
+import callosum.envs.two_so101_base  # noqa: F401
 
 
 def main() -> None:
-    env = gym.make("TwoSO100-v0", num_envs=16, obs_mode="state", sim_backend="gpu")
+    args = parse_args(__doc__)
+    env = make_env("TwoSO101-v0", args)
     base_env = env.unwrapped
 
     obs, _ = env.reset(seed=0)

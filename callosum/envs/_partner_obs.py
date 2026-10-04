@@ -1,16 +1,16 @@
 """Pure logic for the `partner_obs` observation-visibility flag (step 1.4).
 
 Deliberately has zero mani_skill/torch/sapien dependency, unlike
-`two_so100_base.py` (which imports mani_skill at module level and so cannot
+`two_so101_base.py` (which imports mani_skill at module level and so cannot
 be imported at all on macOS/CI, where mani_skill is absent -- see
 docs/implementation-plan.md section 0). Keeping this decision logic in its
 own dependency-free module is what makes it possible to unit-test on macOS,
 per step 1.4's readiness criterion.
 
-This is an env-level toggle: it controls whether TwoSO100Base._get_obs_extra
+This is an env-level toggle: it controls whether TwoSO101Base._get_obs_extra
 includes the two agents' TCP poses in the *shared* extra-obs dict at all.
 Since obs_mode="state" flattens that dict into one combined tensor (see the
-note in two_so100_base.py's _get_obs_extra), there is no true per-agent
+note in two_so101_base.py's _get_obs_extra), there is no true per-agent
 (self-vs-partner) observation split at this level yet -- "none" therefore
 means "neither agent's TCP pose is in the shared extra-obs dict", not
 "agent i can't see agent i's own TCP pose but can see agent j's". Real

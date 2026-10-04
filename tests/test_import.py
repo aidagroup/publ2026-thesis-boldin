@@ -4,6 +4,7 @@ import callosum
 import callosum.agents
 import callosum.configs
 import callosum.envs
+import callosum.robots
 import callosum.training
 
 
@@ -13,6 +14,7 @@ def test_import_callosum() -> None:
 
 def test_import_subpackages() -> None:
     assert callosum.envs
+    assert callosum.robots
     assert callosum.agents
     assert callosum.training
     assert callosum.configs

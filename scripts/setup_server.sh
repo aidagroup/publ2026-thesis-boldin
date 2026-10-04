@@ -85,17 +85,21 @@ else:
 # --- ManiSkill / SAPIEN -----------------------------------------------------
 import mani_skill
 print(f"   mani_skill {getattr(mani_skill, '__version__', '?')}")
-from mani_skill.agents.robots.so100 import SO100
-assert SO100.uid == "so100"
-print(f"   \033[32m✓\033[0m SO-100 agent available (uid={SO100.uid!r})")
+import callosum.robots.so101_parallel_gripper  # noqa: F401  (registers the so101_pg agent)
+from mani_skill.agents.registration import REGISTERED_AGENTS
+
+if "so101_pg" not in REGISTERED_AGENTS:
+    fail.append("so101_pg agent did not register")
+else:
+    print("   \033[32m✓\033[0m SO-ARM101 + parallel gripper agent registered (uid='so101_pg')")
 
 # --- our environments (need mani_skill, so untestable on macOS) --------------
 import callosum
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-import callosum.envs.two_so100_base  # noqa: F401  (registers TwoSO100-v0)
+import callosum.envs.two_so101_base  # noqa: F401  (registers TwoSO101-v0)
 from mani_skill.utils.registration import REGISTERED_ENVS
 
-for env_id in ("TwoSO100-v0", "FaceTurn-v0"):
+for env_id in ("TwoSO101-v0", "FaceTurn-v0"):
     if env_id not in REGISTERED_ENVS:
         fail.append(f"{env_id} did not register")
     else:
@@ -112,7 +116,7 @@ PY
 # ------------------------------------------------------------- 5. smoke tests
 if [ "$RUN_SMOKE" = "1" ]; then
   say "GPU smoke tests (the checks that could not run on macOS)"
-  echo "--- scripts/smoke_env.py: two SO-100 arms, per-agent obs/actions, arm reach ---"
+  echo "--- scripts/smoke_env.py: two SO-ARM101 arms, per-agent obs/actions, arm reach ---"
   uv run python scripts/smoke_env.py
   echo
   echo "--- scripts/smoke_face_turn.py: turntable articulation, success detection ---"

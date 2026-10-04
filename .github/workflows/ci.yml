@@ -34,7 +34,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Import smoke check
-        run: uv run python -c "import callosum, callosum.envs, callosum.agents, callosum.training, callosum.configs"
+        run: uv run python -c "import callosum, callosum.envs, callosum.robots, callosum.agents, callosum.training, callosum.configs"
 
       - name: Tests (pytest)
         run: uv run pytest -q

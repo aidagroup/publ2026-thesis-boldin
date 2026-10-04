@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "callosum"
 version = "0.1.0"
-description = "AIDA — two SO-100 arms cooperatively solve a Rubik's cube via decentralized Bi-JEPA (MARL)"
+description = "AIDA — two SO-ARM101 arms (Robonine parallel grippers) cooperatively solve a Rubik's cube via decentralized Bi-JEPA (MARL)"
 readme = "README.md"
 # SAPIEN (ManiSkill's engine) has no wheels for Python 3.13+, so cap at 3.12.
 requires-python = ">=3.11,<3.13"

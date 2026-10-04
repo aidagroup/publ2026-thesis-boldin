@@ -1,4 +1,4 @@
-"""Callosum — decentralized Bi-JEPA MARL for two SO-100 arms solving a Rubik's cube.
+"""Callosum — decentralized Bi-JEPA MARL for two SO-ARM101 arms solving a Rubik's cube.
 
 Named after the corpus callosum, the neural bridge that lets the brain's two
 hemispheres — each primarily driving one hand — coordinate. Here, two arm-agents

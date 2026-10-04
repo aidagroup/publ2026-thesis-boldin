@@ -1,7 +1,7 @@
 """Unit test for the partner_obs observation-visibility flag (step 1.4).
 
 Tests callosum.envs._partner_obs directly (pure Python, no mani_skill/torch
-dependency) rather than callosum.envs.two_so100_base itself: that module
+dependency) rather than callosum.envs.two_so101_base itself: that module
 imports mani_skill at module level, which is absent on macOS/CI (mani-skill
 is gated to sys_platform == 'linux' in pyproject.toml), so it cannot even be
 imported here -- see docs/implementation-plan.md section 0.

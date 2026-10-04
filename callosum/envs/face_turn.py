@@ -1,7 +1,7 @@
-"""FaceTurn-v0: a holder SO-100 arm and a rotator SO-100 arm turn a
+"""FaceTurn-v0: a holder SO-ARM101 arm and a rotator SO-ARM101 arm turn a
 turntable cube's face 90 degrees.
 
-Overrides TwoSO100Base's simple loose cube with the turntable-cube
+Overrides TwoSO101Base's simple loose cube with the turntable-cube
 articulation from `_turntable_cube.py`. Roles are fixed: agent_a is the
 "holder" (keeps the body in place), agent_b is the "rotator" (grasps and
 turns the face) -- see docs/thesis/04-experiment-design.md.
@@ -17,15 +17,15 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 
 from callosum.configs.face_turn import FaceTurnRewardConfig
 from callosum.envs._turntable_cube import build_turntable_cube
-from callosum.envs.two_so100_base import TwoSO100Base
+from callosum.envs.two_so101_base import TwoSO101Base
 
 TARGET_FACE_ANGLE = math.pi / 2  # a quarter turn
 _DEFAULT_REWARD_CONFIG = FaceTurnRewardConfig()
 
 
 @register_env("FaceTurn-v0", max_episode_steps=100)
-class FaceTurn(TwoSO100Base):
-    """Bimanual face-turn task on top of TwoSO100Base's two-arm plumbing.
+class FaceTurn(TwoSO101Base):
+    """Bimanual face-turn task on top of TwoSO101Base's two-arm plumbing.
 
     `agent_a` (holder) is rewarded for staying near the cube body; `agent_b`
     (rotator) is rewarded for reaching the face, grasping it, and turning it
@@ -33,7 +33,7 @@ class FaceTurn(TwoSO100Base):
     have stayed within its initial pose's position/rotation tolerance --
     turning the face by knocking the whole cube around does not count.
 
-    Inherits TwoSO100Base's `partner_obs` flag unchanged: `compute_dense_reward`
+    Inherits TwoSO101Base's `partner_obs` flag unchanged: `compute_dense_reward`
     and `evaluate` always read TCP poses straight off `self.agent_a`/`agent_b`
     (privileged, CTDE-style access, not the observation dict), so they are
     unaffected by it either way -- only the shared extra-obs dict changes.
@@ -49,7 +49,7 @@ class FaceTurn(TwoSO100Base):
         super().__init__(*args, **kwargs)
 
     def _load_scene(self, options: dict):
-        # Re-implements TwoSO100Base._load_scene's table setup instead of
+        # Re-implements TwoSO101Base._load_scene's table setup instead of
         # calling super() -- the parent also builds the plain loose cube,
         # which this task replaces with the turntable-cube articulation, so
         # there is nothing to reuse from the parent's cube-building line.
@@ -68,11 +68,13 @@ class FaceTurn(TwoSO100Base):
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         # Places both arms (rest keyframe + noise) and the cube body (jittered
-        # center position) -- see TwoSO100Base._initialize_episode.
+        # center position) -- see TwoSO101Base._initialize_episode.
         super()._initialize_episode(env_idx, options)
         with torch.device(self.device):
             b = len(env_idx)
-            self.face_link.joint.qpos = torch.zeros(b)
+            # Articulation.set_qpos (not `joint.qpos = ...`, whose setter only accepts a
+            # batch on the GPU backend) so this also works on the CPU backend.
+            self.cube.set_qpos(torch.zeros((b, 1)))
             self.body_init_pos[env_idx] = self.cube.pose.p[env_idx]
             self.body_init_q[env_idx] = self.cube.pose.q[env_idx]
 

@@ -1,7 +1,7 @@
-"""Two-arm SO-100 base environment: plumbing for observations/actions/reward.
+"""Two-arm SO-ARM101 base environment: plumbing for observations/actions/reward.
 
-Sets up a bimanual scene (two SO-100 arms + a loose cube) with per-agent
-observation fields and a reach-only dense reward, ahead of the articulated
+Sets up a bimanual scene (two SO-ARM101 arms with Robonine parallel grippers + a loose cube)
+with per-agent observation fields and a reach-only dense reward, ahead of the articulated
 face-turn task in step 1.3. There is no task/goal yet -- `evaluate()` is a
 stub that always reports failure.
 """
@@ -12,7 +12,6 @@ import numpy as np
 import sapien
 import torch
 from mani_skill.agents.multi_agent import MultiAgent
-from mani_skill.agents.robots.so100 import SO100
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.utils import common
 from mani_skill.utils.building import actors
@@ -22,14 +21,23 @@ from mani_skill.utils.structs.pose import Pose
 from transforms3d.euler import euler2quat
 
 from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner_obs
+from callosum.robots.so101_parallel_gripper import SO101ParallelGripper
 
 # ~5.7 cm real Rubik's cube edge length.
 CUBE_HALF_SIZE = 0.0285
 
+# Each arm's base sits this far from the table centre (the cube) along y, on opposite sides.
+ARM_BASE_OFFSET_Y = 0.25
+# Number of arm (non-gripper) joints; the gripper joints come after them in qpos.
+NUM_ARM_JOINTS = len(SO101ParallelGripper.arm_joint_names)
+# Max distance from the shoulder (joint 2) to the TCP over the joint limits: ~0.494 m (numpy FK
+# sampling + optimisation over the URDF), rounded up. Used only to normalise the reward.
+MAX_REACH_PER_ARM = 0.5
 
-@register_env("TwoSO100-v0", max_episode_steps=100)
-class TwoSO100Base(BaseEnv):
-    """Two SO-100 arms around a table with a single loose cube.
+
+@register_env("TwoSO101-v0", max_episode_steps=100)
+class TwoSO101Base(BaseEnv):
+    """Two SO-ARM101 arms (parallel grippers) around a table with a single loose cube.
 
     Both arms observe their own proprioception plus the cube pose (see
     `_get_obs_extra`); the dense reward simply pulls both TCPs toward the
@@ -45,13 +53,13 @@ class TwoSO100Base(BaseEnv):
     at this stage.
     """
 
-    SUPPORTED_ROBOTS: ClassVar[list[tuple[str, str]]] = [("so100", "so100")]
-    agent: MultiAgent[tuple[SO100, SO100]]
+    SUPPORTED_ROBOTS: ClassVar[list[tuple[str, str]]] = [("so101_pg", "so101_pg")]
+    agent: MultiAgent[tuple[SO101ParallelGripper, SO101ParallelGripper]]
 
     def __init__(
         self,
         *args,
-        robot_uids=("so100", "so100"),
+        robot_uids=("so101_pg", "so101_pg"),
         robot_init_qpos_noise=0.02,
         partner_obs="full",
         **kwargs,
@@ -59,36 +67,31 @@ class TwoSO100Base(BaseEnv):
         validate_partner_obs(partner_obs)
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.partner_obs = partner_obs
-        # No explicit control_mode: SO100's first configured controller is
-        # already "pd_joint_delta_pos" (SO100._controller_configs), which
-        # BaseAgent picks by default whenever control_mode is None.
+        # No explicit control_mode: SO101ParallelGripper's first configured controller is
+        # already "pd_joint_delta_pos" (5 arm deltas + 1 gripper target), which BaseAgent
+        # picks by default whenever control_mode is None.
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
-    def agent_a(self) -> SO100:
-        """The first arm (uid `so100-0`)."""
+    def agent_a(self) -> SO101ParallelGripper:
+        """The first arm (uid `so101_pg-0`)."""
         return self.agent.agents[0]
 
     @property
-    def agent_b(self) -> SO100:
-        """The second arm (uid `so100-1`)."""
+    def agent_b(self) -> SO101ParallelGripper:
+        """The second arm (uid `so101_pg-1`)."""
         return self.agent.agents[1]
 
     def _load_agent(self, options: dict):
-        # Mirrored yaws so both arms face the cube at the table center,
-        # matching TableSceneBuilder's panda-pair reference (agents[0] gets
-        # +pi/2, agents[1] gets -pi/2). Identity rotation (as originally
-        # copied from the plan) would have both arms facing the same
-        # direction, so at most one of them could reach the cube.
-        # TODO(review): y=-0.3/y=+0.3 spacing (~60% of SO-100's ~0.5 m max
-        # reach, vs. ~88% for the panda-pair reference) is still unverified
-        # on real GPU sim -- confirm via scripts/smoke_env.py on the server
-        # that both arms actually close on the cube.
+        # Arms face each other across the cube at the table centre. The SO-ARM101's "forward"
+        # (folded-arm reach direction at qpos=0) is -y in its own base frame, so the arm at
+        # y=-ARM_BASE_OFFSET_Y needs yaw pi to reach towards +y, and the arm at
+        # y=+ARM_BASE_OFFSET_Y keeps identity yaw to reach towards -y.
         super()._load_agent(
             options,
             [
-                sapien.Pose(p=[0, -0.3, 0], q=euler2quat(0, 0, np.pi / 2)),
-                sapien.Pose(p=[0, 0.3, 0], q=euler2quat(0, 0, -np.pi / 2)),
+                sapien.Pose(p=[0, -ARM_BASE_OFFSET_Y, 0], q=euler2quat(0, 0, np.pi)),
+                sapien.Pose(p=[0, ARM_BASE_OFFSET_Y, 0]),
             ],
         )
 
@@ -110,16 +113,21 @@ class TwoSO100Base(BaseEnv):
         with torch.device(self.device):
             b = len(env_idx)
             # Resets the table/ground pose. TableSceneBuilder.initialize() has
-            # no branch for robot_uids == ("so100", "so100") as of mani-skill
-            # 3.0.1 (only single-so100 and panda-pair combinations are known
-            # to it), so it silently skips robot placement -- both arms' qpos
-            # are reset explicitly below instead. Base poses are fixed (set
-            # once in _load_agent) and do not need resetting per episode.
+            # no branch for robot_uids == ("so101_pg", "so101_pg") as of
+            # mani-skill 3.0.1, so it silently skips robot placement -- both
+            # arms' qpos are reset explicitly below instead. Base poses are
+            # fixed (set once in _load_agent) and do not need resetting per
+            # episode.
             self.table_scene.initialize(env_idx)
 
             rest_qpos = common.to_tensor(self.agent_a.keyframes["rest"].qpos, device=self.device)
             for agent in (self.agent_a, self.agent_b):
-                noise = torch.randn((b, rest_qpos.shape[-1])) * self.robot_init_qpos_noise
+                # Noise on the arm joints only: the two gripper joints are prismatic (metres),
+                # and the mimic joint must stay exactly -right_clamp.
+                noise = torch.zeros((b, rest_qpos.shape[-1]))
+                noise[:, :NUM_ARM_JOINTS] = (
+                    torch.randn((b, NUM_ARM_JOINTS)) * self.robot_init_qpos_noise
+                )
                 agent.reset(rest_qpos + noise)
 
             # Cube: fixed at the table center with a small xy jitter.
@@ -161,8 +169,8 @@ class TwoSO100Base(BaseEnv):
         return -(dist_a + dist_b)
 
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        # 0.5 m/arm: SO-100's own max kinematic reach, from summing the URDF
-        # joint-origin offsets from base to jaw tip (~0.498 m); used here only
+        # MAX_REACH_PER_ARM: the arm's max kinematic reach (shoulder to TCP); used here only
         # to keep the normalized reward roughly within [-1, 0].
-        max_dist_per_arm = 0.5
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / (2 * max_dist_per_arm)
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / (
+            2 * MAX_REACH_PER_ARM
+        )

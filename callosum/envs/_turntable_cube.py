@@ -11,7 +11,7 @@ import sapien.render
 from mani_skill.envs.scene import ManiSkillScene
 from mani_skill.utils.structs.articulation import Articulation
 
-# ~5.7 cm real Rubik's cube edge length (matches callosum.envs.two_so100_base).
+# ~5.7 cm real Rubik's cube edge length (matches callosum.envs.two_so101_base).
 CUBE_HALF_SIZE = 0.0285
 # A real 3x3 layer (one third of the cube), not an arbitrary thin plate --
 # also what makes the face actually graspable: a 1.9 cm layer can be pinched
@@ -103,12 +103,13 @@ def build_turntable_cube(
             [0, 0, cube_half_size - face_thickness / 2], q=_VERTICAL_AXIS_QUAT
         ),
         pose_in_child=sapien.Pose(q=_VERTICAL_AXIS_QUAT),
-        # TODO(review): friction/damping copied from build_robel_valve (a
-        # similarly hand-sized rotary mechanism) as a reasonable starting
-        # point -- unverified for our smaller/lighter face; may need
-        # retuning once actually simulated on the server.
+        # Friction as in build_robel_valve. Damping is far lower than the valve's 2.0: with
+        # 2.0 the SO-ARM101 parallel gripper cannot turn the face (jaws slip, face_angle stalls
+        # at ~0.3 rad), with 0.1-0.2 a 90 degree wrist roll turns it fully (CPU sim, body held
+        # still); 0.5 already lags, 1.0 slips.
+        # TODO(review): re-check on the GPU backend and with a real holder arm.
         friction=0.02,
-        damping=2.0,
+        damping=0.1,
     )
 
     return builder.build(name=name, fix_root_link=False)

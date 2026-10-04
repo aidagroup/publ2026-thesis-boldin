@@ -1,0 +1,304 @@
+<?xml version="1.0" ?>
+<!--
+  SO-ARM101 arm + Robonine parallel gripper, flattened for ManiSkill/SAPIEN.
+
+  Source: roboninecom/SO-ARM100-101-Parallel-Gripper @ 305ad0f6e8f19e4e739616160cbdc7cae1ab153f,
+  simulation/so_arm_101_description/urdf/so_101.urdf.xacro. See README.md next to this
+  file for licences and the full list of modifications. In short:
+    - ROS-only parts removed (xacro args/includes, mujoco tag, world link, safety_controller);
+      base_link is the root.
+    - Mesh paths made relative; visual meshes decimated ~10x.
+    - clamp_1/clamp_2 collision: the upstream convex hulls fill the gap between the jaws,
+      so each clamp uses two boxes (fingertip pad + finger body) instead. The gear rack
+      (inside the gripper housing) has no collision.
+    - Added fixed clamp_1_pad / clamp_2_pad frames at the centre of each jaw's inner face
+      (used for the TCP and grasp checks).
+
+  All upstream link frames are pure translations of the CAD frame, so at qpos=0 every
+  mesh sits at its raw CAD coordinates; the box/pad coordinates below are those CAD
+  (world-at-q=0) coordinates minus the clamp frame's world origin.
+-->
+<robot name="so101_parallel_gripper">
+
+  <!-- Arguments -->
+
+  <!-- Includes -->
+
+  <!-- ============================================================ -->
+  <!-- Links                                                         -->
+  <!-- ============================================================ -->
+
+  <link name="base_link">
+    <inertial>
+      <origin xyz="-7.395983749131527e-05 0.018688778123587116 0.031975817456183726" rpy="0 0 0"/>
+      <mass value="0.2092095548721987"/>
+      <inertia ixx="0.000199" iyy="0.000196" izz="0.000203" ixy="1e-06" iyz="-1e-05" ixz="0.0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/base_link.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="silver"><color rgba="0.8 0.8 0.8 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/base_link.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="link1_1">
+    <inertial>
+      <origin xyz="-6.74951590711253e-05 -0.030490405697529033 0.053766555610065915" rpy="0 0 0"/>
+      <mass value="0.24184654503223657"/>
+      <inertia ixx="0.000195" iyy="0.000199" izz="9.5e-05" ixy="1e-06" iyz="1.6e-05" ixz="-2e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="9.9e-05 0.007243 -0.027983" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link1_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="silver"><color rgba="0.8 0.8 0.8 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="9.9e-05 0.007243 -0.027983" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link1_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="link2_1">
+    <inertial>
+      <origin xyz="-0.018388577871412994 0.06261038358877268 0.0010120440807449838" rpy="0 0 0"/>
+      <mass value="0.98611438366224"/>
+      <inertia ixx="0.001336" iyy="0.000432" izz="0.001637" ixy="1.3e-05" iyz="-3.7e-05" ixz="-1e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.020792 0.038556 -0.11936" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link2_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="silver"><color rgba="0.8 0.8 0.8 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="-0.020792 0.038556 -0.11936" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link2_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="link3_1">
+    <inertial>
+      <origin xyz="-0.017751520535904237 -0.06544031690248904 -0.0001729613192295032" rpy="0 0 0"/>
+      <mass value="0.9031154796125306"/>
+      <inertia ixx="0.001194" iyy="0.000364" izz="0.00144" ixy="1.5e-05" iyz="1.4e-05" ixz="-2e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.022302 -0.073879 -0.148777" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link3_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="silver"><color rgba="0.8 0.8 0.8 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="-0.022302 -0.073879 -0.148777" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link3_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="link4_1">
+    <inertial>
+      <origin xyz="-0.014388616159181473 -0.028802697165152366 -0.00020561897946119734" rpy="0 0 0"/>
+      <mass value="0.31773533805976817"/>
+      <inertia ixx="0.000138" iyy="0.000153" izz="0.000239" ixy="2.5e-05" iyz="0.0" ixz="-1e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.024382 0.060582 -0.152897" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link4_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="silver"><color rgba="0.8 0.8 0.8 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="-0.024382 0.060582 -0.152897" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link4_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="link5_1">
+    <inertial>
+      <origin xyz="-0.0005839285183169068 -0.04153912948671028 0.01505583353882603" rpy="0 0 0"/>
+      <mass value="0.5561721109318601"/>
+      <inertia ixx="0.000579" iyy="0.000983" izz="0.000737" ixy="1e-06" iyz="-8.4e-05" ixz="-5e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.007062 0.120627 -0.152066" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/link5_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="silver"><color rgba="0.8 0.8 0.8 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="-0.007062 0.120627 -0.152066" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/collision/link5_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="clamp_1">
+    <inertial>
+      <origin xyz="0.0601695113719365 0.14480677890200364 0.1844826866723634" rpy="0 0 0"/>
+      <mass value="0.15381179772652928"/>
+      <inertia ixx="8.6e-05" iyy="4.1e-05" izz="7.3e-05" ixy="-1e-06" iyz="4e-06" ixz="-2e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.045072 0.340704 0.033971" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/clamp_1.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="silver"><color rgba="0.8 0.8 0.8 1"/></material>
+    </visual>
+    <!-- pad: world AABB x[0.0075, 0.0135] y[-0.2524, -0.2275] z[0.1425, 0.1615] at q=0 -->
+    <collision name="clamp_1_pad">
+      <origin xyz="0.055572 0.100754 0.185971" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006 0.0249 0.019"/>
+      </geometry>
+    </collision>
+    <!-- finger: world AABB x[0.0092, 0.023] y[-0.2275, -0.178] z[0.13, 0.1745] at q=0 -->
+    <collision name="clamp_1_finger">
+      <origin xyz="0.061172 0.137954 0.186221" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0138 0.0495 0.0445"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="clamp_2">
+    <inertial>
+      <origin xyz="-0.0800042161303889 0.1470101120878245 0.18506826370370444" rpy="0 0 0"/>
+      <mass value="0.15381179772652928"/>
+      <inertia ixx="8.6e-05" iyy="4.1e-05" izz="7.3e-05" ixy="1e-06" iyz="-4e-06" ixz="-2e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.07989 0.342905 0.031809" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/visual/clamp_2.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="silver"><color rgba="0.8 0.8 0.8 1"/></material>
+    </visual>
+    <!-- pad: world AABB x[0.0015, 0.0075] y[-0.2524, -0.2275] z[0.1425, 0.1615] at q=0 -->
+    <collision name="clamp_2_pad">
+      <origin xyz="-0.07539 0.102955 0.183809" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006 0.0249 0.019"/>
+      </geometry>
+    </collision>
+    <!-- finger: world AABB x[-0.0085, 0.0055] y[-0.2275, -0.178] z[0.129, 0.1745] at q=0 -->
+    <collision name="clamp_2_finger">
+      <origin xyz="-0.08139 0.140155 0.183559" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.014 0.0495 0.0455"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ============================================================ -->
+  <!-- Joints                                                        -->
+  <!-- ============================================================ -->
+
+  <!-- Joint 1: Base rotation (Yaw) -->
+  <joint name="base_link_to_link1" type="revolute">
+    <origin xyz="-9.9e-05 -0.007243 0.027983" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="link1_1"/>
+    <axis xyz="-0.0 -0.008727 0.999962"/>
+    <limit lower="-2.094395" upper="2.094395" effort="1.5" velocity="5.236"/>
+    <dynamics damping="0.1" friction="0.05"/>
+  </joint>
+
+  <!-- Joint 2: Shoulder pitch — STS3215 servo -->
+  <joint name="link1_to_link2" type="revolute">
+    <origin xyz="0.020891 -0.031313 0.091377" rpy="0 0 0"/>
+    <parent link="link1_1"/>
+    <child link="link2_1"/>
+    <axis xyz="-0.999962 -0.008726 -7.6e-05"/>
+    <limit lower="-3.228859" upper="0.174533" effort="1.5" velocity="5.236"/>
+    <dynamics damping="0.1" friction="0.05"/>
+  </joint>
+
+  <!-- Joint 3: Elbow — STS3215 servo -->
+  <joint name="link2_to_link3" type="revolute">
+    <origin xyz="0.00151 0.112435 0.029417" rpy="0 0 0"/>
+    <parent link="link2_1"/>
+    <child link="link3_1"/>
+    <axis xyz="-0.999924 -0.00865 -0.008802"/>
+    <limit lower="0.0" upper="3.316126" effort="1.5" velocity="5.236"/>
+    <dynamics damping="0.1" friction="0.05"/>
+  </joint>
+
+  <!-- Joint 4: Wrist pitch — STS3215 servo -->
+  <joint name="link3_to_link4" type="revolute">
+    <origin xyz="0.00208 -0.134461 0.00412" rpy="0 0 0"/>
+    <parent link="link3_1"/>
+    <child link="link4_1"/>
+    <axis xyz="-0.999848 0.000153 -0.017451"/>
+    <limit lower="-1.658063" upper="1.658063" effort="1.5" velocity="5.236"/>
+    <dynamics damping="0.1" friction="0.05"/>
+  </joint>
+
+  <!-- Joint 5: Wrist roll — STS3215 servo -->
+  <joint name="link4_to_link5" type="revolute">
+    <origin xyz="-0.01732 -0.060045 -0.000831" rpy="0 0 0"/>
+    <parent link="link4_1"/>
+    <child link="link5_1"/>
+    <axis xyz="-1e-06 0.999961 0.008803"/>
+    <limit lower="-4.276057" upper="1.570796" effort="1.5" velocity="5.236"/>
+    <dynamics damping="0.1" friction="0.05"/>
+  </joint>
+
+  <!-- Gripper: right clamp (primary) — STS3215 servo -->
+  <joint name="right_clamp" type="prismatic">
+    <origin xyz="-0.052134 -0.220077 -0.186037" rpy="0 0 0"/>
+    <parent link="link5_1"/>
+    <child link="clamp_1"/>
+    <axis xyz="0.999848 -0.000154 0.017451"/>
+    <limit lower="0.0" upper="0.037" effort="1.5" velocity="0.05"/>
+    <dynamics damping="0.5" friction="0.1"/>
+  </joint>
+
+  <!-- Gripper: left clamp (mimic of right_clamp, inverted) -->
+  <joint name="left_clamp" type="prismatic">
+    <origin xyz="0.072828 -0.222278 -0.183875" rpy="0 0 0"/>
+    <parent link="link5_1"/>
+    <child link="clamp_2"/>
+    <axis xyz="0.999848 -0.000154 0.017451"/>
+    <limit lower="-0.038" upper="0.0" effort="1.5" velocity="0.05"/>
+    <dynamics damping="0.5" friction="0.1"/>
+    <mimic joint="right_clamp" multiplier="-1" offset="0"/>
+  </joint>
+
+  <link name="clamp_1_pad"/>
+  <joint name="clamp_1_to_pad" type="fixed">
+    <origin xyz="0.052572 0.100704 0.185971" rpy="0 0 0"/>
+    <parent link="clamp_1"/>
+    <child link="clamp_1_pad"/>
+  </joint>
+
+  <link name="clamp_2_pad"/>
+  <joint name="clamp_2_to_pad" type="fixed">
+    <origin xyz="-0.07239 0.102905 0.183809" rpy="0 0 0"/>
+    <parent link="clamp_2"/>
+    <child link="clamp_2_pad"/>
+  </joint>
+
+</robot>

@@ -5,12 +5,12 @@ step 1.3's readiness criterion calls out explicitly:
   2. displacing the body afterward should flip it back to False -- i.e. the
      body-drift penalty/instability check actually fires.
 
-Server-only (GPU sim) -- cannot run on macOS. See docs/implementation-plan.md,
-step 1.3, "Критерий готовности (СЕРВЕР)".
+Meant for the GPU server; `--sim-backend cpu` runs a single env locally (also on macOS).
+See docs/implementation-plan.md, step 1.3, "Критерий готовности (СЕРВЕР)".
 """
 
-import gymnasium as gym
 import torch
+from _sim_utils import make_env, parse_args
 from mani_skill.utils.structs.pose import Pose
 
 # Importing the module (not just the callosum.envs package) runs its
@@ -22,7 +22,8 @@ from callosum.envs.face_turn import TARGET_FACE_ANGLE
 
 
 def main() -> None:
-    env = gym.make("FaceTurn-v0", num_envs=16, obs_mode="state", sim_backend="gpu")
+    args = parse_args(__doc__)
+    env = make_env("FaceTurn-v0", args)
     base_env = env.unwrapped
 
     obs, _ = env.reset(seed=0)
@@ -44,7 +45,7 @@ def main() -> None:
     # achieve the turn.
     env.reset(seed=0)
     n = base_env.num_envs
-    base_env.face_link.joint.qpos = torch.full((n,), TARGET_FACE_ANGLE, device=base_env.device)
+    base_env.cube.set_qpos(torch.full((n, 1), TARGET_FACE_ANGLE, device=base_env.device))
     info = base_env.evaluate()
     reward = base_env.compute_dense_reward(obs=None, action=None, info=info)
     print("scripted check 1 (face at target angle, body untouched):")
