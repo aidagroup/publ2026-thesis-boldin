@@ -172,10 +172,16 @@ Success criterion (from `docs/implementation-plan.md`, step 2.1 / the
 experiment design): reward curve rises and success-rate becomes non-trivial.
 This is the gate that decides whether the whole approach is viable.
 
-For state-based training, build the env with `render_backend="none"` (no
-camera renderer in the scene; ManiSkill v3.0.1 default is `"gpu"`). A Vulkan
-device is still required, see [Server quirks](#server-quirks-sapien-physx-vulkan).
-The smoke scripts on this branch use the default backend.
+**Rule: every state-based env must be created with `render_backend="none"`**
+(`gym.make(..., obs_mode="state", render_backend="none")`); a future trainer must
+pass it too. ManiSkill v3.0.1 defaults to `"gpu"`, which makes `BaseEnv._setup_scene`
+build `sapien.render.RenderSystem(<cuda device>)`; with `"none"` the render device is
+`None`, so no `RenderSystem`, lighting or sensors are created. Without it, `gym.make`
+fails with `RuntimeError: Failed to find a supported physical device "cuda:0"` on a
+machine that only has the lavapipe software ICD (as the lab A100 does, see
+[Server quirks](#server-quirks-sapien-physx-vulkan)). The smoke/probe scripts pass it
+via `--render-backend` (default `none`); use `--render-backend gpu` only for
+rendering/vision, which needs a working hardware Vulkan device.
 
 #### Long runs (detached)
 
@@ -264,7 +270,7 @@ environment** — treat the first setup run as the verification.
 | Symptom | Cause | What setup does |
 |---|---|---|
 | `OSError: libcuda.so: cannot open shared object file` from `sapien/physx/__init__.py` (`enable_gpu`), while torch sees the GPU | SAPIEN loads the *unversioned* `libcuda.so`; the container runtime only injects `libcuda.so.1` | symlinks `libcuda.so.1` into `<scratch>/lib/libcuda.so`, prepends it to `LD_LIBRARY_PATH` |
-| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"` | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) was too old for the 570.x NVIDIA ICD | tries the stock setup, then each ICD manifest with the system loader, then installs a current loader with `conda create -p <scratch>/mesa -c conda-forge mesalib vulkan-tools` (conda package cache moved off `$HOME`), symlinks **only** `libvulkan.so.1` into `<scratch>/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch), and picks the first working manifest by actually constructing a `RenderMaterial`; lavapipe (software) is the last resort — fine for state training, not for vision |
+| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"` | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) was too old for the 570.x NVIDIA ICD | tries the stock setup, then each ICD manifest with the system loader, then installs a current loader with `conda create -p <scratch>/mesa -c conda-forge mesalib vulkan-tools` (conda package cache moved off `$HOME`), symlinks **only** `libvulkan.so.1` into `<scratch>/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch), and picks the first working manifest by actually constructing a `RenderMaterial`; lavapipe (software) is the last resort — fine for state training with `render_backend="none"`, not for vision. **Observed 2026-10-04 on the lab A100: hardware Vulkan did not work, setup fell back to lavapipe (`VK_ICD_FILENAMES=lvp_icd...`)**; `RenderMaterial()` works with it, but `gym.make(..., sim_backend="gpu")` with the default `render_backend` fails in `_setup_scene` (`Failed to find a supported physical device "cuda:0"`), hence the `render_backend="none"` rule above |
 | First `gym.make(..., sim_backend="gpu")` hangs/fails while downloading | SAPIEN fetches `libPhysXGpu_64.so` (~240 MB unpacked) from a `github.com` release into `~/.sapien/physx/<version>/` | `~/.sapien` is a symlink into scratch; setup pre-fetches via `physx.enable_gpu()`. Manual fallback: download the `linux-so.zip` named in SAPIEN's message elsewhere, upload, unzip into that directory |
 
 Notes:

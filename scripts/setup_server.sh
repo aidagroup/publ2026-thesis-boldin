@@ -49,6 +49,9 @@ NEED_GB=30   # venv with torch + CUDA libs (~8 GB), uv cache, HF cache, assets: 
 # Free space in whole GB on the filesystem holding $1 (empty if unknown).
 free_gb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1048576}' || true; }
 
+# Free space in whole MB on the filesystem holding $1 (empty if unknown).
+free_mb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024}' || true; }
+
 # Join non-empty arguments with ':' (an empty LD_LIBRARY_PATH entry means "cwd").
 join_path() {
   local out="" p
@@ -230,7 +233,7 @@ fi
 # and not three frames inside the first gym.make(). Best effort: not fatal.
 say "PhysX GPU library"
 if with_timeout 600 "$VENV_PY" -c 'import sapien; sapien.physx.enable_gpu()' 2>"$WORK/physx.log"; then
-  ok "physx.enable_gpu() works ($(du -sh "$HOME/.sapien" 2>/dev/null | cut -f1) in ~/.sapien)"
+  ok "physx.enable_gpu() works ($(du -sh "$HOME/.sapien/" 2>/dev/null | cut -f1) in ~/.sapien)"
 else
   warn "physx.enable_gpu() failed (last lines of $WORK/physx.log):"
   tail -n 5 "$WORK/physx.log" | sed 's/^/     /'
@@ -301,6 +304,13 @@ else
   export VK_ICD_FILENAMES="$ICD"
   export LD_LIBRARY_PATH
   LD_LIBRARY_PATH="$(join_path "$VKLIB" "${LD_LIBRARY_PATH:-}")"
+  case "$ICD" in
+    *lvp*|*lavapipe*)
+      warn "lavapipe is a CPU rasteriser, not a GPU render device: state-based training must pass"
+      warn "render_backend=\"none\" to gym.make (the smoke scripts do); camera rendering (vision phase)"
+      warn "needs a working hardware Vulkan device. See docs/server-runbook.md (Vulkan)"
+      ;;
+  esac
 fi
 
 # ------------------------------------------------------------ 5. env file, runs/
@@ -371,7 +381,7 @@ if [ "$SCRATCH_MODE" = "1" ]; then
         fi
         ln -s "$RUNS_STORE" "$REPO_ROOT/runs"
       fi
-      ok "runs -> $RUNS_STORE ($(du -sh "$RUNS_STORE" 2>/dev/null | cut -f1) used, $(free_gb "$RUNS_STORE") GB free)"
+      ok "runs -> $RUNS_STORE ($(du -sh "$RUNS_STORE" 2>/dev/null | cut -f1) used, $(free_mb "$RUNS_STORE") MB free)"
       warn "\$HOME is small: prune checkpoints you do not need and download results (JupyterHub file browser)"
       ;;
   esac
