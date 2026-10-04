@@ -3,7 +3,11 @@ step 1.3's readiness criterion calls out explicitly:
   1. scripting the face joint straight to the target angle should flip
      evaluate()["success"] to True;
   2. displacing the body afterward should flip it back to False -- i.e. the
-     body-drift penalty/instability check actually fires.
+     body-drift penalty/instability check actually fires;
+  3. the face lock (the face cannot turn unless the holder grasps the body): the face forced to
+     the target angle snaps back to the locked angle on the next env step, since the holder is
+     at rest. Checks 1 and 2 call `evaluate()` without stepping the env, so the lock does not
+     touch them (it acts in `_before_control_step` / `_after_simulation_step`, i.e. in `step`).
 
 Meant for the GPU server; `--sim-backend cpu` runs a single env locally (also on macOS).
 See docs/implementation-plan.md, step 1.3, "Критерий готовности (СЕРВЕР)".
@@ -68,6 +72,30 @@ def main() -> None:
     print(f"  is_body_stable: {info['is_body_stable'].all().item()} (expected False)")
     print(f"  success: {info['success'].any().item()} (expected False)")
     print(f"  dense_reward[0]: {reward[0].item():.3f} (expected lower than check 1)")
+
+    # Scripted check 3: the face lock. Force the face to the target angle, then take one step with
+    # zero actions: the holder is not grasping, so the face is clamped back to the angle latched
+    # at the start of the step (0, the reset angle).
+    # TODO(review): GPU path of the lock (batched fetch/clamp/apply) unverified until the server.
+    env.reset(seed=0)
+    base_env.cube.set_qpos(torch.full((n, 1), TARGET_FACE_ANGLE, device=base_env.device))
+    if base_env.gpu_sim_enabled:
+        base_env.scene._gpu_apply_all()
+        base_env.scene._gpu_fetch_all()
+    zero_action = {
+        uid: torch.zeros(space.shape, device=base_env.device)
+        for uid, space in env.action_space.spaces.items()
+    }
+    env.step(zero_action)
+    angle = base_env.evaluate()["face_angle"]
+    print("scripted check 3 (face forced to the target, holder idle, one env step):")
+    print(f"  face_angle[0]: {angle[0].item():.4f} (expected ~0: locked)")
+    print(f"  all envs locked: {(angle.abs() < 0.05).all().item()} (expected True)")
+    print(
+        f"  lock engaged control steps [min/max]: "
+        f"{base_env.face_lock_engaged_steps.min().item()} / "
+        f"{base_env.face_lock_engaged_steps.max().item()}"
+    )
 
     env.close()
 

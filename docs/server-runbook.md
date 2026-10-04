@@ -139,6 +139,18 @@ grasp flags, face angle, body drift and `success`, and exits non-zero unless
 every env ends with `success=True`. On the Mac CPU sim it succeeds (20/20 reset
 seeds); on the GPU backend it is still unverified.
 
+The face-lock rule (the face can only be turned while the holder grasps the body;
+`FaceTurnPhysicsConfig.lock_face_unless_held`) has a batched GPU path that is
+unverified. Check it on the server with `probe_face_turn.py --no-holder` (rotator
+alone: face angle stays ~0, `success` False in every env, exit 0),
+`--release-holder` (face stops at ~45 degrees once the holder lets go), and the
+normal run (success in every env); every status line prints `face_lock_steps`
+(min / mean / max control steps spent locked per env; in the normal run it is
+equal across envs up to the holder-grasp step, and in `--no-lock` runs it is 0).
+`smoke_face_turn.py` check 3 forces the face to 90 degrees and expects it to snap
+back after one step. `--no-lock` shows what the rotator alone achieves without the
+rule, `--face-friction` / `--face-damping` override the face joint.
+
 **Known open questions these answer** (all flagged in code as `TODO(review)`):
 
 | Question | Where | If it fails |
@@ -146,7 +158,7 @@ seeds); on the GPU backend it is still unverified.
 | Do both arms reach the cube in the 90-degree layout (holder 0.32 m on -y, rotator 0.24 m on +x, `ArmLayout` in `callosum/configs/layout.py`)? Can check on the Mac CPU sim. | `smoke_env.py`, `probe_face_turn.py` | adjust the radii/azimuths in `ArmLayout`; SO-101 top-down reach at cube height is ~0.27 m |
 | Can a holder and a rotator arm do the face turn together without colliding (holder clamps the body, rotator clamps the face and rolls 90 degrees, body stays put)? Can check on the Mac CPU sim. | `probe_face_turn.py` | check which arm links collide (the wrist housings are 12.8 cm wide); adjust the layout or the probe's grasp parameters |
 | Does the face articulation look/behave right (no jitter, face sits on the body)? | `smoke_face_turn.py` | check `disable_self_collisions`; review the joint pose |
-| Are the joint friction/damping sane at cube scale? | `smoke_face_turn.py` | tune `friction`/`damping` in `_turntable_cube.py` |
+| Are the joint friction/damping sane at cube scale? | `smoke_face_turn.py` | tune `face_friction`/`face_damping` in `FaceTurnPhysicsConfig` |
 | Does the parallel gripper actually close on the layer's side faces (`is_grasping`)? Can check on the Mac CPU sim. | `smoke_face_turn.py` | revisit the grasp target in `face_turn.compute_dense_reward` |
 | Does the scripted turn flip `success` on, and body displacement flip it off? | `smoke_face_turn.py` | success logic bug — fix before any training |
 

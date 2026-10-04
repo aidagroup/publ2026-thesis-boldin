@@ -25,8 +25,19 @@ holder grasps the body, whether the rotator grasps the face, the face angle, the
 (position, rotation) and the env's success flag. With several envs (GPU) floats are shown as min/mean/max and flags as
 `count/num_envs`.
 
-Run it on either backend (`--sim-backend cpu` is one env, also on macOS). Exit status 1 if
-success is not reached in every env after the release.
+Face-lock checks (the rule "the face can only be turned while the holder grasps the body",
+`FaceTurnPhysicsConfig.lock_face_unless_held`): `--no-holder` skips the holder phases (rotator
+alone), `--release-holder` makes the holder let go half way through the turn, `--no-lock`
+disables the rule (for the record: what the rotator alone can do without it), and
+`--face-friction` / `--face-damping` override the face joint's resistance. Every report line also
+prints `face_lock_steps`, the control steps each env spent locked, which on the GPU shows that the
+lock acts per env.
+
+Run it on either backend (`--sim-backend cpu` is one env, also on macOS). Exit status: in the
+default mode 1 if success is not reached in every env after the release; with `--no-holder` or
+`--release-holder` and the lock on, 1 if any env reaches success or its face turns past 5 degrees
+(`--release-holder` allows the half turn done before the release, 45 degrees plus 5); with
+`--no-lock` it is always 0.
 """
 
 import math
@@ -42,6 +53,7 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
+from callosum.configs.face_turn import FaceTurnPhysicsConfig
 from callosum.envs.face_turn import TARGET_FACE_ANGLE
 from callosum.envs.two_so101_base import NUM_ARM_JOINTS
 from callosum.robots.so101_parallel_gripper import SO101ParallelGripper
@@ -299,11 +311,18 @@ class Rig:
             "body_drift_cm": pos_drift.cpu().numpy() * 100,
             "body_rot_deg": np.rad2deg(rot_drift.cpu().numpy()),
             "success": info["success"].cpu().numpy(),
+            "face_lock_steps": b.face_lock_engaged_steps.cpu().numpy(),
         }
         print(f"[{phase}]")
         for key, val in row.items():
             if key == "env_steps":
                 shown = str(int(val[0]))
+            elif key == "face_lock_steps":
+                shown = (
+                    str(int(val[0]))
+                    if len(val) == 1
+                    else f"{val.min()} / {val.mean():.1f} / {val.max()}"
+                )
             elif val.dtype.kind == "b":
                 shown = str(bool(val[0])) if len(val) == 1 else f"{int(val.sum())}/{len(val)}"
             elif len(val) == 1:
@@ -323,13 +342,35 @@ def _horizontal_unit(rig: Rig, arm: int) -> np.ndarray:
     return np.concatenate([direction, np.zeros((rig.n, 1))], axis=1)
 
 
+def _add_args(parser) -> None:
+    parser.add_argument("--seed", type=int, default=0, help="Reset seed.")
+    parser.add_argument(
+        "--no-holder", action="store_true", help="Skip the holder phases: the rotator turns alone."
+    )
+    parser.add_argument(
+        "--release-holder",
+        action="store_true",
+        help="The holder opens its jaws half way through the turn.",
+    )
+    parser.add_argument(
+        "--no-lock", action="store_true", help="Disable the face lock (lock_face_unless_held)."
+    )
+    defaults = FaceTurnPhysicsConfig()
+    parser.add_argument("--face-friction", type=float, default=defaults.face_friction)
+    parser.add_argument("--face-damping", type=float, default=defaults.face_damping)
+
+
 def main() -> None:
     # TODO(review): only verified on the CPU backend (one env). On the GPU backend the per-env
-    # IK below loops in Python (slow-ish for many envs) and contact behaviour may differ.
-    args = parse_args(
-        __doc__, lambda p: p.add_argument("--seed", type=int, default=0, help="Reset seed.")
+    # IK below loops in Python (slow-ish for many envs) and contact behaviour may differ; the
+    # face lock's GPU path (batched fetch/clamp/apply) is unverified: check `face_lock_steps`.
+    args = parse_args(__doc__, _add_args)
+    physics = FaceTurnPhysicsConfig(
+        lock_face_unless_held=not args.no_lock,
+        face_friction=args.face_friction,
+        face_damping=args.face_damping,
     )
-    env = make_env("FaceTurn-v0", args, control_mode="pd_joint_pos")
+    env = make_env("FaceTurn-v0", args, control_mode="pd_joint_pos", physics_config=physics)
     env.reset(seed=args.seed)
     rig = Rig(env, ArmModel())
     cube_xy = env.unwrapped.cube.pose.p.cpu().numpy().copy()
@@ -352,12 +393,13 @@ def main() -> None:
 
     # The holder goes first: while its jaws are open next to the cube they would hit the
     # rotator's open jaws, so the rotator only comes in once the holder has clamped the body.
-    rig.follow(0, rig.path(0, pregrasp_a, dir_a, open_a), settle=SETTLE_STEPS)
-    rig.report("holder pregrasp")
+    if not args.no_holder:
+        rig.follow(0, rig.path(0, pregrasp_a, dir_a, open_a), settle=SETTLE_STEPS)
+        rig.report("holder pregrasp")
 
-    rig.follow(0, rig.path(0, grasp_a, dir_a, open_a), settle=SETTLE_STEPS)
-    rig.move(grip_a=GRIPPER_CLOSED, settle=20)
-    rig.report("holder grasp")
+        rig.follow(0, rig.path(0, grasp_a, dir_a, open_a), settle=SETTLE_STEPS)
+        rig.move(grip_a=GRIPPER_CLOSED, settle=20)
+        rig.report("holder grasp")
 
     rig.follow(1, rig.path(1, pregrasp_b, dir_b, open_b), settle=SETTLE_STEPS)
     rig.report("rotator pregrasp")
@@ -369,6 +411,15 @@ def main() -> None:
 
     q_b_turned = q_b_grasp[-1].copy()
     q_b_turned[:, -1] += ROLL_ANGLE
+    if args.release_holder:
+        # Half the roll, then the holder lets go and the rotator keeps rolling: with the lock
+        # the face must stop where it was when the holder released.
+        q_b_half = q_b_grasp[-1].copy()
+        q_b_half[:, -1] += ROLL_ANGLE / 2
+        rig.move(q_b=q_b_half, settle=30)
+        rig.report("half turn (holder still holds)")
+        rig.move(grip_a=GRIPPER_OPEN, settle=10)
+        rig.report("holder released")
     rig.move(q_b=q_b_turned, settle=30)
     rig.report("turn")
 
@@ -383,7 +434,14 @@ def main() -> None:
     print(f"target face angle: {math.degrees(TARGET_FACE_ANGLE):.1f} deg")
 
     env.close()
-    sys.exit(0 if final["success"].all() else 1)
+    if args.no_lock:
+        sys.exit(0)
+    if args.no_holder or args.release_holder:
+        limit = 50.0 if args.release_holder else 5.0
+        ok = not final["success"].any() and (final["face_angle_deg"] < limit).all()
+    else:
+        ok = final["success"].all()
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

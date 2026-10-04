@@ -40,6 +40,8 @@ def build_turntable_cube(
     face_color=(1, 1, 0, 1),
     scene_idxs=None,
     initial_pose: sapien.Pose | None = None,
+    face_friction: float = 20.0,
+    face_damping: float = 0.1,
 ) -> Articulation:
     """Build a "turntable cube": a box body plus a revolute-jointed top face.
 
@@ -62,6 +64,9 @@ def build_turntable_cube(
             spans local z in [-cube_half_size, cube_half_size - face_thickness], so its
             bottom sits exactly cube_half_size below the root). This matches the nominal
             reset pose in TwoSO101Base._initialize_episode; ManiSkill warns if it is unset.
+        face_friction: PhysX friction coefficient of the face joint (dimensionless, see
+            `FaceTurnPhysicsConfig.face_friction`).
+        face_damping: damping of the face joint (N*m*s/rad); see the note on the gripper below.
 
     Returns:
         The built Articulation. Its root link is named "body" and its
@@ -112,13 +117,20 @@ def build_turntable_cube(
             [0, 0, cube_half_size - face_thickness / 2], q=_VERTICAL_AXIS_QUAT
         ),
         pose_in_child=sapien.Pose(q=_VERTICAL_AXIS_QUAT),
-        # Friction as in build_robel_valve. Damping is far lower than the valve's 2.0: with
+        # Damping is far lower than the valve's 2.0: with
         # 2.0 the SO-ARM101 parallel gripper cannot turn the face (jaws slip, face_angle stalls
         # at ~0.3 rad), with 0.1-0.2 a 90 degree wrist roll turns it fully (CPU sim, body held
         # still); 0.5 already lags, 1.0 slips.
         # TODO(review): re-check on the GPU backend and with a real holder arm.
-        friction=0.02,
-        damping=0.1,
+        friction=face_friction,
+        damping=face_damping,
     )
 
-    return builder.build(name=name, fix_root_link=False)
+    cube = builder.build(name=name, fix_root_link=False)
+    # ManiSkill v3.0.1's articulation builder only applies the damping of `set_joint_properties`
+    # (as a velocity drive); the friction is silently dropped (the valve builder's friction is
+    # a no-op too), so set it on the built joint, before the GPU sim is initialised.
+    # TODO(review): GPU backend unverified; PhysX joint friction is a per-joint property, so it
+    # must be set here at build time, not later.
+    cube.joints_map["face_joint"].set_friction(face_friction)
+    return cube

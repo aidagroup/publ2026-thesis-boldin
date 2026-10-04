@@ -111,3 +111,49 @@ class FaceTurnRewardConfig:
         `(num_envs,)`; no torch import here so the config stays dependency-free.
         """
         return dense_reward + self.dense_success_bonus * success.to(dense_reward.dtype)
+
+
+@dataclass
+class FaceTurnPhysicsConfig:
+    """The face-lock rule and the face joint's resistance for FaceTurn-v0.
+
+    See `callosum.envs.face_turn.FaceTurn` (the lock) and
+    `callosum.envs._turntable_cube.build_turntable_cube` (friction and damping).
+    """
+
+    lock_face_unless_held: bool = True
+    """The task rule "if the holder does not hold the cube, the face cannot be turned": on
+    every control step the holder (agent_a) must grasp the cube body (`is_grasping`, the check
+    the reward uses), otherwise the face joint is held at the angle it had when the lock
+    engaged. While the holder grasps, the face is free (subject to the friction below). Why a
+    rule and not only physics: in a rendered video of a trained policy the rotator turned the
+    face alone, because the face joint was so loose (friction 0.02) that the table's friction
+    on the body was enough to resist the reaction torque."""
+    face_friction: float = 20.0
+    """Face joint friction: PhysX's articulation-joint friction coefficient (dimensionless; the
+    friction torque scales with the joint's constraint force, so the useful numbers are large),
+    not a torque in N*m. Realism on top of the lock rule: a stiffer face needs a deliberate
+    twist and, without a holder, makes the cube co-rotate on the table. ManiSkill v3.0.1's
+    articulation builder drops the friction given to `set_joint_properties`, so the old value
+    0.02 was a no-op; `build_turntable_cube` now sets it on the built joint.
+
+    Measured on the Mac CPU sim (1 env, `scripts/probe_face_turn.py`, wrist roll of 95.7 degrees,
+    `pd_joint_pos`). Rotator alone (`--no-holder --no-lock`, holder at rest), after the turn:
+    friction 0 to 2: face 90 deg, body rotated 5 to 7.5 deg; 5: 88.5 / 6.6; 10: 83.6 / 11.8;
+    20: 82.3 / 13.1; 50: 73 / 23; 100: 61.6 / 35; 300: 42 / 54 (face angle / body rotation in
+    degrees). Success needs the body to stay within 0.1 rad (5.7 deg), so from friction 5 on the
+    rotator alone fails even without the lock (the cube co-rotates on the table instead of the
+    face turning). With the holder (the scripted expert): friction 20, 50, 100 all reach
+    success (first success at env step 297, 299, 300; 296 at 0.02); 300 fails (face 81 deg,
+    body 9 deg). 20 is the default: clearly stiffer than free, the expert unaffected, a factor 15
+    away from where the expert fails. The lock above is the guarantee; this is the realism."""
+    face_damping: float = 0.1
+    """Face joint damping (N*m*s/rad). 0.1 to 0.2 lets a 90 degree wrist roll turn the face
+    fully (CPU sim, body held still); 0.5 already lags and 1.0 slips (see `_turntable_cube`)."""
+
+    def __post_init__(self) -> None:
+        if self.face_friction < 0 or self.face_damping < 0:
+            raise ValueError(
+                "face_friction and face_damping must be >= 0, got "
+                f"{self.face_friction} and {self.face_damping}"
+            )
