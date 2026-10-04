@@ -8,7 +8,6 @@ stub that always reports failure.
 
 from typing import Any, ClassVar
 
-import numpy as np
 import sapien
 import torch
 from mani_skill.agents.multi_agent import MultiAgent
@@ -20,14 +19,14 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.pose import Pose
 from transforms3d.euler import euler2quat
 
+from callosum.configs.layout import ArmLayout, base_xy_yaw
 from callosum.envs._partner_obs import partner_tcp_pose_fields, validate_partner_obs
 from callosum.robots.so101_parallel_gripper import SO101ParallelGripper
 
 # ~5.7 cm real Rubik's cube edge length.
 CUBE_HALF_SIZE = 0.0285
 
-# Each arm's base sits this far from the table centre (the cube) along y, on opposite sides.
-ARM_BASE_OFFSET_Y = 0.25
+_DEFAULT_ARM_LAYOUT = ArmLayout()
 # Number of arm (non-gripper) joints; the gripper joints come after them in qpos.
 NUM_ARM_JOINTS = len(SO101ParallelGripper.arm_joint_names)
 # Max distance from the shoulder (joint 2) to the TCP over the joint limits: ~0.494 m (numpy FK
@@ -38,6 +37,9 @@ MAX_REACH_PER_ARM = 0.5
 @register_env("TwoSO101-v0", max_episode_steps=100)
 class TwoSO101Base(BaseEnv):
     """Two SO-ARM101 arms (parallel grippers) around a table with a single loose cube.
+
+    The bases stand 90 degrees apart on circles around the table centre (the cube), both
+    pointing at it; the placement is the `arm_layout` argument (`ArmLayout`).
 
     Both arms observe their own proprioception plus the cube pose (see
     `_get_obs_extra`); the dense reward simply pulls both TCPs toward the
@@ -62,9 +64,11 @@ class TwoSO101Base(BaseEnv):
         robot_uids=("so101_pg", "so101_pg"),
         robot_init_qpos_noise=0.02,
         partner_obs="full",
+        arm_layout: ArmLayout = _DEFAULT_ARM_LAYOUT,
         **kwargs,
     ):
         validate_partner_obs(partner_obs)
+        self.arm_layout = arm_layout
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.partner_obs = partner_obs
         # No explicit control_mode: SO101ParallelGripper's first configured controller is
@@ -83,17 +87,17 @@ class TwoSO101Base(BaseEnv):
         return self.agent.agents[1]
 
     def _load_agent(self, options: dict):
-        # Arms face each other across the cube at the table centre. The SO-ARM101's "forward"
-        # (folded-arm reach direction at qpos=0) is -y in its own base frame, so the arm at
-        # y=-ARM_BASE_OFFSET_Y needs yaw pi to reach towards +y, and the arm at
-        # y=+ARM_BASE_OFFSET_Y keeps identity yaw to reach towards -y.
-        super()._load_agent(
-            options,
-            [
-                sapien.Pose(p=[0, -ARM_BASE_OFFSET_Y, 0], q=euler2quat(0, 0, np.pi)),
-                sapien.Pose(p=[0, ARM_BASE_OFFSET_Y, 0]),
-            ],
-        )
+        # Both bases stand on a circle around the table centre (the cube) and point at it; see
+        # callosum.configs.layout.ArmLayout for the radius and azimuths.
+        layout = self.arm_layout
+        poses = []
+        for radius, azimuth in (
+            (layout.radius_a, layout.azimuth_a),
+            (layout.radius_b, layout.azimuth_b),
+        ):
+            x, y, yaw = base_xy_yaw(radius, azimuth)
+            poses.append(sapien.Pose(p=[x, y, 0], q=euler2quat(0, 0, yaw)))
+        super()._load_agent(options, poses)
 
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(

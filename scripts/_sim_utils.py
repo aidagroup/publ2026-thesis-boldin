@@ -1,4 +1,4 @@
-"""Shared helpers for the smoke scripts: CLI flags and env construction.
+"""Shared helpers for the smoke and probe scripts: CLI flags and env construction.
 
 Not part of the `callosum` package because it touches `mani_skill` / `sapien`
 (Linux-only dependencies). The smoke scripts import it as a sibling module, which works
@@ -11,8 +11,11 @@ import sys
 import gymnasium as gym
 
 
-def parse_args(description: str) -> argparse.Namespace:
-    """Parse the `--sim-backend` / `--num-envs` flags shared by the smoke scripts."""
+def parse_args(description: str, extra_args=None) -> argparse.Namespace:
+    """Parse the `--sim-backend` / `--num-envs` flags shared by the smoke scripts.
+
+    `extra_args`, if given, is called with the parser to add script-specific flags.
+    """
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--sim-backend",
@@ -20,6 +23,8 @@ def parse_args(description: str) -> argparse.Namespace:
         help='ManiSkill sim backend: "gpu" (server, default) or "cpu" (local, 1 env only).',
     )
     parser.add_argument("--num-envs", type=int, default=16, help="Parallel envs (default 16).")
+    if extra_args is not None:
+        extra_args(parser)
     return parser.parse_args()
 
 
@@ -51,8 +56,11 @@ def _stub_rendering_for_macos() -> None:
     urdf_loader.RenderTexture2D = _InertRenderObject
 
 
-def make_env(env_id: str, args: argparse.Namespace):
-    """`gym.make` the env with the CLI flags applied (CPU sim is limited to one env)."""
+def make_env(env_id: str, args: argparse.Namespace, **env_kwargs):
+    """`gym.make` the env with the CLI flags applied (CPU sim is limited to one env).
+
+    Extra keyword arguments (e.g. `control_mode="pd_joint_pos"`) are passed on to the env.
+    """
     num_envs = args.num_envs
     if args.sim_backend in ("cpu", "physx_cpu"):
         if num_envs != 1:
@@ -66,4 +74,5 @@ def make_env(env_id: str, args: argparse.Namespace):
         obs_mode="state",
         sim_backend=args.sim_backend,
         render_mode=None,
+        **env_kwargs,
     )
