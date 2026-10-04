@@ -345,6 +345,29 @@ uv run python scripts/render_episode.py --policy random --max-steps 60 --name lo
 # default 320x240; the scene panel is 2x that), --dry-run (no rendering)
 ```
 
+**A trained policy** (an IPPO checkpoint from step 2.1, both agents) is played back with
+`--checkpoint`; the video name defaults to `<run>_policy`:
+
+```bash
+uv run python scripts/render_episode.py --checkpoint runs/faceturn_s1/best.pt --name faceturn_s1_policy
+# add --render-backend gpu when setup reported hardware Vulkan (much faster than lavapipe)
+# options: --stochastic (sample actions instead of the actor mean), --full-episode (do not stop
+# on success), --seed, --max-steps N
+```
+
+The actors and the env are rebuilt from the config stored in the checkpoint (control mode,
+`partner_obs`, episode length: 400 for `FaceTurn-v0`); the actions are the actor means, and the
+episode ends on the first success unless `--full-episode`. The policy was trained on the plain
+`so101_pg` robots with `obs_mode="state"`, the video env has the camera robots and
+`obs_mode="state+rgb"` (ManiSkill adds the privileged state vector next to the images); the
+per-agent policy inputs are cut from that state with the trainer's own `AgentObsBuilder`, and
+the script checks at start-up that the layout matches the real flat state and the checkpoint's
+input widths (it prints the input fields of each agent). The footer shows
+`checkpoint:<run>` and, every step, the face angle and the success flag; the episode summary
+(success, face angle, return) is printed at the end. `--dry-run --checkpoint ...` runs the same
+rollout without rendering (also on the Mac) and prints that summary: the quick check that a
+checkpoint loads and acts.
+
 The file appears at `runs/videos/<name>.mp4` (→ `~/callosum-runs/videos/`, git-ignored). Get
 it out like the other results: right-click → Download in the JupyterHub file browser, or play
 it inline in a notebook:

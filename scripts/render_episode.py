@@ -10,19 +10,28 @@ step. Every panel is labelled, and a footer shows the step index and the sim tim
 
 Motion source: `--policy scripted` (default) is the scripted two-arm expert from
 `_face_turn_expert.py` (the same one `probe_face_turn.py` uses; one full face turn is ~350 steps);
-`--policy random` samples uniform random actions for a quick look. A trained policy
-(`--checkpoint`) is a hook for the step-2.1 trainer and not implemented yet.
+`--policy random` samples uniform random actions for a quick look. `--checkpoint <path>` plays
+back a trained IPPO policy (`latest.pt` / `best.pt` of a `callosum.training.ippo` run, both
+agents): the actors are rebuilt from the checkpoint's config and act on the env's state
+observation (cut per agent exactly as in training, see `callosum.training._playback`), with the
+actor mean by default (`--stochastic` samples). The episode ends on success unless
+`--full-episode`, or at the episode length of the training config (400 for FaceTurn-v0). The
+env uses the checkpoint's control mode and `partner_obs` but the `so101_pg_wristcam` robots and
+`obs_mode="state+rgb"`; the footer shows the face angle and the success flag of every step.
 
 Rendering needs a Vulkan device. On the lab server only the lavapipe *software* ICD exists, so the
 env is created with `render_backend="cpu"` and rendering is slow (expect seconds per frame at the
 default sizes); the physics runs on the CPU too by default (`--sim-backend cpu`, one env).
 On macOS there is no Vulkan at all: use `--dry-run`, which steps the policy with rendering
-stubbed out, feeds blank panels through the same compositing code and reports the frame layout
-(no file is written).
+stubbed out (`obs_mode="state"`, no sensors), feeds blank panels through the same compositing code
+and reports the frame layout (no file is written). With `--checkpoint` it also prints the episode
+summary (success, face angle, return), which makes it the local test of a checkpoint.
 
 Usage (on the server, from the repo root):
 
     uv run python scripts/render_episode.py --name face_turn_scripted
+    uv run python scripts/render_episode.py --checkpoint runs/faceturn_s1/best.pt \\
+        --name faceturn_s1_policy
 
 The file appears at `runs/videos/<name>.mp4`.
 """
@@ -37,10 +46,12 @@ import numpy as np
 import torch
 from _face_turn_expert import ArmModel, Rig, run_face_turn
 from _sim_utils import make_env, parse_args
+from mani_skill.utils import gym_utils
 from PIL import Image, ImageDraw, ImageFont
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
 from callosum.configs.cameras import SceneCameraConfig, WristCameraConfig
+from callosum.training._playback import CheckpointPolicy, EpisodeSummary, state_of
 
 ROBOT_UIDS = ("so101_pg_wristcam", "so101_pg_wristcam")
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "runs" / "videos"
@@ -132,7 +143,20 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         "--checkpoint",
         type=Path,
         default=None,
-        help="Policy checkpoint to roll out (hook for the step-2.1 trainer; not implemented).",
+        help=(
+            "IPPO checkpoint (latest.pt / best.pt of a trainer run) to roll out; replaces "
+            "--policy. Needs the train extra (torch)."
+        ),
+    )
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="With --checkpoint: sample the actions instead of using the actor mean.",
+    )
+    parser.add_argument(
+        "--full-episode",
+        action="store_true",
+        help="With --checkpoint: keep going after success until the episode length is reached.",
     )
     parser.add_argument("--seed", type=int, default=0, help="Reset (and random policy) seed.")
     parser.add_argument(
@@ -162,8 +186,13 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def make_render_env(args: argparse.Namespace, control_mode: str):
-    """The FaceTurn env with wrist cameras, wrist images in the obs and a scene render camera."""
+def make_render_env(args: argparse.Namespace, control_mode: str | None, **env_kwargs):
+    """The FaceTurn env with wrist cameras, wrist images in the obs and a scene render camera.
+
+    `control_mode=None` keeps the env's default. With `--checkpoint` the obs mode is
+    `"state+rgb"` (the privileged state vector the policy needs, next to the images; see
+    `callosum.training._playback`); `env_kwargs` are further env arguments (the checkpoint's).
+    """
     scene_cam = dataclasses.replace(
         SceneCameraConfig(), width=args.width * 2, height=args.height * 2
     )
@@ -172,15 +201,19 @@ def make_render_env(args: argparse.Namespace, control_mode: str):
         args.render_backend = "none"
         mode = {"obs_mode": "state", "render_mode": None}
     else:
-        mode = {"obs_mode": "rgb", "render_mode": "rgb_array"}
-    extra = {}
+        # TODO(review): "state+rgb" (obs["state"] next to the sensor data) is verified on the Mac
+        # only for the equivalent "state" mode (identical flattening); not rendered anywhere yet.
+        obs_mode = "state+rgb" if args.checkpoint is not None else "rgb"
+        mode = {"obs_mode": obs_mode, "render_mode": "rgb_array"}
+    extra = dict(env_kwargs)
+    if control_mode is not None:
+        extra["control_mode"] = control_mode
     if args.scene_shader is not None:
         extra["human_render_camera_configs"] = {"shader_pack": args.scene_shader}
     return make_env(
         "FaceTurn-v0",
         args,
         robot_uids=ROBOT_UIDS,
-        control_mode=control_mode,
         scene_camera=scene_cam,
         # Applies to every sensor camera, i.e. both wrist cameras.
         sensor_configs={"width": args.width, "height": args.height},
@@ -206,6 +239,7 @@ class FrameRecorder:
             "rotator": f"{agent_keys[1]}-{cam_uid}",
         }
         self.footer = f"seed {args.seed}   {args.policy}"
+        self.status = ""  # per-step text appended to the footer (set by the caller)
         self.num_frames = 0
         self.frame_shape: tuple[int, ...] | None = None
         self.start = time.time()
@@ -228,7 +262,8 @@ class FrameRecorder:
         """Compose the frame of the sim's current state (`obs` is that step's observation)."""
         step = self.num_frames
         scene, holder, rotator = self._panels(obs)
-        frame = compose_frame(scene, holder, rotator, step, step * self.dt, self.footer)
+        footer = f"{self.footer}   {self.status}" if self.status else self.footer
+        frame = compose_frame(scene, holder, rotator, step, step * self.dt, footer)
         self.frame_shape = frame.shape
         if self.writer is not None:
             self.writer.append_data(frame)
@@ -252,14 +287,55 @@ def random_actions(base, rng: np.random.Generator) -> dict:
     }
 
 
+def bind_policy(policy: CheckpointPolicy, env, obs) -> None:
+    """Attach `policy` to the (camera) env and verify that its inputs match the training ones.
+
+    The structured state observation of the freshly reset env gives the field layout, which
+    `CheckpointPolicy.bind` checks against the real flat state and the checkpoint's input widths.
+    """
+    base = env.unwrapped
+    spaces = base.single_action_space.spaces
+    env_uids = list(base.agent.agents_dict)
+    policy.bind(
+        base.get_obs(unflattened=True),
+        state_of(obs),
+        env_uids,
+        [(spaces[uid].low, spaces[uid].high) for uid in env_uids],
+    )
+    for name, uid, dim, fields in zip(
+        ("agent_a", "agent_b"), env_uids, policy.obs_dims, policy.builder.fields, strict=True
+    ):
+        print(f"  {name} ({uid}): policy input {dim} = {', '.join(fields)}")
+
+
+def play_policy(
+    env,
+    policy: CheckpointPolicy,
+    obs,
+    recorder: FrameRecorder,
+    summary: EpisodeSummary,
+    full_episode: bool,
+) -> dict:
+    """Roll the policy out, recording one frame per step; returns the last step's info.
+
+    Ends at the env's time limit, or on the first success unless `full_episode`.
+    """
+    info: dict = {}
+    while True:
+        obs, reward, _, truncated, info = env.step(policy.act(state_of(obs)))
+        summary.update(float(reward.reshape(-1)[0]), info)
+        recorder.status = summary.status()
+        recorder.record(obs)
+        if bool(torch.as_tensor(truncated).any()):
+            return info
+        if summary.success and not full_episode:
+            return info
+
+
 def main() -> None:
     args = parse_args(__doc__, add_args)
-    if args.checkpoint is not None:
-        # TODO(review): wire this up once the step-2.1 trainer defines the checkpoint format.
-        raise NotImplementedError(
-            "--checkpoint is a hook for the step-2.1 trainer (IPPO checkpoints are not defined "
-            "yet); use --policy scripted or --policy random."
-        )
+    if args.sim_backend in ("gpu", "physx_cuda") and args.checkpoint is not None:
+        sys.exit("error: --checkpoint playback uses the single-env CPU sim (--sim-backend cpu).")
     if sys.platform == "darwin" and not args.dry_run:
         sys.exit(
             "error: rendering is not possible on macOS (SAPIEN has no Vulkan device there). "
@@ -277,14 +353,34 @@ def main() -> None:
             "does not exist on the lab server (lavapipe only). Use --sim-backend cpu (default)."
         )
 
-    name = args.name or f"face_turn_{args.policy}"
+    policy = None
+    env_kwargs = {}
+    if args.checkpoint is not None:
+        # The checkpoint decides how the env is built: control mode, partner_obs, reward mode and
+        # episode length are those of the training run.
+        policy = CheckpointPolicy(args.checkpoint, deterministic=not args.stochastic)
+        cfg = policy.cfg
+        args.policy = f"checkpoint:{policy.run_name}"
+        control_mode = cfg.control_mode
+        env_kwargs = {
+            "partner_obs": cfg.partner_obs,
+            "reward_mode": cfg.reward_mode,
+            "reconfiguration_freq": 0,  # as in training
+        }
+        if cfg.max_episode_steps is not None:
+            env_kwargs["max_episode_steps"] = cfg.max_episode_steps
+        default_name = f"{policy.run_name}_policy"
+    else:
+        control_mode = "pd_joint_pos" if args.policy == "scripted" else "pd_joint_delta_pos"
+        default_name = f"face_turn_{args.policy}"
+
+    name = args.name or default_name
     out_path = args.output_dir / f"{name}.mp4"
     max_steps = args.max_steps
     if max_steps is None and args.policy == "random":
         max_steps = DEFAULT_RANDOM_STEPS
 
-    control_mode = "pd_joint_pos" if args.policy == "scripted" else "pd_joint_delta_pos"
-    env = make_render_env(args, control_mode)
+    env = make_render_env(args, control_mode, **env_kwargs)
     base = env.unwrapped
     fps = args.fps or base.control_freq
 
@@ -297,16 +393,29 @@ def main() -> None:
         writer = imageio.get_writer(out_path, fps=fps, macro_block_size=1)
     recorder = FrameRecorder(env, args, writer, max_steps)
 
-    obs, _ = env.reset(seed=args.seed)
+    obs, reset_info = env.reset(seed=args.seed)
     print(
         f"policy={args.policy} control_mode={control_mode} sim_backend={args.sim_backend} "
         f"render_backend={args.render_backend} wrist {args.width}x{args.height} "
         f"scene {2 * args.width}x{2 * args.height}, control freq {base.control_freq} Hz"
     )
     success = None
+    summary = EpisodeSummary()
     try:
+        if policy is not None:
+            episode_steps = int(gym_utils.find_max_episode_steps_value(env))
+            bind_policy(policy, env, obs)
+            summary.observe(reset_info)
+            recorder.status = summary.status()
+            print(
+                f"{policy.cfg.env_id}: episode length {episode_steps} steps, "
+                f"{'sampled' if args.stochastic else 'deterministic (actor mean)'} actions, "
+                f"{'full episode' if args.full_episode else 'stop on success'}"
+            )
         recorder.record(obs)  # step 0: the freshly reset state
-        if args.policy == "scripted":
+        if policy is not None:
+            info = play_policy(env, policy, obs, recorder, summary, args.full_episode)
+        elif args.policy == "scripted":
             rig = Rig(env, ArmModel(), on_step=recorder.record)
             run_face_turn(rig, lambda phase: print(f"  [step {recorder.num_frames - 1}] {phase}"))
             info = rig.last_info
@@ -319,6 +428,8 @@ def main() -> None:
         success = bool(info["success"].all()) if "success" in info else None
     except _StopEpisode:
         print(f"stopped after {recorder.num_frames - 1} steps (--max-steps)")
+        if policy is not None:
+            success = summary.success
     finally:
         if writer is not None:
             writer.close()
@@ -332,6 +443,8 @@ def main() -> None:
         f"{args.width}x{args.height} each, footer {FOOTER_HEIGHT} px), "
         f"{duration:.1f} s at {fps:g} fps, success={success}"
     )
+    if policy is not None:
+        print(f"episode: {summary.text()}")
     if args.dry_run:
         print("dry run: nothing rendered, nothing written")
     else:
