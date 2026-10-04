@@ -37,7 +37,8 @@ ManiSkill 3 даёт нативную мультиагентность (dict act
 ## Машины и деплой
 
 - **Dev (macOS):** правка кода, линт; **без GPU-сима** (ManiSkill GPU – только Linux+CUDA).
-- **Train (сервер лаборатории, Linux + A100 80GB):** сим + обучение; деплой через `git pull`.
-- Деплой-петля: правишь локально → `git push` → на сервере `git pull` + `bash scripts/setup_server.sh` (или `uv sync --extra sim --extra train`) → обучение.
+- **Train (сервер лаборатории, Linux + A100 80GB):** сим + обучение. Доступ **только через веб-интерфейс JupyterHub и его терминал** (SSH нет, root нет); образ `jupyter/singleuser-gpu_570`, пользователь `jovyan`. Исходящий интернет – белый список (GitHub, PyPI, download.pytorch.org, astral.sh, Hugging Face, LLM-прокси лаборатории; `wandb.ai` закрыт).
+- **Диск:** `$HOME` крошечный (4 ГБ, свободно < 1 ГБ), зато оверлей `/tmp` большой (десятки ГБ) и считается очищаемым при перезапуске контейнера. Поэтому клон репозитория, venv и кэши (uv, Hugging Face, ассеты ManiSkill/SAPIEN) лежат в scratch `/tmp/$USER-callosum`, а результаты `runs/` – в `$HOME` (символическая ссылка), чтобы пережить перезапуск; чекпоинты приходится чистить и скачивать.
+- **Деплой-петля:** правишь локально → `git push` → в терминале JupyterHub `git clone`/`git pull` + `bash scripts/setup_server.sh` (идемпотентен, после очистки scratch запускается заново) → обучение отсоединённым процессом (`setsid nohup`: ядро ноутбука умирает при закрытии вкладки) → результаты забираются через файловый браузер JupyterHub (ни `ssh`, ни `rsync` нет); TensorBoard – через JupyterHub-прокси, если он есть, иначе локально по скачанным логам.
 
 Подробности сетапа и bootstrap-скрипт сервера – [`../setup.md`](../setup.md).

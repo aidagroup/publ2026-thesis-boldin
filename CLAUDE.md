@@ -11,7 +11,7 @@ Phase 1 (ManiSkill envs) is implemented. The `callosum/agents/` (Bi-JEPA) and `c
 ## Two-machine workflow (drives most constraints)
 
 - **macOS (dev):** ManiSkill/SAPIEN is Linux+CUDA only (`sys_platform == 'linux'` in `pyproject.toml`), so it is **not installed locally**. Anything that imports `mani_skill` cannot be imported or run on the Mac or in CI. Only lint, formatting, and pure-Python/pure-torch tests run locally.
-- **Linux GPU server (lab server, 1× A100 80GB, driver 570 → CUDA ≤ 12.8):** all simulation runs here, via `git pull` then `bash scripts/setup_server.sh [--smoke]`. See [docs/setup.md](docs/setup.md) and [docs/server-runbook.md](docs/server-runbook.md). Its outbound internet is an **allowlist** (GitHub, PyPI, download.pytorch.org, astral.sh, Hugging Face, the lab LLM proxy); `wandb.ai` and other hosts are blocked. Any new dependency or download must come from an allowed host, or the server owner has to open it first.
+- **Linux GPU server (lab server, 1× A100 80GB, driver 570 → CUDA ≤ 12.8):** all simulation runs here, but only through the **JupyterHub web UI and its terminal (no SSH, no root)**: `git clone`/`git pull` from GitHub, then `bash scripts/setup_server.sh [--smoke]`. `$HOME` is tiny (< 1 GB free) and `/tmp` is assumed wiped on restart, so checkout, venv and caches live in scratch (`/tmp/$USER-callosum`, override `CALLOSUM_SCRATCH`); only `runs/` (symlink into `~/callosum-runs`) persists. New terminals source `~/.callosum-env.sh`; long runs must be detached (`setsid nohup`) because the kernel dies with the tab. See [docs/setup.md](docs/setup.md) and [docs/server-runbook.md](docs/server-runbook.md). Outbound internet is an **allowlist** (GitHub, PyPI, download.pytorch.org, astral.sh, Hugging Face, LLM proxy `llm-proxy.spirit.culab.ru`); `wandb.ai` and other hosts are blocked, so any new dependency or download must come from an allowed host or the owner must open it first.
 - When reading ManiSkill API for reference, read it from GitHub at tag **`v3.0.1`** (matches `uv.lock`), not `main`: `gh api "repos/haosulab/ManiSkill/contents/<path>?ref=v3.0.1" --jq .content | base64 -d`. Don't use APIs missing from `v3.0.1`.
 
 ## Commands
@@ -53,5 +53,5 @@ Code that touches the simulator carries `# TODO(review):` markers where behavior
 
 - One step = one branch (`step/<phase>.<step>-<slug>`) = one PR into `main`; don't commit directly to `main`. Branch each step from an up-to-date `main`.
 - Public functions/classes get docstrings and type hints.
-- Don't commit artifacts (weights, logs, videos); they are git-ignored. Results stay on the server under `runs/` (TensorBoard via SSH tunnel, or `rsync`).
+- Don't commit artifacts (weights, logs, videos); they are git-ignored. Results stay on the server under `runs/` (copy out via the JupyterHub file browser; there is no SSH/`rsync`).
 - Steps that need the simulator must state in their report that they were not verified locally.
