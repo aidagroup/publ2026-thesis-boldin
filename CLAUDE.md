@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 University thesis project (package `callosum`): two SO-ARM101 robot arms with Robonine parallel grippers, each a decentralized agent, cooperatively turn a Rubik's-cube-like object in ManiSkill GPU simulation. The coordination mechanism is **Bi-JEPA** (each agent predicts its partner's latent state, no message passing), with sim2real as a later goal. The README and `docs/` are written in Russian; **code, comments and docstrings must be in English**.
 
-Phase 1 (ManiSkill envs) is implemented. The `callosum/agents/` (Bi-JEPA) and `callosum/training/` (IPPO/BenchMARL) packages are still empty stubs. [docs/implementation-plan.md](docs/implementation-plan.md) is the step-by-step spec (steps 1.1 to 3.3); thesis background lives in [docs/thesis/](docs/thesis/README.md) (glossary in `docs/thesis/glossary.md`).
+Phase 1 (ManiSkill envs) is implemented. `callosum/agents/bijepa.py` holds the Bi-JEPA encoder + partner predictor (step 3.1, pure torch, tested on macOS); `callosum/training/` (IPPO/BenchMARL) is still being built. [docs/implementation-plan.md](docs/implementation-plan.md) is the step-by-step spec (steps 1.1 to 3.3); thesis background lives in [docs/thesis/](docs/thesis/README.md) (glossary in `docs/thesis/glossary.md`).
 
 ## Two-machine workflow (drives most constraints)
 
