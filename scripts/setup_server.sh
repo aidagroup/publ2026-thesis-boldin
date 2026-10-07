@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap callosum on a Linux + NVIDIA (CUDA) machine: the lab training server
-# (JupyterHub container, no SSH, no root, small $HOME) or any CUDA box.
+# (JupyterHub container, no SSH, no root, persistent $HOME but heavy files go to
+# /tmp scratch) or any CUDA box.
 # Idempotent and cheap to re-run: after every `git pull`, and again from scratch
 # after the server wipes /tmp on restart.
 #
@@ -45,6 +46,9 @@ die() { printf '   \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 REPO_ROOT="$(pwd)"
 USER_NAME="${USER:-$(id -un)}"
 NEED_GB=30   # venv with torch + CUDA libs (~8 GB), uv cache, HF cache, assets: with margin
+# Warn when the persistent runs/ store has less than this many MB free. Full-state checkpoints
+# are ~7 MB each, a 30M-step run ~15 MB, so this only trips when $HOME is nearly full.
+RUNS_LOW_MB=5120
 
 # Free space in whole GB on the filesystem holding $1 (empty if unknown).
 free_gb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1048576}' || true; }
@@ -338,7 +342,7 @@ fi
 MESA="$WORK/mesa"
 if [ ! -e "$MESA/lib/libvulkan.so.1" ] && command -v conda >/dev/null 2>&1; then
   warn "installing a current Vulkan loader (+ lavapipe, vulkaninfo) with conda into $MESA (needs conda-forge)"
-  # conda's package cache defaults to ~/.conda/pkgs: keep it off the small $HOME.
+  # conda's package cache defaults to ~/.conda/pkgs: keep it off $HOME (heavy files live in scratch).
   CONDA_PKGS_DIRS="$WORK/conda-pkgs" \
     with_timeout 900 conda create -y -q -p "$MESA" -c conda-forge mesalib vulkan-tools >/dev/null 2>&1 \
     || warn "conda install failed (conda-forge not reachable from the server?)"
@@ -537,8 +541,11 @@ if [ "$SCRATCH_MODE" = "1" ]; then
         fi
         ln -s "$RUNS_STORE" "$REPO_ROOT/runs"
       fi
-      ok "runs -> $RUNS_STORE ($(du -sh "$RUNS_STORE" 2>/dev/null | cut -f1) used, $(free_mb "$RUNS_STORE") MB free)"
-      warn "\$HOME is small: prune checkpoints you do not need and download results (JupyterHub file browser)"
+      runs_free="$(free_mb "$RUNS_STORE")"
+      ok "runs -> $RUNS_STORE ($(du -sh "$RUNS_STORE" 2>/dev/null | cut -f1) used, ${runs_free:-?} MB free)"
+      if [ -n "$runs_free" ] && [ "$runs_free" -lt "$RUNS_LOW_MB" ]; then
+        warn "\$HOME (runs/) has only ${runs_free} MB free: prune checkpoints you do not need and download results (JupyterHub file browser)"
+      fi
       ;;
   esac
 fi
