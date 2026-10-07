@@ -227,6 +227,18 @@ evaluation (an `eval @ iter ...` line is printed each time, also once before tra
 as the untrained baseline). TensorBoard tags (section 4): `train/{return,success_once,...}`,
 `eval/{return,success_once,success_at_end,...}`, `losses/agent_{a,b}/{policy_loss,value_loss,
 entropy,approx_kl,clipfrac,explained_variance}`, `policy/agent_{a,b}/action_std`, `charts/{SPS,learning_rate}`.
+FaceTurn diagnostics: the iteration line has `hold a/b 0.12/0.05` (holder / rotator grasp rate
+over the rollout) and each `eval @ iter K:` line ends with `grasp hold .. rot .. both ..` (rates
+over all env-steps), `ever hold .. rot .. both ..` (share of episodes with that grasp at least
+once) and `face X deg mean, Y max`. TensorBoard: `diag/<name>` (rollout) and `eval_diag/<name>`
+(evaluation) for every `diag_*` key of the env's `info` (grasps, `body_pos_drift` m,
+`body_rot_drift` rad, `holder_to_body` / `rotator_to_face` m, `face_angle` rad, `ever_*`, and the
+signed reward-term contributions `r_*` in normalised units, which sum to the step reward minus
+the success bonus), plus `diag_max/<name>`. Non-finite envs (a GPU PhysX state that exploded):
+the trainer resets just those envs, zeroes their reward and cuts GAE there; the iteration line
+then ends with `NONFINITE n (total T)`, the first occurrence prints the env indices, the
+non-finite observation fields and the face/cube state, and TensorBoard has
+`train/nonfinite_envs`, `train/nonfinite_envs_total`, `eval/nonfinite_envs`.
 Files in `runs/$NAME/`: `config.json`, `events.out.tfevents.*`, `latest.pt` (every 20
 iterations and at the end), `best.pt` (best evaluation success, then return): about 7 MB each,
 the full training state (both agents' weights, Adam state, RNG states, counters, best eval,

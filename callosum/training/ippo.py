@@ -24,6 +24,9 @@ rollout/GAE/update structure, `ManiSkillVectorEnv` with partial resets and `reco
   checkpoints `latest.pt` and `best.pt` (by evaluation success) in the same directory. Both carry
   the full training state (weights, Adam moments, RNG states, counters, best-eval score), see
   `_checkpoint`.
+* Per-env diagnostics: every `diag_*` key of the env's `info` is averaged over the rollout
+  (`diag/<name>`) and each evaluation (`eval_diag/<name>`), see `_diag`; envs whose GPU state goes
+  non-finite are reset individually and made terminal with zero reward, see `_nonfinite`.
 * `--resume <run dir>` continues a killed run exactly where its `latest.pt` stopped (same
   directory, LR schedule position, optimizer state, counters, best-eval tracking); the simulator
   state cannot be saved, so the envs are reset with seeds derived from the resumed iteration.
@@ -39,6 +42,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import gymnasium as gym
 import mani_skill.envs  # noqa: F401  (registers the stock ManiSkill envs)
@@ -65,7 +69,14 @@ from callosum.training._checkpoint import (
     load_training_state,
     save_checkpoint,
 )
-from callosum.training._metrics import EpisodeStats, MetricLogger, progress_line
+from callosum.training._diag import DiagStats
+from callosum.training._metrics import (
+    EpisodeStats,
+    MetricLogger,
+    eval_diag_summary,
+    progress_line,
+)
+from callosum.training._nonfinite import NonFiniteTracker, guard_step
 from callosum.training._ppo_core import ActorCritic, compute_gae, ppo_update
 
 AGENT_NAMES = ("agent_a", "agent_b")
@@ -117,6 +128,24 @@ def agent_uids_of(envs: ManiSkillVectorEnv) -> tuple[str, str]:
     return uids
 
 
+class EvalResult(NamedTuple):
+    """Outcome of `evaluate`.
+
+    Attributes:
+        metrics: mean of each episode metric over the finished episodes.
+        episodes: how many episodes finished (envs that went non-finite are not counted).
+        diag_means / diag_maxes: `DiagStats.take()` of the env's `diag_*` info keys over the
+            whole evaluation (empty for envs without diagnostics).
+        nonfinite: envs that had a non-finite state and were dropped from the evaluation.
+    """
+
+    metrics: dict[str, float]
+    episodes: int
+    diag_means: dict[str, float]
+    diag_maxes: dict[str, float]
+    nonfinite: int
+
+
 @torch.no_grad()
 def evaluate(
     agents: list[ActorCritic],
@@ -124,20 +153,49 @@ def evaluate(
     eval_envs: ManiSkillVectorEnv,
     action_bounds: list[tuple[torch.Tensor, torch.Tensor]],
     num_steps: int,
-) -> tuple[dict[str, float], int]:
-    """Run `num_steps` deterministic steps in the eval envs; metric means over finished episodes."""
+    tracker: NonFiniteTracker | None = None,
+) -> EvalResult:
+    """Run `num_steps` deterministic steps in the eval envs; metric means over finished episodes.
+
+    An env whose observation or reward goes non-finite is reset (so the policy never sees NaN)
+    and excluded from the statistics for the rest of the evaluation.
+    """
     uids = builder.agent_uids
+    tracker = tracker or NonFiniteTracker()
     obs, _ = eval_envs.reset()
     stats = EpisodeStats()
-    for _ in range(num_steps):
+    diag = DiagStats(eval_envs.num_envs, eval_envs.device)
+    dead: torch.Tensor | None = None  # envs dropped from the statistics
+    for step in range(num_steps):
         inputs = builder(obs)
         actions = {
             uid: torch.clamp(agent.get_action(x, deterministic=True), low, high)
             for uid, agent, x, (low, high) in zip(uids, agents, inputs, action_bounds, strict=True)
         }
-        obs, _, _, _, infos = eval_envs.step(actions)
-        stats.add(infos)
-    return stats.means(), stats.num_episodes
+        obs, reward, _, _, infos = eval_envs.step(actions)
+        guard = guard_step(
+            eval_envs,
+            obs,
+            reward,
+            infos,
+            layout=builder.layout,
+            actions=actions,
+            describe=not tracker.reported,
+        )
+        if guard is not None:
+            obs = guard.obs
+            dead = guard.poisoned if dead is None else dead | guard.poisoned
+            tracker.record("eval", guard, f"evaluation step {step}")
+        stats.add(infos, exclude=dead)
+        diag.add(infos, None if dead is None else ~dead)
+    diag_means, diag_maxes = diag.take()
+    nonfinite = 0 if dead is None else int(dead.sum())
+    return EvalResult(stats.means(), stats.num_episodes, diag_means, diag_maxes, nonfinite)
+
+
+def _without_reward_terms(maxes: dict[str, float]) -> dict[str, float]:
+    """`maxes` without the per-reward-term entries (`r_*`): their maxima are TensorBoard clutter."""
+    return {k: v for k, v in maxes.items() if not k.startswith("r_")}
 
 
 def run(cfg: IPPOConfig) -> Path:
@@ -304,16 +362,29 @@ def _train(
         for key, value in resumed.last_eval.items():
             logger.latest["eval/" + key] = value
 
+    tracker = NonFiniteTracker()
+
     def run_eval(iteration: int, global_step: int) -> None:
         eval_start = time.time()
-        metrics, episodes = evaluate(agents, eval_builder, eval_envs, action_bounds, num_eval_steps)
+        result = evaluate(agents, eval_builder, eval_envs, action_bounds, num_eval_steps, tracker)
+        metrics, episodes = result.metrics, result.episodes
         logger.log_many(metrics, global_step, prefix="eval/")
         logger.log("eval/episodes", episodes, global_step)
+        logger.log_many(result.diag_means, global_step, prefix="eval_diag/")
+        logger.log_many(
+            _without_reward_terms(result.diag_maxes), global_step, prefix="eval_diag_max/"
+        )
+        logger.log("eval/nonfinite_envs", result.nonfinite, global_step)
         state["last_eval"] = metrics
         shown = " ".join(f"{k}={v:.3f}" for k, v in sorted(metrics.items()))
+        summary = eval_diag_summary(result.diag_means, result.diag_maxes)
+        extras = ([summary] if summary else []) + (
+            [f"NONFINITE {result.nonfinite} env(s) dropped"] if result.nonfinite else []
+        )
         print(
             f"eval @ iter {iteration}: {episodes} episodes | {shown} | "
-            f"{time.time() - eval_start:.1f}s",
+            + "".join(f"{e} | " for e in extras)
+            + f"{time.time() - eval_start:.1f}s",
             flush=True,
         )
         score = (metrics.get("success_once", 0.0), metrics.get("return", float("-inf")))
@@ -342,6 +413,7 @@ def _train(
     start_time = time.time()
     agent_obs = builder(obs)
     next_done = torch.zeros(n, device=device)
+    diag = DiagStats(n, device)  # its per-episode "ever" flags span the iterations
     if resumed is None:
         run_eval(0, 0)
         iteration = 0
@@ -365,6 +437,7 @@ def _train(
         rollout_start = time.time()
         final_values = [torch.zeros((steps, n), device=device) for _ in agents]
         train_stats = EpisodeStats()
+        iteration_nonfinite = 0
         for step in range(steps):
             global_step += n
             dones[step] = next_done
@@ -380,17 +453,39 @@ def _train(
                     actions[uids[i]] = torch.clamp(action, low, high)
 
             obs, reward, terminations, truncations, infos = envs.step(actions)
+            # Envs whose GPU state blew up (non-finite obs/reward) are reset on their own, made
+            # terminal with zero reward and kept out of the statistics; see _nonfinite.
+            poisoned = None
+            guard = guard_step(
+                envs,
+                obs,
+                reward,
+                infos,
+                layout=builder.layout,
+                actions=actions,
+                describe=not tracker.reported,
+            )
+            if guard is not None:
+                obs, reward, poisoned = guard.obs, guard.reward, guard.poisoned
+                iteration_nonfinite += guard.count
+                tracker.record("train", guard, f"iteration {iteration}, rollout step {step}")
             agent_obs = builder(obs)
             next_done = torch.logical_or(terminations, truncations).float()
+            if poisoned is not None:
+                next_done = torch.where(poisoned, torch.ones_like(next_done), next_done)
             rewards[step] = reward.view(-1) * cfg.reward_scale
+            diag.add(infos, None if poisoned is None else ~poisoned)
 
-            if train_stats.add(infos):
+            if "final_info" in infos:
+                train_stats.add(infos, exclude=poisoned)
                 # Episodes that just ended were auto-reset. Time-limit truncations bootstrap
                 # from their true last obs; terminations (success) are true terminals and keep
                 # final_values = 0. (The ManiSkill baseline bootstraps both. With the FaceTurn
                 # success bonus that would feed the bonus back through V(final obs) of the
-                # success state and inflate the value function.)
+                # success state and inflate the value function.) Poisoned envs never bootstrap.
                 done_mask = infos["_final_info"] & ~terminations
+                if poisoned is not None:
+                    done_mask = done_mask & ~poisoned
                 if done_mask.any():
                     with torch.no_grad():
                         final_obs = builder(infos["final_observation"][done_mask])
@@ -441,6 +536,11 @@ def _train(
         sps = (global_step - start_step) / (time.time() - start_time)
         logger.log_many(train_stats.means(), global_step, prefix="train/")
         logger.log("train/episodes", train_stats.num_episodes, global_step)
+        diag_means, diag_maxes = diag.take()
+        logger.log_many(diag_means, global_step, prefix="diag/")
+        logger.log_many(_without_reward_terms(diag_maxes), global_step, prefix="diag_max/")
+        logger.log("train/nonfinite_envs", iteration_nonfinite, global_step)
+        logger.log("train/nonfinite_envs_total", tracker.totals["train"], global_step)
         logger.log("rollout/step_reward", rewards.mean(), global_step)
         logger.log("charts/learning_rate", lr, global_step)
         logger.log("charts/SPS", sps, global_step)
@@ -448,7 +548,13 @@ def _train(
         logger.log("time/update_time", update_time, global_step)
         print(
             progress_line(
-                logger, iteration, cfg.num_iterations, global_step, sps, train_stats.num_episodes
+                logger,
+                iteration,
+                cfg.num_iterations,
+                global_step,
+                sps,
+                train_stats.num_episodes,
+                nonfinite=(iteration_nonfinite, tracker.totals["train"]),
             ),
             flush=True,
         )

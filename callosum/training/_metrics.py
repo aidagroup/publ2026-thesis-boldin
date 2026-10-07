@@ -31,11 +31,19 @@ class EpisodeStats:
         self._counts: dict[str, int] = defaultdict(int)
         self.num_episodes = 0
 
-    def add(self, infos: Mapping) -> int:
-        """Accumulate the episodes that ended in this step; returns how many there were."""
+    def add(self, infos: Mapping, exclude=None) -> int:
+        """Accumulate the episodes that ended in this step; returns how many were counted.
+
+        Args:
+            infos: the vector env's info dict.
+            exclude: optional bool array/tensor `(num_envs,)`; envs that are True are left out
+                (episodes poisoned by a non-finite simulation state, whose return is NaN).
+        """
         if "final_info" not in infos:
             return 0
         mask = infos["_final_info"]
+        if exclude is not None:
+            mask = mask & ~exclude
         episode = infos["final_info"]["episode"]
         finished = int(mask.sum())
         for key, value in episode.items():
@@ -83,6 +91,36 @@ def format_value(value: float | None, spec: str = ".3g") -> str:
     return "-" if value is None else format(value, spec)
 
 
+def eval_diag_summary(means: Mapping[str, float], maxes: Mapping[str, float]) -> str:
+    """Compact stdout summary of an evaluation's FaceTurn diagnostics ("" if the env has none).
+
+    `means` / `maxes` are `DiagStats.take()` results: grasp rates over all env-steps (holder,
+    rotator, both at once), the share of episodes with a grasp at least once, and the face angle
+    (mean and max, converted from radians to degrees).
+    """
+    parts = []
+    grasps = [
+        ("hold", means.get("holder_grasp")),
+        ("rot", means.get("rotator_grasp")),
+        ("both", means.get("both_grasp")),
+    ]
+    if any(v is not None for _, v in grasps):
+        parts.append("grasp " + " ".join(f"{k} {format_value(v, '.2f')}" for k, v in grasps))
+    ever = [
+        ("hold", means.get("ever_holder_grasp")),
+        ("rot", means.get("ever_rotator_grasp")),
+        ("both", means.get("ever_both_grasp")),
+    ]
+    if any(v is not None for _, v in ever):
+        parts.append("ever " + " ".join(f"{k} {format_value(v, '.2f')}" for k, v in ever))
+    if "face_angle" in means:
+        top = maxes.get("face_angle", means["face_angle"])
+        parts.append(
+            f"face {math.degrees(means['face_angle']):.1f} deg mean, {math.degrees(top):.1f} max"
+        )
+    return " | ".join(parts)
+
+
 def progress_line(
     logger: MetricLogger,
     iteration: int,
@@ -90,23 +128,33 @@ def progress_line(
     global_step: int,
     sps: float,
     train_episodes: int,
+    nonfinite: tuple[int, int] = (0, 0),
 ) -> str:
-    """One compact stdout line per iteration (the latest value of each headline metric)."""
+    """One compact stdout line per iteration (the latest value of each headline metric).
+
+    `nonfinite` is `(envs this iteration, envs in total)` of the non-finite-env guard; it is only
+    shown when the total is positive. The `hold a/b` field (holder / rotator grasp rate over the
+    rollout) only appears for envs that publish those diagnostics.
+    """
     entropy = [
         format_value(logger.get(f"losses/{r}/entropy"), ".2f") for r in ("agent_a", "agent_b")
     ]
     kl = [format_value(logger.get(f"losses/{r}/approx_kl"), ".3f") for r in ("agent_a", "agent_b")]
-    return " | ".join(
-        [
-            f"iter {iteration}/{num_iterations}",
-            f"step {global_step}",
-            f"sps {sps:.0f}",
-            f"ret {format_value(logger.get('train/return'))}",
-            f"succ {format_value(logger.get('train/success_once'), '.3f')} (n={train_episodes})",
-            f"ent a/b {entropy[0]}/{entropy[1]}",
-            f"kl a/b {kl[0]}/{kl[1]}",
-            f"lr {format_value(logger.get('charts/learning_rate'), '.2e')}",
-            f"eval_succ {format_value(logger.get('eval/success_once'), '.3f')}",
-            f"eval_ret {format_value(logger.get('eval/return'))}",
-        ]
-    )
+    fields = [
+        f"iter {iteration}/{num_iterations}",
+        f"step {global_step}",
+        f"sps {sps:.0f}",
+        f"ret {format_value(logger.get('train/return'))}",
+        f"succ {format_value(logger.get('train/success_once'), '.3f')} (n={train_episodes})",
+        f"ent a/b {entropy[0]}/{entropy[1]}",
+        f"kl a/b {kl[0]}/{kl[1]}",
+        f"lr {format_value(logger.get('charts/learning_rate'), '.2e')}",
+        f"eval_succ {format_value(logger.get('eval/success_once'), '.3f')}",
+        f"eval_ret {format_value(logger.get('eval/return'))}",
+    ]
+    hold = [logger.get("diag/holder_grasp"), logger.get("diag/rotator_grasp")]
+    if all(v is not None for v in hold):
+        fields.insert(5, f"hold a/b {hold[0]:.2f}/{hold[1]:.2f}")
+    if nonfinite[1] > 0:
+        fields.append(f"NONFINITE {nonfinite[0]} (total {nonfinite[1]})")
+    return " | ".join(fields)
