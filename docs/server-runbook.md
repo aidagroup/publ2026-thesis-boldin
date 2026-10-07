@@ -380,6 +380,133 @@ saves a full-state checkpoint periodically (`--checkpoint-freq`, default 20 iter
 If a notebook is more convenient than a terminal for reading, `!tail -40
 runs/<name>/stdout.log` in a cell is fine (reading only; never start the run there).
 
+#### FaceTurn: demos → BC → IPPO fine-tune
+
+Why: IPPO from scratch on `FaceTurn-v0` never grasps anything (10M-step run: `ever hold 0.00
+rot 0.00`; the policies only learn to hover near the cube). A grasp needs a sustained wide
+gripper opening during a precise approach and then a close, which Gaussian exploration does not
+find. So both policies are pretrained by behaviour cloning on demonstrations of the scripted
+expert (`callosum/experts/face_turn_expert.py`, the strategy of `scripts/probe_face_turn.py`),
+then fine-tuned with PPO. Use the same pipeline for every `--partner-obs` mode (run BC and the
+fine-tune with the same `--partner-obs`).
+
+The expert runs under the training controller: `pd_joint_delta_pos` (the delta is added to the
+*current* joint position, so a joint moves at most about 0.02 rad per step), the registered
+400-step episode, `obs_mode="state"`, `reward_mode="normalized_dense"`. On the Mac CPU sim it
+succeeds in 40/40 seeds, first success at step 294 to 361 (mean about 310), i.e. it needs
+about 300 of the 400 steps; a learned policy therefore has little slack.
+
+```bash
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+bash scripts/update_server.sh                  # code and venv up to date (not while a job runs)
+
+# 0. The expert under the training controller on the GPU (exit 0 = success in every env).
+uv run python scripts/probe_face_turn.py --control delta --overlap
+
+# 1. Collect demonstrations: 256 envs per reset, 2 resets (seeds 0 and 1); successful episodes
+#    only, cut at the first success. --action-noise 0.1 perturbs the executed arm actions
+#    (DART) and records the clean expert action as the label, so the policy sees recovery
+#    states. Per-env IK runs in a Python loop: expect minutes per batch.
+mkdir -p runs/demos
+uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --action-noise 0.1 \
+    --out runs/demos/faceturn_a.pt
+```
+
+Read the summary: `attempted N episodes, successful M (..%)` and the first-success step
+distribution. Reference values from the Mac CPU sim (one env per reset): clean expert 120/120
+successful, first success at step 290 to 364 (median 310); with `--action-noise 0.1` 385/400
+(96%; one of the failures is an unreachable cube placement, reported as "IK failure" and
+skipped), median 325, max 393; with 0.2 only 8/10 (up to 376 steps), so do not go above 0.1.
+If many envs fail on the GPU, look at `scripts/probe_face_turn.py --control delta --overlap`
+first (contact behaviour on the GPU backend is unverified). Several hundred successful
+episodes are a sensible target (400 episodes are about 125 000 transitions).
+
+```bash
+# 2. Behaviour cloning (needs no simulator; the demo file carries the observation layout).
+#    300 epochs on 120 demos took 2.5 min on a Mac CPU; with CUDA it is faster.
+NAME=bc_full; mkdir -p runs/$NAME
+setsid nohup uv run python -m callosum.training.bc --demos runs/demos/faceturn_a.pt \
+    --partner-obs full --exp-name $NAME --epochs 100 > runs/$NAME/stdout.log 2>&1 < /dev/null &
+
+# 3. Judge the BC policy alone (deterministic, no training): 16 envs x 4 rounds = 64 episodes.
+uv run python -m callosum.training.ippo --eval-only --checkpoint runs/$NAME/bc.pt \
+    --partner-obs full --eval-repeats 4 --exp-name ${NAME}_eval
+```
+
+BC prints train and validation numbers every 10 epochs: per agent `act` (actor MSE, expert
+actions are in [-1, 1]; about 0.001 holder and 0.006 rotator is good), `grip` (share of correct
+gripper signs, about 1.0) and `crit` (critic RMSE in return units; the returns have std about
+25, so about 1 is good). Train and validation should stay close (held-out whole episodes). It
+writes `runs/$NAME/bc.pt` (a weights-only checkpoint that also stores `partner_obs` and the
+input fields; `ippo` refuses a mismatching `--partner-obs`), `config.json` and `bc_log.json`.
+
+`--eval-only` prints `success_once`, the grasp rates and the "ever" shares, and writes
+`runs/${NAME}_eval/eval.json`. What to look at: `ever hold` (the holder grasped the body at least
+once in the episode) must be near 1.00, `ever rot` and `ever both` clearly above 0, the face
+angle max well above 0 degrees. The BC policy alone is slower and less precise than the expert
+(it closes the gripper a little early or late at the phase changes), so a low success rate is
+expected. Mac CPU sim, 20 episodes each, 100 epochs: BC on 400 clean demos gave `success_once
+0.00`, `ever hold 1.00 rot 0.10 both 0.10`, face max 32 degrees; BC on 400 demos collected with
+`--action-noise 0.1` gave `success_once 0.20`, `ever hold 1.00 rot 0.60 both 0.60`, face max 90
+degrees (against `ever hold 0.00` for IPPO from scratch). That is why the noisy demos are the
+recommended ones. If `ever hold` is not near 1, fix the demos / BC before spending GPU hours
+on PPO.
+
+```bash
+# 4. IPPO fine-tune, detached, restartable. The same command is the restart command: a run with
+#    runs/$NAME/latest.pt is continued with --resume (stdout appended), otherwise it starts.
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+NAME=faceturn_bc_s1; mkdir -p runs/$NAME
+setsid nohup bash -c '
+if [ -f runs/'$NAME'/latest.pt ]; then
+  uv run python -m callosum.training.ippo --resume runs/'$NAME' >> runs/'$NAME'/stdout.log 2>&1
+else
+  uv run python -m callosum.training.ippo --env-id FaceTurn-v0 --seed 1 --exp-name '$NAME' \
+      --total-timesteps 10000000 --partner-obs full \
+      --checkpoint runs/bc_full/bc.pt --critic-warmup-iters 10 \
+      --demos runs/demos/faceturn_a.pt --bc-coef 1.0 --bc-decay-iters 100 \
+      --learning-rate 1e-4 > runs/'$NAME'/stdout.log 2>&1
+fi' > /dev/null 2>&1 < /dev/null &
+tail -f runs/$NAME/stdout.log
+```
+
+What the flags do: `--checkpoint` warm-starts both actors and critics from BC (log-std -1.6,
+std 0.2, optimizer and LR schedule start fresh); `--critic-warmup-iters 10` updates only the
+critics for the first 10 iterations (the BC critic does not know the noisy on-policy returns
+yet, so early advantages would push the cloned actor around at random); `--demos --bc-coef
+--bc-decay-iters` add a DAPG-style auxiliary loss `bc_coef * mse(actor_mean(demo_obs),
+demo_action)` to every PPO minibatch step, decaying linearly to 0 over 100 iterations; the
+lower `--learning-rate 1e-4` keeps PPO from erasing the clone. The warm-up window and the BC
+schedule are functions of the iteration, so `--resume` continues them; `config.json` holds
+the flags (a resumed run needs the demo file at the same path).
+
+Watch (`tail -f runs/$NAME/stdout.log`, TensorBoard):
+
+* the `eval @ iter 0` line is the BC policy under the trainer's evaluation: it should match the
+  `--eval-only` numbers;
+* `hold a/b` (rollout grasp rates) and, in the `eval @ iter` lines, `ever hold / rot / both` and
+  `eval_succ`: they must stay near the BC level during warm-up and the first iterations and then
+  rise; a collapse of `ever hold` to 0 right after the warm-up means PPO is erasing the clone
+  (lower the learning rate, raise `--bc-coef` or `--bc-decay-iters`);
+* `bc coef X loss a/b ...` in the iteration line (TensorBoard: `charts/bc_coef`,
+  `losses/agent_*/bc_loss`): the BC loss grows as PPO moves the policy away from the demos
+  while the coefficient decays; the line shows `critic warm-up` instead during the warm-up;
+* `kl a/b` against `target_kl` 0.1: at the start it can be above it (the update epochs are cut
+  short), which is another sign the learning rate is too high.
+
+Mac CPU smoke of the whole fine-tune path (one env; about 30 s; remove `runs/smoke*` afterwards):
+
+```bash
+PYTHONPATH=. uv run -q --no-project --python 3.12 --with mani-skill==3.0.1 --with torch --with tensorboard \
+    python -m callosum.training.ippo --sim-backend cpu --num-steps 20 --num-minibatches 4 \
+    --total-timesteps 800 --eval-freq 10 --checkpoint runs/bc_full/bc.pt \
+    --critic-warmup-iters 2 --demos runs/demos/faceturn_a.pt --bc-coef 1.0 --bc-decay-iters 5 \
+    --exp-name smoke_ft
+```
+
+Unverified on the GPU server (everything above was run on the Mac CPU sim only): the expert and
+`collect_demos.py` with many envs, BC on CUDA, and the fine-tune loop at scale.
+
 ### 4. Watching and collecting results
 
 Checkpoints and TensorBoard logs live under `runs/` (→ `~/callosum-runs`) and are

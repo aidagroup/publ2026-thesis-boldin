@@ -7,7 +7,10 @@ counters. `ippo --resume <run dir>` restores all of it with `load_training_state
 at any point continues as if it had not been interrupted (the simulator state itself cannot be
 saved; the trainer re-seeds the env resets instead). Format 1 (weights, config and counters only)
 is still read: it is enough for a weights-only warm start (`--checkpoint`, `load_agent_weights`)
-but not for a resume.
+but not for a resume. The BC pretraining (`callosum.training.bc`) writes format 1 too
+(`save_weights_checkpoint`), with the per-agent input widths and field names added;
+`check_warm_start_compat` compares those and `partner_obs` with the trainer's before the weights
+are loaded, so a checkpoint made for other policy inputs fails loudly.
 
 Files are a few MB (two small MLPs plus Adam's two moments) and are written atomically, so a kill
 mid-write never leaves a corrupt `latest.pt`. Loading uses `weights_only=True`, so a checkpoint
@@ -84,6 +87,73 @@ def save_checkpoint(
     tmp = path.with_name(path.name + ".tmp")
     torch.save(payload, tmp)
     os.replace(tmp, path)
+
+
+def save_weights_checkpoint(
+    path: Path,
+    agents: list[nn.Module],
+    config: dict[str, Any],
+    obs_dims: list[int],
+    agent_uids: list[str],
+    obs_fields: list[list[str]],
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Write a weights-only checkpoint (format 1) to `path` (atomically).
+
+    This is what `callosum.training.bc` produces: both agents' weights plus the config it was made
+    with (a plain dict, must hold `partner_obs`), the per-agent input widths and field names, and
+    free-form `extra` (training statistics). `ippo --checkpoint` loads it as a warm start; it
+    holds no optimizer state, so it cannot be resumed.
+    """
+    payload: dict[str, Any] = {
+        "format": 1,
+        "agents": {name: agent.state_dict() for name, agent in zip(AGENT_NAMES, agents)},
+        "config": dict(config),
+        "obs_dims": list(obs_dims),
+        "obs_fields": [list(f) for f in obs_fields],
+        "agent_uids": list(agent_uids),
+        "iteration": 0,
+        "global_step": 0,
+        "eval": {},
+        "extra": dict(extra or {}),
+    }
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
+
+
+def check_warm_start_compat(
+    payload: dict[str, Any],
+    obs_dims: list[int],
+    obs_fields: list[list[str]] | None = None,
+    partner_obs: str | None = None,
+) -> None:
+    """Raise `ValueError` if a checkpoint's policies do not take the inputs the trainer builds.
+
+    Compares the per-agent input widths (always present), the input field names (only if both
+    sides have them: BC checkpoints store them) and `partner_obs` (if the checkpoint's config has
+    it). A mismatch means the weights were trained on different inputs, e.g. another
+    `--partner-obs` or a changed observation layout, and would silently feed garbage otherwise.
+    """
+    saved_dims = payload.get("obs_dims")
+    if saved_dims is not None and list(saved_dims) != list(obs_dims):
+        raise ValueError(
+            f"checkpoint policies take inputs of width {list(saved_dims)} but the env gives "
+            f"{list(obs_dims)} (different --partner-obs or observation layout?)"
+        )
+    saved_fields = payload.get("obs_fields")
+    if (
+        obs_fields is not None
+        and saved_fields is not None
+        and [list(f) for f in saved_fields] != [list(f) for f in obs_fields]
+    ):
+        raise ValueError("checkpoint input fields differ from the env's per-agent inputs")
+    saved_partner = payload.get("config", {}).get("partner_obs")
+    if partner_obs is not None and saved_partner is not None and saved_partner != partner_obs:
+        raise ValueError(
+            f"checkpoint was made with partner_obs={saved_partner!r}, this run uses {partner_obs!r}"
+        )
 
 
 def load_checkpoint(path: str | Path, map_location: torch.device | str = "cpu") -> dict[str, Any]:

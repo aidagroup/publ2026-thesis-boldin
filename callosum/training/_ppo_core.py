@@ -109,32 +109,72 @@ def compute_gae(
     return advantages, advantages + values
 
 
+def bc_mse(agent: ActorCritic, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    """Behaviour-cloning loss: mean squared error between the policy mean and the actions."""
+    return ((agent.actor_mean(obs) - actions) ** 2).mean()
+
+
+def _value_loss(
+    new_value: torch.Tensor, batch: dict[str, torch.Tensor], idx: torch.Tensor, cfg: IPPOConfig
+) -> torch.Tensor:
+    """The (optionally clipped) value loss of one minibatch, as in ManiSkill's PPO."""
+    returns = batch["returns"][idx]
+    if cfg.clip_vloss:
+        old_value = batch["values"][idx]
+        clipped = old_value + torch.clamp(new_value - old_value, -cfg.clip_coef, cfg.clip_coef)
+        return 0.5 * torch.max((new_value - returns) ** 2, (clipped - returns) ** 2).mean()
+    return 0.5 * ((new_value - returns) ** 2).mean()
+
+
 def ppo_update(
     agent: ActorCritic,
     optimizer: torch.optim.Optimizer,
     batch: dict[str, torch.Tensor],
     cfg: IPPOConfig,
+    *,
+    update_actor: bool = True,
+    demo_batch: dict[str, torch.Tensor] | None = None,
+    bc_coef: float = 0.0,
 ) -> dict[str, float]:
     """Clipped-PPO update of one agent over `cfg.update_epochs` epochs of shuffled minibatches.
 
     Args:
         batch: flattened rollout of this agent with keys `obs`, `actions`, `logprobs`,
             `advantages`, `returns`, `values` (first dim = `num_envs * num_steps`).
+        update_actor: `False` trains only the critic (the critic warm-up): the policy loss is
+            not computed and the actor's parameters (mean network and log-std) get no gradient,
+            so Adam leaves them untouched.
+        demo_batch: this agent's demonstrations, keys `obs` `(N, obs_dim)` and `actions`
+            `(N, action_dim)`; with `bc_coef > 0` every minibatch step adds
+            `bc_coef * mse(actor_mean(demo_obs), demo_actions)` on `cfg.bc_batch_size` random
+            demo transitions to the loss (DAPG-style auxiliary BC loss, see `IPPOConfig.bc_coef`).
+        bc_coef: coefficient of that loss for this iteration (`configs.ippo.bc_coef_at`).
 
     Returns:
         Scalar metrics of the last minibatch (plus the mean clip fraction): `policy_loss`,
-        `value_loss`, `entropy`, `old_approx_kl`, `approx_kl`, `clipfrac`, `explained_variance`.
+        `value_loss`, `entropy`, `old_approx_kl`, `approx_kl`, `clipfrac`, `explained_variance`,
+        and `bc_loss` (mean over the minibatches, 0 when the BC loss is off).
     """
     size = batch["obs"].shape[0]
     device = batch["obs"].device
     clipfracs: list[float] = []
     zero = torch.zeros((), device=device)
     pg_loss = v_loss = entropy_loss = old_approx_kl = approx_kl = zero
+    use_bc = update_actor and demo_batch is not None and bc_coef > 0
+    bc_losses: list[float] = []
     stop = False
     for _ in range(cfg.update_epochs):
         permutation = torch.randperm(size, device=device)
         for start in range(0, size, cfg.minibatch_size):
             idx = permutation[start : start + cfg.minibatch_size]
+            if not update_actor:
+                new_value = agent.get_value(batch["obs"][idx]).view(-1)
+                v_loss = _value_loss(new_value, batch, idx, cfg)
+                optimizer.zero_grad(set_to_none=True)
+                (cfg.vf_coef * v_loss).backward()
+                nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
+                optimizer.step()
+                continue
             _, new_logprob, entropy, new_value = agent.get_action_and_value(
                 batch["obs"][idx], batch["actions"][idx]
             )
@@ -157,22 +197,18 @@ def ppo_update(
                 -advantages * torch.clamp(ratio, 1 - cfg.clip_coef, 1 + cfg.clip_coef),
             ).mean()
 
-            new_value = new_value.view(-1)
-            returns = batch["returns"][idx]
-            if cfg.clip_vloss:
-                old_value = batch["values"][idx]
-                clipped = old_value + torch.clamp(
-                    new_value - old_value, -cfg.clip_coef, cfg.clip_coef
-                )
-                v_loss = (
-                    0.5 * torch.max((new_value - returns) ** 2, (clipped - returns) ** 2).mean()
-                )
-            else:
-                v_loss = 0.5 * ((new_value - returns) ** 2).mean()
+            v_loss = _value_loss(new_value.view(-1), batch, idx, cfg)
 
             entropy_loss = entropy.mean()
             loss = pg_loss - cfg.ent_coef * entropy_loss + cfg.vf_coef * v_loss
-            optimizer.zero_grad()
+            if use_bc:
+                pick = torch.randint(
+                    demo_batch["obs"].shape[0], (cfg.bc_batch_size,), device=device
+                )
+                bc_loss = bc_mse(agent, demo_batch["obs"][pick], demo_batch["actions"][pick])
+                loss = loss + bc_coef * bc_loss
+                bc_losses.append(bc_loss.item())
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
             optimizer.step()
@@ -190,4 +226,5 @@ def ppo_update(
         "approx_kl": approx_kl.item(),
         "clipfrac": float(np.mean(clipfracs)) if clipfracs else 0.0,
         "explained_variance": explained_variance,
+        "bc_loss": float(np.mean(bc_losses)) if bc_losses else 0.0,
     }

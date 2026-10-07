@@ -31,6 +31,15 @@ rollout/GAE/update structure, `ManiSkillVectorEnv` with partial resets and `reco
   directory, LR schedule position, optimizer state, counters, best-eval tracking); the simulator
   state cannot be saved, so the envs are reset with seeds derived from the resumed iteration.
   `--checkpoint <file>` is the weights-only warm start of a new run.
+* Fine-tuning from demonstrations (IPPO from scratch never finds a grasp on FaceTurn-v0, see
+  `callosum.training.bc`): `--checkpoint <bc.pt>` warm-starts from a BC checkpoint (input widths,
+  field names and `partner_obs` are checked), `--critic-warmup-iters K` updates only the critics
+  for the first K iterations (actors frozen), and `--demos <file> --bc-coef C --bc-decay-iters N`
+  add a DAPG-style auxiliary loss `C * mse(actor_mean(demo_obs), demo_action)` to every PPO
+  minibatch step, decaying linearly to 0 over N iterations (`bc_loss` / `charts/bc_coef` are
+  logged). Both schedules depend only on the iteration, so `--resume` continues them.
+  `--eval-only --checkpoint <file> [--eval-repeats N]` evaluates a checkpoint's deterministic
+  policies without training and writes `eval.json` (how a BC policy is judged).
 
 Envs are always created with `obs_mode="state", render_backend="none"`: the lab server only has a
 software Vulkan device, and the default render device cannot be created there.
@@ -55,6 +64,8 @@ from torch.utils.tensorboard import SummaryWriter
 import callosum.envs.face_turn  # noqa: F401  (registers TwoSO101-v0 and FaceTurn-v0)
 from callosum.configs.ippo import (
     IPPOConfig,
+    bc_coef_at,
+    critic_warmup_active,
     env_reset_seeds,
     learning_rate_at,
     parse_args,
@@ -64,11 +75,13 @@ from callosum.envs._sim_compat import prepare_sim_backend
 from callosum.training._agent_obs import AgentObsBuilder
 from callosum.training._checkpoint import (
     TrainingState,
+    check_warm_start_compat,
     load_agent_weights,
     load_checkpoint,
     load_training_state,
     save_checkpoint,
 )
+from callosum.training._demos import agent_demo_tensors, check_layout_matches, load_demos
 from callosum.training._diag import DiagStats
 from callosum.training._metrics import (
     EpisodeStats,
@@ -154,15 +167,17 @@ def evaluate(
     action_bounds: list[tuple[torch.Tensor, torch.Tensor]],
     num_steps: int,
     tracker: NonFiniteTracker | None = None,
+    seed: int | None = None,
 ) -> EvalResult:
     """Run `num_steps` deterministic steps in the eval envs; metric means over finished episodes.
 
     An env whose observation or reward goes non-finite is reset (so the policy never sees NaN)
-    and excluded from the statistics for the rest of the evaluation.
+    and excluded from the statistics for the rest of the evaluation. `seed` seeds the reset of the
+    eval envs (`None`: continue the envs' own random stream).
     """
     uids = builder.agent_uids
     tracker = tracker or NonFiniteTracker()
-    obs, _ = eval_envs.reset()
+    obs, _ = eval_envs.reset(seed=seed)
     stats = EpisodeStats()
     diag = DiagStats(eval_envs.num_envs, eval_envs.device)
     dead: torch.Tensor | None = None  # envs dropped from the statistics
@@ -202,6 +217,8 @@ def run(cfg: IPPOConfig) -> Path:
     """Train (or, with `cfg.resume`, continue a run); returns the run directory."""
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
+    if cfg.eval_only:
+        return run_eval_only(cfg)
 
     resume_payload = None
     if cfg.resume:
@@ -233,6 +250,101 @@ def run(cfg: IPPOConfig) -> Path:
         eval_envs.close()
 
 
+def _action_info(
+    envs: ManiSkillVectorEnv,
+) -> tuple[tuple[str, str], list[tuple[torch.Tensor, torch.Tensor]], list[int]]:
+    """`(agent uids, per-agent action bounds on the env's device, per-agent action widths)`."""
+    device = envs.device
+    uids = agent_uids_of(envs)
+    for uid in uids:
+        space = envs.single_action_space[uid]
+        assert isinstance(space, gym.spaces.Box), "only continuous actions are supported"
+    action_bounds = [
+        (
+            torch.as_tensor(envs.single_action_space[uid].low, device=device),
+            torch.as_tensor(envs.single_action_space[uid].high, device=device),
+        )
+        for uid in uids
+    ]
+    action_dims = [int(envs.single_action_space[uid].shape[0]) for uid in uids]
+    return uids, action_bounds, action_dims
+
+
+def run_eval_only(cfg: IPPOConfig) -> Path:
+    """Evaluate the deterministic policies of `cfg.checkpoint` (no training); returns the run dir.
+
+    Runs `cfg.eval_repeats` evaluations of the eval envs (reset seeds `seed + 1 + k`), prints the
+    metrics averaged over all finished episodes together with the grasp diagnostics, and writes
+    them to `<run dir>/eval.json`. This is how a BC checkpoint is judged before any PPO.
+    """
+    run_name = cfg.exp_name or f"{cfg.env_id}__eval__{cfg.seed}__{int(time.time())}"
+    run_dir = Path(cfg.runs_dir) / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    eval_envs = make_envs(cfg, cfg.num_eval_envs, ignore_terminations=True)
+    try:
+        device = eval_envs.device
+        _, action_bounds, action_dims = _action_info(eval_envs)
+        env_episode_steps = int(gym_utils.find_max_episode_steps_value(eval_envs._env))
+        num_eval_steps = resolve_episode_length(cfg, env_episode_steps)
+        obs, _ = eval_envs.reset(seed=cfg.seed + 1)
+        builder = make_obs_builder(eval_envs, obs, cfg)
+        agents = [ActorCritic(d, a).to(device) for d, a in zip(builder.obs_dims, action_dims)]
+        payload = load_checkpoint(cfg.checkpoint, map_location=device)
+        check_warm_start_compat(payload, builder.obs_dims, builder.fields, cfg.partner_obs)
+        load_agent_weights(payload, agents)
+        print(
+            f"eval only: {cfg.checkpoint} | env {cfg.env_id} | sim {cfg.sim_backend} on {device} "
+            f"| partner_obs {cfg.partner_obs} | {cfg.eval_repeats} x {cfg.num_eval_envs} episodes "
+            f"of {num_eval_steps} steps"
+        )
+        tracker = NonFiniteTracker()
+        sums: dict[str, float] = {}
+        episodes = 0
+        diag_sums: dict[str, float] = {}
+        diag_maxes: dict[str, float] = {}
+        nonfinite = 0
+        for k in range(cfg.eval_repeats):
+            result = evaluate(
+                agents, builder, eval_envs, action_bounds, num_eval_steps, tracker, cfg.seed + 1 + k
+            )
+            for key, value in result.metrics.items():
+                sums[key] = sums.get(key, 0.0) + value * result.episodes
+            episodes += result.episodes
+            for key, value in result.diag_means.items():
+                diag_sums[key] = diag_sums.get(key, 0.0) + value / cfg.eval_repeats
+            for key, value in result.diag_maxes.items():
+                diag_maxes[key] = max(diag_maxes.get(key, value), value)
+            nonfinite += result.nonfinite
+            print(
+                f"  round {k + 1}/{cfg.eval_repeats}: {result.episodes} episodes | "
+                + " ".join(f"{m}={v:.3f}" for m, v in sorted(result.metrics.items())),
+                flush=True,
+            )
+        metrics = {key: total / episodes for key, total in sums.items()} if episodes else {}
+        shown = " ".join(f"{k}={v:.3f}" for k, v in sorted(metrics.items()))
+        print(f"eval only total: {episodes} episodes | {shown}")
+        print(eval_diag_summary(diag_sums, diag_maxes))
+        if nonfinite:
+            print(f"NONFINITE {nonfinite} env(s) dropped")
+        (run_dir / "eval.json").write_text(
+            json.dumps(
+                {
+                    "checkpoint": cfg.checkpoint,
+                    "episodes": episodes,
+                    "metrics": metrics,
+                    "diag_means": diag_sums,
+                    "diag_maxes": diag_maxes,
+                    "nonfinite_envs": nonfinite,
+                    "seeds": [cfg.seed + 1 + k for k in range(cfg.eval_repeats)],
+                },
+                indent=2,
+            )
+        )
+    finally:
+        eval_envs.close()
+    return run_dir
+
+
 def _best_score_of(run_dir: Path) -> tuple[float, float] | None:
     """The best-eval score stored in `best.pt` (it can be newer than the one in `latest.pt`)."""
     path = run_dir / "best.pt"
@@ -250,18 +362,7 @@ def _train(
     resume_payload: dict | None = None,
 ) -> Path:
     device = envs.device
-    uids = agent_uids_of(envs)
-    for uid in uids:
-        space = envs.single_action_space[uid]
-        assert isinstance(space, gym.spaces.Box), "only continuous actions are supported"
-    action_bounds = [
-        (
-            torch.as_tensor(envs.single_action_space[uid].low, device=device),
-            torch.as_tensor(envs.single_action_space[uid].high, device=device),
-        )
-        for uid in uids
-    ]
-    action_dims = [int(envs.single_action_space[uid].shape[0]) for uid in uids]
+    uids, action_bounds, action_dims = _action_info(envs)
 
     env_episode_steps = int(gym_utils.find_max_episode_steps_value(envs._env))
     num_eval_steps = resolve_episode_length(cfg, env_episode_steps)
@@ -293,8 +394,29 @@ def _train(
         ):
             resumed.best_score = best_on_disk
     elif cfg.checkpoint:
-        load_agent_weights(load_checkpoint(cfg.checkpoint, map_location=device), agents)
+        payload = load_checkpoint(cfg.checkpoint, map_location=device)
+        check_warm_start_compat(payload, builder.obs_dims, builder.fields, cfg.partner_obs)
+        load_agent_weights(payload, agents)
         print(f"warm start from {cfg.checkpoint}")
+
+    # Demonstrations for the auxiliary BC loss (cut with the same per-agent input rule as the
+    # rollouts; the file's layout must be the env's). On resume the file is read again: it is
+    # named in the run's config.json and does not change.
+    demo_batches: list[dict[str, torch.Tensor] | None] = [None] * len(agents)
+    if cfg.demos and cfg.bc_coef > 0:
+        demo_file = load_demos(cfg.demos)
+        check_layout_matches(demo_file["meta"], builder.layout)
+        demo_obs, demo_actions = agent_demo_tensors(demo_file, builder)
+        demo_batches = [
+            {"obs": o.to(device), "actions": a.to(device)}
+            for o, a in zip(demo_obs, demo_actions, strict=True)
+        ]
+        print(
+            f"auxiliary BC loss: {demo_batches[0]['obs'].shape[0]} demo transitions from "
+            f"{cfg.demos}, coef {cfg.bc_coef} decaying to 0 over {cfg.bc_decay_iters} iterations"
+        )
+    if cfg.critic_warmup_iters > 0:
+        print(f"critic warm-up: actors frozen for the first {cfg.critic_warmup_iters} iterations")
 
     config_dict = dataclasses.asdict(cfg)
     config_dict.update(
@@ -432,6 +554,8 @@ def _train(
         lr = learning_rate_at(cfg, iteration)
         for opt in optimizers:
             opt.param_groups[0]["lr"] = lr
+        warmup = critic_warmup_active(cfg, iteration)
+        bc_coef = bc_coef_at(cfg, iteration)
 
         # --- Rollout ---------------------------------------------------------------------
         rollout_start = time.time()
@@ -519,7 +643,15 @@ def _train(
                 "values": value_buf[i].reshape(-1),
             }
             agent.train()
-            metrics = ppo_update(agent, optimizers[i], batch, cfg)
+            metrics = ppo_update(
+                agent,
+                optimizers[i],
+                batch,
+                cfg,
+                update_actor=not warmup,
+                demo_batch=demo_batches[i],
+                bc_coef=bc_coef,
+            )
             if not all(np.isfinite(metrics[k]) for k in ("policy_loss", "value_loss", "entropy")):
                 raise FloatingPointError(
                     f"{AGENT_NAMES[i]}: non-finite loss at iteration {iteration}: {metrics}"
@@ -543,21 +675,26 @@ def _train(
         logger.log("train/nonfinite_envs_total", tracker.totals["train"], global_step)
         logger.log("rollout/step_reward", rewards.mean(), global_step)
         logger.log("charts/learning_rate", lr, global_step)
+        logger.log("charts/bc_coef", bc_coef, global_step)
+        logger.log("charts/critic_warmup", float(warmup), global_step)
         logger.log("charts/SPS", sps, global_step)
         logger.log("time/rollout_time", rollout_time, global_step)
         logger.log("time/update_time", update_time, global_step)
-        print(
-            progress_line(
-                logger,
-                iteration,
-                cfg.num_iterations,
-                global_step,
-                sps,
-                train_stats.num_episodes,
-                nonfinite=(iteration_nonfinite, tracker.totals["train"]),
-            ),
-            flush=True,
+        line = progress_line(
+            logger,
+            iteration,
+            cfg.num_iterations,
+            global_step,
+            sps,
+            train_stats.num_episodes,
+            nonfinite=(iteration_nonfinite, tracker.totals["train"]),
         )
+        if warmup:
+            line += " | critic warm-up"
+        if bc_coef > 0 and not warmup:  # the BC loss is idle while the actors are frozen
+            bc_losses = [logger.get(f"losses/{name}/bc_loss") for name in AGENT_NAMES]
+            line += f" | bc coef {bc_coef:.3f} loss a/b {bc_losses[0]:.4f}/{bc_losses[1]:.4f}"
+        print(line, flush=True)
 
         last = iteration == cfg.num_iterations or stop_requested
         if iteration % cfg.eval_freq == 0 or last:

@@ -9,12 +9,11 @@ field gets an argparse flag instead (`--num-envs`, `--no-anneal-lr`, ...).
 import argparse
 import dataclasses
 import json
-import types
-import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from callosum.configs._cli import build_dataclass_parser
 from callosum.envs._partner_obs import PARTNER_OBS_MODES, validate_partner_obs
 from callosum.envs._sim_compat import is_cpu_backend
 
@@ -100,6 +99,32 @@ class IPPOConfig:
     target_kl: float | None = 0.1
     reward_scale: float = 1.0
 
+    # --- Fine-tuning from demonstrations (see callosum.training.bc) ----------------------------
+    critic_warmup_iters: int = 0
+    """For the first this many iterations only the critics are updated and the actors stay frozen.
+    After a BC warm start (`checkpoint`) the critic does not know the noisy on-policy returns yet,
+    and PPO advantages computed with it would push the BC policy around at random; 0 = off (the
+    plain PPO behaviour). The window is by iteration, so `resume` continues it where it stopped."""
+    demos: str | None = None
+    """Demo file (`scripts/collect_demos.py`) for the auxiliary BC loss (`bc_coef`)."""
+    bc_coef: float = 0.0
+    """DAPG-style auxiliary loss: `bc_coef * mean((actor_mean(demo_obs) - demo_action)^2)` on a
+    demo minibatch, added to every PPO minibatch step's actor loss. The coefficient decays
+    linearly to 0 over `bc_decay_iters` iterations (`bc_coef_at`); 0 = off. Needs `demos`."""
+    bc_decay_iters: int = 100
+    """Iterations over which `bc_coef` decays linearly to 0 (iteration `k` uses
+    `bc_coef * max(0, 1 - (k - 1) / bc_decay_iters)`)."""
+    bc_batch_size: int = 256
+    """Demo transitions per BC-loss minibatch (one demo minibatch per PPO minibatch step)."""
+
+    # --- Evaluation only -----------------------------------------------------------------
+    eval_only: bool = False
+    """Do not train: load `checkpoint`, evaluate its deterministic policies on the eval envs
+    `eval_repeats` times (reset seeds `seed + 1 + k`), print and save the summary to
+    `<runs_dir>/<exp_name>/eval.json`. The key number of a BC checkpoint."""
+    eval_repeats: int = 1
+    """Number of evaluation rounds of `eval_only` (each: `num_eval_envs` episodes)."""
+
     def __post_init__(self) -> None:
         validate_partner_obs(self.partner_obs)
         if self.sim_backend not in SIM_BACKENDS:
@@ -123,24 +148,36 @@ class IPPOConfig:
             raise ValueError("gamma must be in (0, 1] and gae_lambda in [0, 1]")
         if self.num_minibatches < 1 or self.update_epochs < 1:
             raise ValueError("num_minibatches and update_epochs must be >= 1")
-        if self.minibatch_size < 2:
-            raise ValueError(
-                f"minibatch_size = num_envs * num_steps // num_minibatches = {self.minibatch_size}"
-                " must be >= 2 (advantage normalisation needs more than one sample)"
-            )
-        if self.batch_size % self.num_minibatches != 0:
-            valid = [n for n in range(1, self.batch_size // 2 + 1) if self.batch_size % n == 0]
-            raise ValueError(
-                f"batch size num_envs * num_steps = {self.num_envs} * {self.num_steps} = "
-                f"{self.batch_size} must be divisible by num_minibatches ({self.num_minibatches}); "
-                "otherwise the last minibatch is smaller (possibly a single sample, whose "
-                f"advantage std is undefined). Valid num_minibatches: {valid}"
-            )
-        if self.total_timesteps < self.batch_size:
-            raise ValueError(
-                f"total_timesteps ({self.total_timesteps}) is smaller than one batch "
-                f"({self.batch_size} = num_envs * num_steps)"
-            )
+        if self.critic_warmup_iters < 0 or self.bc_coef < 0:
+            raise ValueError("critic_warmup_iters and bc_coef must be >= 0")
+        if self.bc_decay_iters < 1 or self.bc_batch_size < 1 or self.eval_repeats < 1:
+            raise ValueError("bc_decay_iters, bc_batch_size and eval_repeats must be >= 1")
+        if self.bc_coef > 0 and not self.demos:
+            raise ValueError("bc_coef > 0 needs demos (--demos <file>)")
+        if self.eval_only and not self.checkpoint:
+            raise ValueError("eval_only needs a checkpoint to evaluate (--checkpoint <file>)")
+        if self.eval_only and self.resume:
+            raise ValueError("eval_only and resume are mutually exclusive")
+        # The batch layout only matters when something is trained.
+        if not self.eval_only:
+            if self.minibatch_size < 2:
+                raise ValueError(
+                    f"minibatch_size = num_envs * num_steps // num_minibatches = {self.minibatch_size}"
+                    " must be >= 2 (advantage normalisation needs more than one sample)"
+                )
+            if self.batch_size % self.num_minibatches != 0:
+                valid = [n for n in range(1, self.batch_size // 2 + 1) if self.batch_size % n == 0]
+                raise ValueError(
+                    f"batch size num_envs * num_steps = {self.num_envs} * {self.num_steps} = "
+                    f"{self.batch_size} must be divisible by num_minibatches ({self.num_minibatches}); "
+                    "otherwise the last minibatch is smaller (possibly a single sample, whose "
+                    f"advantage std is undefined). Valid num_minibatches: {valid}"
+                )
+            if self.total_timesteps < self.batch_size:
+                raise ValueError(
+                    f"total_timesteps ({self.total_timesteps}) is smaller than one batch "
+                    f"({self.batch_size} = num_envs * num_steps)"
+                )
 
     @property
     def batch_size(self) -> int:
@@ -164,6 +201,18 @@ def learning_rate_at(cfg: IPPOConfig, iteration: int) -> float:
     if not cfg.anneal_lr:
         return cfg.learning_rate
     return (1.0 - (iteration - 1.0) / cfg.num_iterations) * cfg.learning_rate
+
+
+def bc_coef_at(cfg: IPPOConfig, iteration: int) -> float:
+    """Coefficient of the auxiliary BC loss in the 1-based PPO `iteration` (0 when it is off)."""
+    if not cfg.demos or cfg.bc_coef <= 0:
+        return 0.0
+    return cfg.bc_coef * max(0.0, 1.0 - (iteration - 1.0) / cfg.bc_decay_iters)
+
+
+def critic_warmup_active(cfg: IPPOConfig, iteration: int) -> bool:
+    """True while the 1-based `iteration` is inside the critic-only warm-up window."""
+    return iteration <= cfg.critic_warmup_iters
 
 
 def clamp_envs_for_cpu_backend(values: dict) -> str | None:
@@ -204,51 +253,13 @@ def resolve_episode_length(cfg: IPPOConfig, env_max_episode_steps: int) -> int:
     return cfg.num_eval_steps
 
 
-def _optional(parse: Callable[[str], object]) -> Callable[[str], object]:
-    """Argparse type that also accepts `none` / `null` for an `X | None` field."""
-
-    def convert(text: str) -> object:
-        return None if text.lower() in ("none", "null") else parse(text)
-
-    convert.__name__ = parse.__name__
-    return convert
-
-
-def _unwrap_optional(annotation: object) -> tuple[type, bool]:
-    """`(X, True)` for `X | None`, `(X, False)` for a plain `X`."""
-    if isinstance(annotation, types.UnionType) or typing.get_origin(annotation) is typing.Union:
-        args = [a for a in typing.get_args(annotation) if a is not type(None)]
-        if len(args) == 1:
-            return args[0], True
-    return annotation, False  # type: ignore[return-value]
-
-
 def build_parser() -> argparse.ArgumentParser:
     """An argparse parser with one flag per `IPPOConfig` field (`--field-name`)."""
-    parser = argparse.ArgumentParser(
-        description="Train two independent PPO policies (IPPO) on a callosum two-arm env.",
-        argument_default=argparse.SUPPRESS,
+    return build_dataclass_parser(
+        IPPOConfig,
+        "Train two independent PPO policies (IPPO) on a callosum two-arm env.",
+        choices={"partner_obs": PARTNER_OBS_MODES, "sim_backend": SIM_BACKENDS},
     )
-    defaults = IPPOConfig()
-    hints = typing.get_type_hints(IPPOConfig)
-    for field in dataclasses.fields(IPPOConfig):
-        flag = "--" + field.name.replace("_", "-")
-        default = getattr(defaults, field.name)
-        kind, optional = _unwrap_optional(hints[field.name])
-        help_text = f"(default: {default})"
-        if kind is bool:
-            parser.add_argument(
-                flag, action=argparse.BooleanOptionalAction, dest=field.name, help=help_text
-            )
-        else:
-            parse = _optional(kind) if optional else kind
-            kwargs = {}
-            if field.name == "partner_obs":
-                kwargs["choices"] = PARTNER_OBS_MODES
-            elif field.name == "sim_backend":
-                kwargs["choices"] = SIM_BACKENDS
-            parser.add_argument(flag, type=parse, dest=field.name, help=help_text, **kwargs)
-    return parser
 
 
 def env_reset_seeds(cfg: IPPOConfig, iteration: int) -> tuple[int, int]:

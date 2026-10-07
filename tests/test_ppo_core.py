@@ -62,7 +62,7 @@ def test_ppo_update_improves_a_trivial_problem() -> None:
     assert last["value_loss"] < first
     assert set(last) == {
         "policy_loss", "value_loss", "entropy", "old_approx_kl", "approx_kl", "clipfrac",
-        "explained_variance",
+        "explained_variance", "bc_loss",
     }  # fmt: skip
 
 

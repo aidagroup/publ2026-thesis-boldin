@@ -33,13 +33,18 @@ _ASSET_DIR = Path(__file__).resolve().parent.parent / "assets" / "so101_parallel
 # Upper limit of `right_clamp` (metres). `left_clamp` mirrors it with the opposite sign.
 GRIPPER_MAX_OPENING = 0.037
 
+# Bound of one `pd_joint_delta_pos` arm action (radians per control step; the action is
+# normalised to [-1, 1] and scaled by this). The delta is added to the *current* joint position
+# (`use_target=False`), not to the previous target.
+ARM_DELTA_LIMIT = 0.05
+
 
 @register_agent()
 class SO101ParallelGripper(BaseAgent):
     """SO-ARM101 (5 revolute joints) + Robonine parallel gripper (2 mirrored prismatic jaws).
 
     Active joint order is `arm_joint_names + gripper_joint_names`. The default controller is
-    `pd_joint_delta_pos`: 5 arm deltas (+-0.05 rad per step) and one *absolute* gripper target,
+    `pd_joint_delta_pos`: 5 arm deltas (+-`ARM_DELTA_LIMIT` rad per step) and one *absolute* gripper target,
     i.e. a 6-D action in [-1, 1] (normalised, as for Panda). The gripper entry maps linearly to
     the opening of `right_clamp` in `[0, GRIPPER_MAX_OPENING]` (-1 closed, +1 fully open), so a
     zero action half-closes the gripper (0.0185 m per jaw). `pd_joint_pos` (absolute arm angles
@@ -101,8 +106,8 @@ class SO101ParallelGripper(BaseAgent):
         # Max delta of 0.05 rad/step, as for the SO-100 (cheap servos, avoid shaking).
         arm_pd_joint_delta_pos = PDJointPosControllerConfig(
             self.arm_joint_names,
-            lower=-0.05,
-            upper=0.05,
+            lower=-ARM_DELTA_LIMIT,
+            upper=ARM_DELTA_LIMIT,
             stiffness=self.arm_stiffness,
             damping=self.arm_damping,
             force_limit=self.arm_force_limit,
