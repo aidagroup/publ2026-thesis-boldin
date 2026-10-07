@@ -20,11 +20,12 @@ class ExpertControlConfig:
     joint position + action * `ARM_DELTA_LIMIT`), closed loop: the action is the remaining
     joint error towards the waypoint, scaled so that the largest joint saturates at +-1 (the
     direction is kept, so the tool still moves on the straight line the waypoints describe). A
-    waypoint counts as reached once every joint of every env is within a tolerance, or the envs
-    that are not are stalled (blocked by contact or a joint limit), or after a timeout. Under this
-    controller (target = current position + action) a steady disturbance leaves a steady-state
-    error, which the integral term (`ki`, `bias_max`) compensates, so the loops end by tolerance
-    and not by timeout.
+    waypoint counts as reached once every joint of the env is within a tolerance, or the env is
+    stalled (blocked by contact or a joint limit), or after a timeout. In delta mode every env
+    runs its own phase state machine (`callosum.experts._phases`): nobody waits for another env.
+    Under this controller (target = current position + action) a steady disturbance leaves a
+    steady-state error, which the integral term (`ki`, `bias_max`) compensates, so the loops end
+    by tolerance and not by timeout.
     """
 
     control: str = "pos"
@@ -60,12 +61,20 @@ class ExpertControlConfig:
     final_timeout: int = 25
     """Steps after which the last waypoint is given up on (a steady-state error under contact or
     at a joint limit can keep the error above `final_tol` forever; added to the travel time)."""
-    stall_steps: int = 4
-    """An env whose worst joint error has not improved by more than `stall_progress` for this many
-    steps is stalled; a reach loop does not wait for stalled envs (it ends once every env is
-    within the tolerance or stalled)."""
+    stall_window: int = 3
+    """Length (steps) of the window of the stall detector. Stall is judged on the mean of the
+    worst joint error over two consecutive windows (so a jittery, e.g. DART-noised, error does
+    not look like progress): an env whose windowed error improved by less than `stall_progress`
+    (plus the noise jitter) is stalled and moves on instead of waiting for its timeout. The
+    earliest verdict therefore comes `2 * stall_window` steps after a target was set."""
     stall_progress: float = 5e-4
-    """Rad of improvement of the worst joint error that counts as progress (see `stall_steps`)."""
+    """Rad of improvement of the windowed worst joint error that counts as progress (see
+    `stall_window`)."""
+    noise_tol_scale: float = 3.0
+    """With `Rig.action_noise > 0` the executed arm action jitters, so the joints jitter around
+    the clean target by about `action_noise * ARM_DELTA_LIMIT * 0.39` rad (`jitter`). The reach
+    tolerances then grow by `noise_tol_scale * jitter` and the stall progress threshold by
+    `jitter`, so the noisy executed action can still meet them. 0 disables the widening."""
     settle_qvel_tol: float = 0.05
     """A settle phase ends early once every joint (gripper jaws included) moves slower than this
     (rad/s or m/s); it never lasts longer than the number of steps the phase asks for."""
@@ -97,13 +106,13 @@ class ExpertControlConfig:
             raise ValueError(f"control must be one of {CONTROL_MODES}, got {self.control!r}")
         if self.max_joint_step <= 0 or self.gain <= 0:
             raise ValueError("max_joint_step and gain must be > 0")
-        for name in ("ki", "bias_max", "joint_limit_margin", "stall_progress"):
+        for name in ("ki", "bias_max", "joint_limit_margin", "stall_progress", "noise_tol_scale"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
         for name in ("waypoint_tol", "approach_tol", "final_tol", "settle_qvel_tol"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be > 0, got {getattr(self, name)}")
-        for name in ("waypoint_timeout", "final_timeout", "stall_steps"):
+        for name in ("waypoint_timeout", "final_timeout", "stall_window"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
         if self.settle_cap < 0:

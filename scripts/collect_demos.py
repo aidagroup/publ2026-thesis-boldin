@@ -11,8 +11,11 @@ training env terminates) and only successful ones are kept unless `--keep-all`.
 
 One batch = one `env.reset(seed=...)` of `--num-envs` envs (GPU: e.g. 256 at once; the CPU sim has
 one env, so use `--num-batches` to loop over seeds). Batch `b` uses reset seed `--seed + b`.
-The printed summary (success rate, first-success step distribution) doubles as the self-check that
-the expert fits into the episode under the training controller.
+The expert runs one asynchronous phase state machine per env (`callosum.experts._phases`): no
+env waits for another, an env whose IK fails just holds. Every batch prints, per phase, how many
+envs completed it and the min / median / max env step at which they did, plus the IK failures;
+the summary (success rate, first-success step distribution) doubles as the self-check that the
+expert fits into the episode under the training controller.
 
     uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --out runs/demos/a.pt
     # Mac CPU sim, 20 episodes (see CLAUDE.md for the throwaway env):
@@ -20,8 +23,8 @@ the expert fits into the episode under the training controller.
 
 The file layout is documented in `callosum.training._demos`. Exit status: 1 if no successful
 episode was collected. A batch without any success prints how far its episodes got (expert
-phases reached, grasps, face angle, body drift) so that a failed collection can be diagnosed
-from the log.
+grasps, face angle, body drift) next to the per-phase table so that a failed collection can be
+diagnosed from the log.
 
 `--max-episode-steps N` overrides the registered 400-step episode (for diagnosis: does the
 expert succeed at all, and when?). The value is stored in the file's `meta`, and the trainers
@@ -81,7 +84,7 @@ def _add_args(parser) -> None:
     parser.add_argument(
         "--no-overlap",
         action="store_true",
-        help="Run the expert's phases strictly one after the other (about 90 steps slower, see "
+        help="Run each env's phases strictly one after the other (about 90 steps slower, see "
         "ExpertControlConfig.overlap_approach); default: overlapped.",
     )
     parser.add_argument(
@@ -173,9 +176,10 @@ def _print_summary(episodes: list[dict], attempted: int, steps: np.ndarray) -> N
 
 
 def main() -> None:
-    # TODO(review): GPU backend unverified: per-env IK runs in a Python loop in the expert (slow
-    # for 256 envs, minutes per batch), and contact behaviour of the delta-controlled expert may
-    # differ per env. The CPU sim (1 env) is where it was checked.
+    # TODO(review): GPU backend unverified for the async per-env phase machines: the per-env IK
+    # plan runs in a Python loop at reset (slow for 256 envs, minutes per batch), and contact
+    # behaviour of the delta-controlled expert may differ per env. The CPU sim (1 env) is where
+    # the lockstep predecessor was checked.
     args = parse_args(__doc__, _add_args)
     start = time.time()
     extra = {}
@@ -223,8 +227,7 @@ def main() -> None:
         rig.callbacks.append(_recorder(rig, rows))
         progress = _Progress(base.num_envs)
         rig.callbacks.append(lambda *cb_args, p=progress: p.update(cb_args[-1]))
-        phase_ends: list[tuple[str, int]] = []
-        run_expert(rig, on_phase=lambda name, r=rig, e=phase_ends: e.append((name, r.steps)))
+        run_expert(rig)
         batch = split_rollout(
             torch.stack(rows["obs"]),
             torch.stack(rows["actions"]),
@@ -245,12 +248,17 @@ def main() -> None:
             f"({rig.steps} env steps, {time.time() - start:.0f}s elapsed)",
             flush=True,
         )
-        print("  expert phases ended at env step: " + ", ".join(f"{n} {s}" for n, s in phase_ends))
+        print(
+            f"  expert planning (IK) took {rig.plan_seconds:.0f}s; "
+            f"{int(rig.ik_failed.sum())} envs with an IK failure (held, they never succeed)"
+        )
+        if rig.machine is not None:
+            print("  per-phase completion (env step at which each env completed the phase):")
+            print("\n".join("  " + line for line in rig.machine.describe()), flush=True)
         if not wins:
-            last = phase_ends[-1][0] if phase_ends else "none"
             print(
                 f"  no success in this batch: the expert stopped at env step {rig.steps} "
-                f"(episode limit {max_steps}), last completed phase: {last}"
+                f"(episode limit {max_steps})"
             )
             print("\n".join(progress.describe(base.reward_config)), flush=True)
     env.close()

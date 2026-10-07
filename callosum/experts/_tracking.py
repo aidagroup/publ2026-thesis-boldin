@@ -10,14 +10,14 @@ This module holds the pieces that avoid that, none of which needs the simulator:
   additive per-joint bias (the integral term) and saturation that keeps the direction.
 * `update_bias`: the integral term with anti-windup (frozen while the action is saturated,
   clipped to `bias_max`).
-* `ReachMonitor`: per-env "reached or stalled" bookkeeping, so an env that is blocked (contact,
-  joint limit) does not make the whole batch wait for the timeout.
-* `ReachRecord` / `summarize_reaches` / `describe_progress`: what the probe and the demo collector
-  print to make a slow or failed run diagnosable from the log.
-"""
+* `ReachMonitor`: per-env "reached or stalled" bookkeeping (stall judged on a windowed mean, so
+  noise jitter does not defeat it), so an env that is blocked (contact, joint limit) moves on
+  instead of waiting for its timeout. `noise_jitter` / `effective_tol`: how much the reach
+  tolerances widen when the executed action carries DART noise.
+* `describe_progress`: what the demo collector prints to make a failed run diagnosable.
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+The phase state machines that use these live in `callosum.experts._phases`.
+"""
 
 import numpy as np
 
@@ -61,85 +61,78 @@ def update_bias(
     return np.where(np.asarray(saturated)[:, None], bias, stepped)
 
 
-class ReachMonitor:
-    """Per-env bookkeeping of one "step until the targets are reached" loop.
+STEP_FRACTION = 0.39
+"""Share of a commanded joint offset the arm covers in one control step (first-order PD lag of the
+stock controller): the executed-action noise reaches the joints scaled by this factor."""
 
-    Feed it the per-env worst joint error after every step. An env is `reached` when that error is
-    below `tol`, and `stalled` when its best error has not improved by more than `stall_progress`
-    for `stall_steps` consecutive steps (it is blocked by contact or a joint limit: waiting longer
-    would only run into the timeout). The loop can end once every env is reached or stalled.
+
+def noise_jitter(action_noise: float, limit: float) -> float:
+    """Rad of joint jitter that DART action noise (`action_noise` in normalised units) causes.
+
+    The noise is added to the normalised action, one `limit` rad per unit, and the joint follows a
+    `STEP_FRACTION` of it per step; 0.1 noise with the 0.05 rad limit gives about 0.002 rad.
+    """
+    return float(action_noise) * limit * STEP_FRACTION
+
+
+def effective_tol(tol: float, jitter: float, scale: float) -> float:
+    """A reach tolerance widened by `scale * jitter`: what the noisy executed action can meet."""
+    return tol + scale * jitter
+
+
+class ReachMonitor:
+    """Per-env "reached or stalled" bookkeeping of a target-tracking loop.
+
+    Feed it the per-env worst joint error (to the *clean* target) after every step. An env is
+    `reached` when that error is below `tol`. It is `stalled` when the mean error of the last
+    `stall_window` steps is not lower than that of the `stall_window` steps before by more than
+    `stall_progress` (it is blocked by contact or a joint limit: waiting longer would only run
+    into the timeout). The verdict needs `2 * stall_window` samples since the env's last `reset`.
+
+    The windowed mean is the point: a "best error so far" criterion is defeated by noise (every
+    lucky dip counts as progress), whereas the mean over a window changes only by the noise's mean
+    (about `jitter / sqrt(window)`), so callers with executed-action noise raise `progress` by the
+    jitter. All state is per env, so a monitor serves envs that start their targets at different
+    times: `reset(mask)` restarts the history of the envs whose target changed.
     """
 
-    def __init__(self, tol: float | np.ndarray, stall_steps: int, stall_progress: float) -> None:
+    def __init__(self, tol: float | np.ndarray, stall_window: int, stall_progress: float) -> None:
+        if stall_window < 1:
+            raise ValueError(f"stall_window must be >= 1, got {stall_window}")
         self.tol = tol
-        self.stall_steps = stall_steps
+        self.stall_window = stall_window
         self.stall_progress = stall_progress
-        self._best: np.ndarray | None = None
-        self._since: np.ndarray | None = None
+        self._buf: np.ndarray | None = None  # (n, 2 * window) last errors, oldest first
+        self._count: np.ndarray | None = None  # samples since the last reset (capped)
 
     def reset(self, mask: np.ndarray) -> None:
-        """Forget the progress history of the envs in `mask` (their target changed)."""
-        if self._best is not None:
-            self._best = np.where(mask, np.inf, self._best)
-            self._since = np.where(mask, 0, self._since)
+        """Forget the error history of the envs in `mask` (their target changed)."""
+        if self._count is not None:
+            self._count = np.where(mask, 0, self._count)
 
-    def update(self, error: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Record this step's `(n,)` errors; returns the `(reached, stalled)` bool masks."""
+    def update(
+        self,
+        error: np.ndarray,
+        tol: float | np.ndarray | None = None,
+        progress: float | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Record this step's `(n,)` errors; returns the `(reached, stalled)` bool masks.
+
+        `tol` / `progress` override the monitor's values for this call (a per-env tolerance, a
+        noise-widened progress threshold).
+        """
         error = np.asarray(error, dtype=float)
-        if self._best is None:
-            self._best = error.copy()
-            self._since = np.zeros(error.shape, dtype=int)
-        else:
-            improved = error < self._best - self.stall_progress
-            self._best = np.where(improved, error, self._best)
-            self._since = np.where(improved, 0, self._since + 1)
-        return error < self.tol, self._since >= self.stall_steps
-
-
-def reach_reason(reached: np.ndarray, stalled: np.ndarray, extra: np.ndarray | None) -> str:
-    """Why a reach loop ended: `"tol"`, `"stall"` (some envs stalled) or `"timeout"`.
-
-    `extra` is an optional per-env "done anyway" mask (e.g. the face already turned). `"timeout"`
-    is returned when some env is neither reached, stalled nor done.
-    """
-    done_clean = reached if extra is None else reached | extra
-    if bool(done_clean.all()):
-        return "tol"
-    if bool((done_clean | stalled).all()):
-        return "stall"
-    return "timeout"
-
-
-@dataclass
-class ReachRecord:
-    """One finished reach loop (see `Rig._reach`)."""
-
-    arms: tuple[int, ...]
-    steps: int
-    reason: str  # "tol" | "stall" | "timeout"
-    tol: float
-    unreached_envs: int  # envs still above `tol` when the loop ended
-    worst_error: float  # largest single joint error (rad) at the end
-    worst_arm: int
-    worst_env: int
-    worst_joint: int
-
-
-def summarize_reaches(records: Sequence[ReachRecord]) -> str:
-    """One line about a phase's reach loops: how they ended and where the worst error was."""
-    if not records:
-        return "no closed-loop reaches"
-    counts = {r: sum(rec.reason == r for rec in records) for r in ("tol", "stall", "timeout")}
-    steps = sum(rec.steps for rec in records)
-    worst = max(records, key=lambda rec: rec.worst_error)
-    most_unreached = max(rec.unreached_envs for rec in records)
-    return (
-        f"{len(records)} reaches ({steps} steps): {counts['tol']} by tolerance, "
-        f"{counts['stall']} by stall, {counts['timeout']} by timeout; "
-        f"max unreached envs at an end {most_unreached}; worst final joint error "
-        f"{worst.worst_error:.3f} rad (arm {worst.worst_arm}, env {worst.worst_env}, joint "
-        f"{worst.worst_joint}, end of a {worst.steps}-step reach, tol {worst.tol})"
-    )
+        window = self.stall_window
+        if self._buf is None:
+            self._buf = np.zeros((len(error), 2 * window))
+            self._count = np.zeros(len(error), dtype=int)
+        self._buf[:, :-1] = self._buf[:, 1:]
+        self._buf[:, -1] = error
+        self._count = np.minimum(self._count + 1, 2 * window)
+        previous, recent = self._buf[:, :window].mean(axis=1), self._buf[:, window:].mean(axis=1)
+        threshold = self.stall_progress if progress is None else progress
+        stalled = (self._count >= 2 * window) & (previous - recent < threshold)
+        return error < (self.tol if tol is None else tol), stalled
 
 
 def _percentiles(values: np.ndarray, scale: float = 1.0, fmt: str = ".1f") -> str:

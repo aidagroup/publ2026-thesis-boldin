@@ -398,7 +398,15 @@ lockstep tracking it succeeded on the Mac CPU sim in 40/40 seeds, first success 
 envs nothing succeeded within 400 steps: every waypoint waited for the slowest env, and the turn
 waited for a wrist target the face's joint limit makes unreachable. The tracking was reworked
 (per-env waypoint progress, integral bias, stall detection, turn ends when the face is at 90
-degrees; see `callosum/experts/_tracking.py`); the CPU numbers above predate that and have to be
+degrees) and then restructured into **per-env asynchronous phase state machines**
+(`callosum/experts/_phases.py`, the FaceTurn program in `_program.py`): every env has its own
+phase per arm and moves on as soon as its own criterion is met (waypoint tolerance or stall,
+jaws at rest, face turned, its own timeout), nobody waits for another env, and an env whose IK
+fails is marked failed at once and holds. Ordering between the arms is per env (the rotator
+descends after this env's holder started closing; the turn needs both grasps). Reach and stall
+are judged on the error to the clean target with tolerances widened by the DART noise jitter,
+stall on a windowed mean. The first success of an env should therefore come at about 300 steps
+regardless of the number of envs; the CPU numbers above predate all this and have to be
 re-measured. The lower bound is set by the controller's speed (about 0.02 rad per step): the
 holder's wrist flex travels about 3.2 rad from the rest pose to the pre-grasp (about 165
 steps), the face turn needs a 1.57 rad wrist roll (about 80 steps), so a first success below
@@ -409,24 +417,27 @@ source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
 bash scripts/update_server.sh                  # code and venv up to date (not while a job runs)
 
 # 0. The expert under the training controller on the GPU (exit 0 = success in every env).
-#    Prints per phase `phase_steps` (its length in env steps) and `reaches` (how its closed-loop
-#    reaches ended: by tolerance / stall / timeout, and the worst remaining joint error), and
-#    at the end `phase step counts`.
+#    Prints a status snapshot per phase (when half of the envs completed it) and at the end the
+#    per-phase table: how many envs completed the phase, min / median / max env step at which
+#    they did, how it ended (tol / stall / timeout / extra = face turned / still = jaws at
+#    rest), the failed (IK) envs, the IK planning time and the per-env first-success steps.
 uv run python scripts/probe_face_turn.py --control delta --overlap
 
 # 1. Collect demonstrations: 256 envs per reset, 2 resets (seeds 0 and 1); successful episodes
 #    only, cut at the first success. --action-noise 0.1 perturbs the executed arm actions
 #    (DART) and records the clean expert action as the label, so the policy sees recovery
-#    states. Per-env IK runs in a Python loop: expect minutes per batch.
+#    states. The per-env IK plan (once per reset, for all phases) runs in a Python loop: expect minutes per batch (printed as `expert planning (IK) took ...`).
 mkdir -p runs/demos
 uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --action-noise 0.1 \
     --out runs/demos/faceturn_a.pt
 ```
 
 Read the summary: `attempted N episodes, successful M (..%)` and the first-success step
-distribution. Each batch also prints the env step at which every expert phase ended; a batch
-without a single success prints how far its episodes got (holder / rotator grasp, both at once,
-max face angle, body drift against the tolerances) and the last completed phase. To see how
+distribution. Each batch also prints the IK planning time, the number of IK-failed envs and a
+per-phase table (envs that completed the phase; min / median / max env step at which they did;
+how it ended); a phase with few completed envs is where the others got stuck. A batch without a
+single success prints how far its episodes got (holder / rotator grasp, both at once, max face
+angle, body drift against the tolerances). To see how
 long the expert needs at all, collect with a longer episode, e.g. `--max-episode-steps 700
 --num-envs 16 --num-batches 1` (diagnosis only: the demos record the limit in their metadata, and
 `callosum.training.ippo --demos` refuses to run in an env with another episode length; BC
@@ -436,7 +447,14 @@ successful, first success at step 290 to 364 (median 310); with `--action-noise 
 skipped), median 325, max 393; with 0.2 only 8/10 (up to 376 steps), so do not go above 0.1.
 If many envs fail on the GPU, look at `scripts/probe_face_turn.py --control delta --overlap`
 first (contact behaviour on the GPU backend is unverified). Several hundred successful
-episodes are a sensible target (400 episodes are about 125 000 transitions).
+episodes are a sensible target (400 episodes are about 125 000 transitions). For the check
+of the async expert, run the clean collection too (`--action-noise 0`, the default): with no
+noise the per-env first success should be about 300 steps for every env, and the table's
+completion steps should not depend on `--num-envs`.
+
+```bash
+uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --out runs/demos/clean.pt
+```
 
 ```bash
 # 2. Behaviour cloning (needs no simulator; the demo file carries the observation layout).

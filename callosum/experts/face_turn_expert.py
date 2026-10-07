@@ -22,23 +22,27 @@ the sim (privileged).
 Two ways of driving the arms (`ExpertControlConfig.control`):
 
 * `"pos"`: the env uses `pd_joint_pos`; the commanded joint targets move at most
-  `max_joint_step` per step, open loop with fixed settle times (the original probe).
+  `max_joint_step` per step, open loop with fixed settle times (the original probe). All envs
+  run the phases in lockstep.
 * `"delta"`: the env uses `pd_joint_delta_pos`, the controller the policies are trained with.
   Its target is the *current* joint position plus the action (+-`ARM_DELTA_LIMIT` rad), so the
   arm can move at most about 0.02 rad per step (first-order PD lag). The expert tracks the same
   waypoints closed loop: the action is the remaining joint error, scaled to saturate at +-1
-  with the direction kept (the tool keeps moving on the straight line between waypoints), a
-  waypoint is left when the joints are within a tolerance (or after a timeout), and settling
-  ends as soon as everything is still. The gripper action is absolute (+-1) in both modes.
+  with the direction kept (the tool keeps moving on the straight line between waypoints), plus
+  an integral bias per joint that removes the steady-state error a disturbance leaves under this
+  controller. The gripper action is absolute (+-1) in both modes.
 
-  Under this controller a disturbance (or a joint at its limit) leaves a steady-state error, so
-  a loop that waits for every joint of every env would end only by its timeout. The delta mode
-  therefore (see `callosum.experts._tracking` and `ExpertControlConfig`): adds an integral bias
-  per joint to the commanded offset, stops waiting for envs that are stalled, advances through
-  the intermediate waypoints of a path with a loose tolerance, flies through the pre-grasp
-  without settling, keeps the IK away from the joint limits, and ends the turn as soon as the
-  face is at its target (the wrist target overshoots, so it is never reached). The reach loops
-  are logged in `Rig.reach_log` (the probe prints a summary per phase).
+  In delta mode **every env runs its own phase state machine** (`callosum.experts._phases`,
+  the program in `callosum.experts._program`): `run_expert` plans every env's waypoints once
+  (they depend only on the cube pose at reset), then every `env.step` advances all envs and each
+  env (and each arm) moves to its next phase as soon as ITS OWN criterion is met: waypoint
+  tolerance or stall, jaws at rest, face turned, or its own timeout. Ordering constraints between
+  the arms are per env (the rotator descends after this env's holder started closing, the turn
+  needs both grasps). An env whose IK fails is marked failed at once and just holds; it never
+  blocks anything. Reach and stall are judged on the error to the clean target with
+  tolerances widened by the DART noise jitter, and stall on a windowed mean. The run ends when
+  every env finished its program or failed, or at the step budget; the collector cuts each
+  env's episode at its own first success. `Rig.machine` keeps the per-phase completion steps.
 
 `Rig.step` reports every env step to registered callbacks (observation before the step, the
 action dict that was passed to `env.step`, reward, terminated, truncated, info), which is what
@@ -49,6 +53,7 @@ Needs mani_skill and scipy (not importable on the CI runner); the pure-Python tr
 """
 
 import math
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -62,13 +67,15 @@ from callosum.configs.face_turn_expert import ExpertControlConfig
 from callosum.envs.face_turn import TARGET_FACE_ANGLE
 from callosum.envs.two_so101_base import NUM_ARM_JOINTS
 from callosum.experts._noise import perturb_arm_action
-from callosum.experts._tracking import (
-    ReachMonitor,
-    ReachRecord,
-    reach_reason,
-    tracking_action,
-    update_bias,
+from callosum.experts._phases import Commands, Context, Observation, PhaseMachine
+from callosum.experts._program import (
+    GRIPPER_CLOSED,
+    GRIPPER_OPEN,
+    SETTLE_STEPS,
+    ExpertPlan,
+    build_programs,
 )
+from callosum.experts._tracking import noise_jitter, tracking_action, update_bias
 from callosum.robots.so101_parallel_gripper import ARM_DELTA_LIMIT, SO101ParallelGripper
 
 # Strategy parameters (metres / radians). The body is 3.8 cm tall (mid height 1.9 cm), the face
@@ -88,15 +95,13 @@ IK_ANGLE_TOL = np.deg2rad(8)
 # Delta mode: a joint-limit-margin IK solution farther than this (rad, largest joint) from the
 # previous waypoint is discarded in favour of the unrestricted search (see `Rig.ik`).
 MARGIN_MAX_JUMP = 2.0
-SETTLE_STEPS = 10  # settle after a movement phase (the delta mode waits less, see the config)
 PATH_STEPS = 8  # IK waypoints on each straight-line approach
-GRIPPER_OPEN, GRIPPER_CLOSED = 1.0, -1.0  # normalised absolute gripper action
 # Wrist roll that turns the face by +pi/2 (checked in sim). It overshoots by 0.1 rad on purpose:
 # the face joint's upper limit (pi/2) stops the face exactly at the target, so a slightly
 # slipping grip does not leave the angle short of the tolerance.
 ROLL_ANGLE = -math.pi / 2 - 0.1
 # Delta mode: the turn is done once the face is this close (rad) to its target (the env's success
-# tolerance is 0.05); the wrist keeps pushing until the arm is told to hold.
+# tolerance is 0.05); the arm is then told to hold (the wrist target overshoots on purpose).
 TURN_DONE_MARGIN = 0.03
 
 _UP = np.array([0.0, 0.0, 1.0])
@@ -233,10 +238,12 @@ class Rig:
         self.n = self.base.num_envs
         self.agents = (self.base.agent_a, self.base.agent_b)
         self.uids = ("so101_pg-0", "so101_pg-1")
-        # Commanded arm targets (n, 5) and gripper targets (n,) per arm.
+        # Commanded arm targets (n, 5), gripper targets (n,) and integral bias (n, 5) per arm.
+        # `cmd` owns the arrays; `q`, `grip` and `bias` are the same lists (the phase primitives
+        # mutate them in place, pos mode rebinds elements).
         qpos = [self._qpos(a) for a in range(2)]
-        self.q = [x[:, :NUM_ARM_JOINTS].copy() for x in qpos]
-        self.grip = [np.full(self.n, GRIPPER_OPEN) for _ in self.agents]
+        self.cmd = Commands.from_qpos([x[:, :NUM_ARM_JOINTS] for x in qpos], GRIPPER_OPEN)
+        self.q, self.grip, self.bias = self.cmd.q, self.cmd.grip, self.cmd.bias
         self.last_info: dict = {}
         self.callbacks: list[StepCallback] = []
         if self.action_noise < 0:
@@ -248,10 +255,10 @@ class Rig:
         # The clean (noise-free) action dict of the last step, `{uid: (n, 6) tensor}`.
         self.last_clean_action: dict = {}
         self.steps = 0  # env steps taken through this rig
-        # Integral bias (rad) added to each arm's commanded offset in delta mode, and the log of
-        # the closed-loop reaches (one `ReachRecord` each; the probe prints a summary per phase).
-        self.bias = [np.zeros((self.n, NUM_ARM_JOINTS)) for _ in self.agents]
-        self.reach_log: list[ReachRecord] = []
+        # Delta mode: the per-env phase machine of the current run (None before / in pos mode)
+        # and the seconds the IK planning took.
+        self.machine: PhaseMachine | None = None
+        self.plan_seconds = 0.0
         # (env step, reward returned by env.step on that step, previous step's reward) of the
         # first step on which env 0 reports success; shows the success bonus as a one-step jump.
         self.first_success: tuple[int, float, float] | None = None
@@ -263,6 +270,18 @@ class Rig:
 
     def _qvel(self, arm: int) -> np.ndarray:
         return self.agents[arm].robot.get_qvel().cpu().numpy()
+
+    def observe(self) -> Observation:
+        """Numpy snapshot of what the phase primitives need (joint positions and speeds, face)."""
+        qpos = [self._qpos(a) for a in range(2)]
+        qvel = [np.abs(self._qvel(a)) for a in range(2)]
+        face = self.base.face_link.joint.qpos.reshape(self.n, -1)[:, 0].cpu().numpy()
+        return Observation(
+            qpos=[x[:, :NUM_ARM_JOINTS] for x in qpos],
+            arm_speed=[x[:, :NUM_ARM_JOINTS].max(axis=1) for x in qvel],
+            jaw_speed=[x[:, NUM_ARM_JOINTS:].max(axis=1) for x in qvel],
+            face_turned=face >= TARGET_FACE_ANGLE - TURN_DONE_MARGIN,
+        )
 
     def base_frame(self, arm: int) -> tuple[np.ndarray, np.ndarray]:
         """World poses of an arm's base: rotations (n, 3, 3) and positions (n, 3)."""
@@ -277,12 +296,17 @@ class Rig:
         In delta mode it first tries a solution that keeps `joint_limit_margin` away from the
         joint limits (from `q_init` only) and falls back to the unrestricted search for the
         poses that need a joint at its limit (the rotator's pre-grasp), so the margin never
-        turns a solvable pose into an IK failure.
+        turns a solvable pose into an IK failure. With `tolerate_ik_failures` an env whose IK
+        fails is marked in `ik_failed` and holds `q_init`; envs already marked are skipped (no
+        time is spent on them).
         """
         rot, pos = self.base_frame(arm)
         q_init = self.q[arm] if q_init is None else q_init
         out = np.zeros((self.n, NUM_ARM_JOINTS))
         for i in range(self.n):
+            if self.ik_failed[i]:
+                out[i] = q_init[i]
+                continue
             to_base = rot[i].T
             tcp = to_base @ (tcp_w[i] - pos[i])
             finger_dir = to_base @ finger_dir_w[i]
@@ -330,10 +354,12 @@ class Rig:
                     best, best_dist = q, dist
         return best
 
-    def tool_world(self, arm: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """World TCP, finger direction and jaw axis (each `(n, 3)`) at the commanded targets."""
+    def tool_world(self, arm: int, q: np.ndarray | None = None):
+        """World TCP, finger direction and jaw axis (each `(n, 3)`) at the joint angles `q`
+        (default: the commanded targets)."""
+        q = self.q[arm] if q is None else q
         rot, pos = self.base_frame(arm)
-        out = [self.model.tool(self.q[arm][i]) for i in range(self.n)]
+        out = [self.model.tool(q[i]) for i in range(self.n)]
         tcp, finger, axis = (np.stack(x) for x in zip(*out, strict=True))
         return (
             np.einsum("nij,nj->ni", rot, tcp) + pos,
@@ -341,16 +367,20 @@ class Rig:
             np.einsum("nij,nj->ni", rot, axis),
         )
 
-    def path(self, arm: int, tcp, finger_dir, open_axis, steps: int = PATH_STEPS) -> list:
+    def path(
+        self, arm: int, tcp, finger_dir, open_axis, steps: int = PATH_STEPS, q_start=None
+    ) -> list:
         """Joint waypoints that move the tool in a straight line to the goal pose.
 
         Interpolates the TCP linearly (and the two direction vectors, renormalised) from the
-        current commanded pose and solves IK at each waypoint, seeded with the previous one, so
-        the fingers do not swing through the cube the way a joint-space interpolation can.
+        pose at `q_start` (default: the current commanded targets) and solves IK at each
+        waypoint, seeded with the previous one, so the fingers do not swing through the cube the
+        way a joint-space interpolation can.
         """
-        start = self.tool_world(arm)
+        q_start = self.q[arm] if q_start is None else q_start
+        start = self.tool_world(arm, q_start)
         goal = (tcp, finger_dir, open_axis)
-        qs, q_prev = [], self.q[arm]
+        qs, q_prev = [], q_start
         for k in range(1, steps + 1):
             t = k / steps
             tcp_k, d_k, o_k = (a + (b - a) * t for a, b in zip(start, goal, strict=True))
@@ -360,92 +390,27 @@ class Rig:
             qs.append(q_prev)
         return qs
 
+    # --- pos mode: open-loop lockstep phases ------------------------------------------------
+
     def follow(self, arm: int, waypoints: list, settle: int = 0, fly_by: bool = False) -> None:
-        """Drive one arm through joint waypoints (the other arm keeps its targets)."""
+        """Pos mode: drive one arm through joint waypoints (the other arm keeps its targets)."""
         self.follow_many({arm: waypoints}, settle, fly_by)
 
     def follow_many(self, paths: dict[int, list], settle: int = 0, fly_by: bool = False) -> None:
-        """Drive several arms through their joint waypoints at once, in lockstep.
+        """Pos mode: drive several arms through their joint waypoints at once, in lockstep.
 
         Waypoint `k` of every arm is started together (paths of different length keep their
-        last waypoint). Arms that are not in `paths` keep their targets. `fly_by` (delta mode
-        only): the end of the path needs no precision (the next path starts from the commanded
-        pose), so it is left at `approach_tol` and without settling.
+        last waypoint). Arms that are not in `paths` keep their targets.
         """
-        cfg = self.control
         length = max(len(p) for p in paths.values())
 
         def goals(k: int) -> dict:
             return {("q_a", "q_b")[arm]: path[min(k, len(path) - 1)] for arm, path in paths.items()}
 
-        if cfg.control == "pos":
-            for k in range(length):
-                self.move(**goals(k), settle=0)
-            for _ in range(settle):
-                self.step()
-            return
-        self._track_paths(paths, cfg.approach_tol if fly_by else cfg.final_tol)
-        self._settle(0 if fly_by else min(settle, cfg.settle_cap))
-
-    def _track_paths(self, paths: dict[int, list], final_tol: float) -> None:
-        """Delta mode: track the waypoint paths closed loop, each env advancing on its own.
-
-        Every (arm, env) has its own waypoint pointer: it moves on to the next waypoint as soon
-        as that env's joints are within `waypoint_tol` of the current one (or are stalled), not
-        when the slowest env gets there. With many envs the waypoint at which the joint travel is
-        largest differs from env to env, and a lockstep advance would pay the sum of the
-        per-waypoint maxima over envs, a lot more than the longest single path (about 1.4x for
-        the holder's approach in 48 envs). The loop ends once every env has reached the last
-        waypoint within `final_tol` (or stalled there), or after a budget derived from the path
-        lengths.
-        """
-        cfg = self.control
-        arms = tuple(paths)
-        stacks = {arm: np.stack(path) for arm, path in paths.items()}  # (waypoints, n, 5)
-        rows = np.arange(self.n)
-        pointer = {arm: np.zeros(self.n, dtype=int) for arm in arms}
-        monitors = {
-            arm: ReachMonitor(final_tol, cfg.stall_steps, cfg.stall_progress) for arm in arms
-        }
-        # Budget: the longest per-env path at top speed with 50% margin, plus the slacks.
-        longest = 0.0
-        for arm in arms:
-            points = np.concatenate([self._qpos(arm)[None, :, :NUM_ARM_JOINTS], stacks[arm]])
-            longest = max(
-                longest, float(np.abs(np.diff(points, axis=0)).max(axis=2).sum(axis=0).max())
-            )
-        budget = (
-            math.ceil(1.5 * longest / (0.4 * ARM_DELTA_LIMIT))
-            + cfg.waypoint_timeout * max(len(p) for p in paths.values())
-            + cfg.final_timeout
-        )
-        self._reset_bias(arms)
-        for arm in arms:
-            self.q[arm] = stacks[arm][pointer[arm], rows]
-        for k in range(1, budget + 1):
+        for k in range(length):
+            self.move(**goals(k), settle=0)
+        for _ in range(settle):
             self.step()
-            finished = np.ones(self.n, dtype=bool)
-            stalled_any = np.zeros(self.n, dtype=bool)
-            for arm in arms:
-                last = len(stacks[arm]) - 1
-                on_last = pointer[arm] >= last
-                monitor = monitors[arm]
-                monitor.tol = np.where(on_last, final_tol, cfg.waypoint_tol)
-                error = np.abs(self.q[arm] - self._qpos(arm)[:, :NUM_ARM_JOINTS]).max(axis=1)
-                reached, stalled = monitor.update(error)
-                advance = (reached | stalled) & ~on_last
-                if advance.any():
-                    pointer[arm] = pointer[arm] + advance
-                    self.q[arm] = stacks[arm][pointer[arm], rows]
-                    monitor.reset(advance)
-                finished &= on_last & (reached | stalled)
-                stalled_any |= on_last & stalled & ~reached
-            if finished.all() or k == budget:
-                reason = (
-                    "timeout" if not finished.all() else "stall" if stalled_any.any() else "tol"
-                )
-                self._log_reach(arms, k, reason, final_tol, self._joint_errors(arms))
-                return
 
     def step(self) -> None:
         """One env step with the current targets (see the module doc for the two modes)."""
@@ -488,135 +453,16 @@ class Rig:
         self.bias[arm] = update_bias(self.bias[arm], error, cfg.ki, cfg.bias_max, saturated)
         return action
 
-    def _reset_bias(self, arms) -> None:
-        """Forget the integral bias of the given arms (a new movement starts)."""
-        for arm in arms:
-            self.bias[arm] = np.zeros_like(self.bias[arm])
+    def move(self, q_a=None, q_b=None, grip_a=None, grip_b=None, settle=SETTLE_STEPS) -> None:
+        """Pos mode: move the arms to new joint targets (and set grippers), then settle.
 
-    def hold(self, arm: int) -> None:
-        """Delta mode: command the arm's current joint positions, i.e. stop pushing (no-op in
-        pos mode). Used after the turn: the wrist target overshoots the face's limit on purpose,
-        and the open jaws must not keep rolling when the grip is released."""
-        if self.control.control == "delta":
-            self.q[arm] = self._qpos(arm)[:, :NUM_ARM_JOINTS].copy()
-            self._reset_bias((arm,))
-
-    def _joint_errors(self, arms) -> np.ndarray:
-        """`(len(arms), n, 5)` absolute joint errors of the given arms."""
-        return np.stack(
-            [np.abs(self.q[a] - self._qpos(a)[:, :NUM_ARM_JOINTS]) for a in arms], axis=0
-        )
-
-    def _max_error(self, arms) -> float:
-        """Largest joint error over the given arms and all envs."""
-        return float(self._joint_errors(arms).max())
-
-    def _timeout(self, arms, slack: int) -> int:
-        """Step budget for reaching the current targets at the controller's top speed (about
-        0.02 rad per step, with 50% margin) plus `slack` steps for the last millimetres."""
-        remaining = self._max_error(arms)
-        return slack + math.ceil(1.5 * remaining / (0.4 * ARM_DELTA_LIMIT))
-
-    def _reach(
-        self, arms, tol: float, timeout: int, also_done: Callable[[], np.ndarray] | None = None
-    ) -> int:
-        """Step until the given arms are within `tol` of their targets (at least one step).
-
-        Ends once every env is within `tol`, stalled (see `ReachMonitor`) or `also_done()` (an
-        optional per-env mask), or after `timeout` steps. Returns the number of steps taken and
-        appends a `ReachRecord` to `reach_log`.
-        """
-        cfg = self.control
-        monitor = ReachMonitor(tol, cfg.stall_steps, cfg.stall_progress)
-        for k in range(1, timeout + 1):
-            self.step()
-            errors = self._joint_errors(arms)  # (arms, n, 5)
-            reached, stalled = monitor.update(errors.max(axis=(0, 2)))
-            extra = None if also_done is None else np.asarray(also_done(), dtype=bool)
-            reason = reach_reason(reached, stalled, extra)
-            if reason != "timeout" or k == timeout:
-                self._log_reach(arms, k, reason, tol, errors)
-                return k
-        raise AssertionError("unreachable: timeout >= 1")
-
-    def _log_reach(self, arms, steps: int, reason: str, tol: float, errors: np.ndarray) -> None:
-        arm_i, env_i, joint_i = np.unravel_index(int(errors.argmax()), errors.shape)
-        self.reach_log.append(
-            ReachRecord(
-                arms=tuple(arms),
-                steps=steps,
-                reason=reason,
-                tol=tol,
-                unreached_envs=int((errors.max(axis=(0, 2)) >= tol).sum()),
-                worst_error=float(errors.max()),
-                worst_arm=int(arms[arm_i]),
-                worst_env=int(env_i),
-                worst_joint=int(joint_i),
-            )
-        )
-
-    def _is_still(self, jaw_arms: tuple[int, ...] | None = None) -> bool:
-        """True when no joint moves faster than the tolerance: the arm joints and jaws of both
-        arms, or (`jaw_arms`) only the jaws of those arms."""
-        tol = self.control.settle_qvel_tol
-        if jaw_arms is not None:
-            return all(
-                float(np.abs(self._qvel(a)[:, NUM_ARM_JOINTS:]).max()) < tol for a in jaw_arms
-            )
-        return all(float(np.abs(self._qvel(a)).max()) < tol for a in range(2))
-
-    def _settle(
-        self, steps: int, min_steps: int = 1, jaw_arms: tuple[int, ...] | None = None
-    ) -> None:
-        """Delta mode: wait up to `steps` steps, ending early once everything is still.
-
-        `jaw_arms`: wait only for those arms' jaws (a gripper phase). With action noise the arm
-        joints never come to rest (the jitter is the point), so a settle after an arm movement is
-        cut to two steps.
-        """
-        if jaw_arms is None and self.action_noise > 0:
-            steps = min(steps, 2)
-        for k in range(1, steps + 1):
-            self.step()
-            if k >= min_steps and self._is_still(jaw_arms):
-                return
-
-    def move(
-        self,
-        q_a=None,
-        q_b=None,
-        grip_a=None,
-        grip_b=None,
-        settle=SETTLE_STEPS,
-        until: Callable[[], np.ndarray] | None = None,
-    ) -> None:
-        """Move the arms to new joint targets (and set grippers), then settle.
-
-        "pos" mode interpolates the commanded targets linearly at `max_joint_step` per step;
-        "delta" mode tracks the goal closed loop (all given arms at once). `until` (delta mode
-        only) is an optional per-env "this env is done" mask: the reach ends once every env is
-        within tolerance, stalled or done.
+        Interpolates the commanded targets linearly at `max_joint_step` per step.
         """
         goals = [q_a, q_b]
         for arm, g in enumerate((grip_a, grip_b)):
             if g is not None:
                 self.grip[arm] = np.full(self.n, g)
         cfg = self.control
-        if cfg.control == "delta":
-            moving = tuple(arm for arm, goal in enumerate(goals) if goal is not None)
-            for arm in moving:
-                self.q[arm] = goals[arm]
-            self._reset_bias(moving)
-            if moving:
-                timeout = self._timeout(moving, cfg.final_timeout)
-                self._reach(moving, cfg.final_tol, timeout, until)
-            if grip_a is not None or grip_b is not None:
-                # A gripper phase waits for the jaws to close or open: its own length, at least 4.
-                jaws = tuple(arm for arm, g in enumerate((grip_a, grip_b)) if g is not None)
-                self._settle(settle, 4, jaws)
-            else:
-                self._settle(min(settle, cfg.settle_cap))
-            return
         start = [q.copy() for q in self.q]
         delta = max(
             (np.abs(g - s).max() for g, s in zip(goals, start, strict=True) if g is not None),
@@ -631,6 +477,54 @@ class Rig:
         for _ in range(settle):
             self.step()
 
+    # --- delta mode: planning and the per-env phase machine -----------------------------------
+
+    @property
+    def noise_jitter(self) -> float:
+        """Rad of joint jitter the executed-action noise causes (0 without noise)."""
+        return noise_jitter(self.action_noise, ARM_DELTA_LIMIT)
+
+    def plan_expert(self, no_holder: bool = False) -> ExpertPlan:
+        """Plan every env's waypoints once (they only depend on the cube pose at reset).
+
+        The paths chain: each starts from the end of the previous one, which is exactly where the
+        commanded target is when the phase starts. IK failures (tolerated if
+        `tolerate_ik_failures`) mark the env in `ik_failed`; later IK calls skip it.
+        """
+        t0 = time.time()
+        geo = _geometry(self)
+        empty = np.zeros((self.n, 1, NUM_ARM_JOINTS))
+
+        def plan(arm: int, goal: tuple, start: np.ndarray) -> np.ndarray:
+            return np.stack(self.path(arm, *goal, q_start=start), axis=1)  # (n, W, 5)
+
+        pre_a = grasp_a = empty
+        if not no_holder:
+            pre_a = plan(0, geo["pregrasp_a"], self.q[0])
+            grasp_a = plan(0, geo["grasp_a"], pre_a[:, -1])
+        pre_b = plan(1, geo["pregrasp_b"], self.q[1])
+        grasp_b = plan(1, geo["grasp_b"], pre_b[:, -1])
+        turned = grasp_b[:, -1:].copy()
+        turned[:, :, -1] += ROLL_ANGLE
+        half = grasp_b[:, -1:].copy()
+        half[:, :, -1] += ROLL_ANGLE / 2
+        self.plan_seconds = time.time() - t0
+        return ExpertPlan(pre_a, grasp_a, pre_b, grasp_b, half, turned, ~self.ik_failed)
+
+    def start_machine(self, no_holder: bool = False, release_holder: bool = False) -> PhaseMachine:
+        """Plan, build the two arms' programs and start the per-env phase machine (delta mode)."""
+        plan = self.plan_expert(no_holder)
+        programs = build_programs(
+            plan, self.control, no_holder=no_holder, release_holder=release_holder
+        )
+        obs = self.observe()
+        ctx = Context(
+            self.control, self.cmd, obs, jitter=self.noise_jitter, delta_limit=ARM_DELTA_LIMIT
+        )
+        self.machine = PhaseMachine(programs, ctx, self.n, failed=self.ik_failed.copy())
+        self.machine.begin(obs)
+        return self.machine
+
 
 def _horizontal_unit(rig: Rig, arm: int) -> np.ndarray:
     """World direction (n, 3) from an arm's base towards the cube, flattened to the table."""
@@ -641,35 +535,9 @@ def _horizontal_unit(rig: Rig, arm: int) -> np.ndarray:
     return np.concatenate([direction, np.zeros((rig.n, 1))], axis=1)
 
 
-def _face_turned(rig: Rig) -> np.ndarray:
-    """`(n,)` bool: the face angle of each env is within `TURN_DONE_MARGIN` of the target."""
-    angle = rig.base.face_link.joint.qpos.reshape(rig.n, -1)[:, 0].cpu().numpy()
-    return angle >= TARGET_FACE_ANGLE - TURN_DONE_MARGIN
-
-
-def run_expert(
-    rig: Rig,
-    *,
-    no_holder: bool = False,
-    release_holder: bool = False,
-    on_phase: Callable[[str], None] | None = None,
-) -> None:
-    """Run the whole strategy on `rig`: holder grasp, rotator grasp, turn, release.
-
-    Args:
-        no_holder: skip the holder phases (the rotator turns alone; for the face-lock checks).
-        release_holder: the holder opens its jaws half way through the turn.
-        on_phase: called with the phase name after each phase (the probe prints its report).
-
-    Stops silently when `Rig.step` raises `ExpertFinished` (`stop_on_success`, `max_steps`).
-    """
-    try:
-        _run_phases(rig, no_holder, release_holder, on_phase or (lambda name: None))
-    except ExpertFinished:
-        pass
-
-
-def _run_phases(rig: Rig, no_holder: bool, release_holder: bool, phase: Callable[[str], None]):
+def _geometry(rig: Rig) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """World poses `(tcp, finger direction, jaw axis)` of the four key poses of the strategy:
+    holder and rotator, pre-grasp and grasp (each array `(n, 3)`), from the cube pose now."""
     cube_xy = rig.base.cube.pose.p.cpu().numpy().copy()
     cube_xy[:, 2] = 0.0
 
@@ -686,6 +554,64 @@ def _run_phases(rig: Rig, no_holder: bool, release_holder: bool, phase: Callable
     open_b = np.cross(_UP, fwd_b)
     grasp_b = cube_xy + ROTATOR_GRASP_Z * _UP
     pregrasp_b = grasp_b + ROTATOR_LIFT * _UP
+    return {
+        "pregrasp_a": (pregrasp_a, dir_a, open_a),
+        "grasp_a": (grasp_a, dir_a, open_a),
+        "pregrasp_b": (pregrasp_b, dir_b, open_b),
+        "grasp_b": (grasp_b, dir_b, open_b),
+    }
+
+
+def run_expert(
+    rig: Rig,
+    *,
+    no_holder: bool = False,
+    release_holder: bool = False,
+    on_phase: Callable[[str], None] | None = None,
+) -> None:
+    """Run the whole strategy on `rig`: holder grasp, rotator grasp, turn, release.
+
+    Args:
+        no_holder: skip the holder phases (the rotator turns alone; for the face-lock checks).
+        release_holder: the holder opens its jaws half way through the turn.
+        on_phase: pos mode: called with the phase name after each (lockstep) phase. Delta mode:
+            called once per phase, when at least half of the non-failed envs have completed it
+            (the probe prints its status report then). Delta mode keeps the per-env completion
+            steps in `rig.machine`.
+
+    Stops silently when `Rig.step` raises `ExpertFinished` (`stop_on_success`, `max_steps`) or
+    when every env's IK failed; in delta mode also when every env finished its program or failed.
+    """
+    on_phase = on_phase or (lambda name: None)
+    try:
+        if rig.control.control == "pos":
+            _run_phases(rig, no_holder, release_holder, on_phase)
+        else:
+            _run_machine(rig, no_holder, release_holder, on_phase)
+    except ExpertFinished:
+        pass
+
+
+def _run_machine(
+    rig: Rig, no_holder: bool, release_holder: bool, on_phase: Callable[[str], None]
+) -> None:
+    """Delta mode: every env.step advances every env's own phase machine until all are done."""
+    machine = rig.start_machine(no_holder, release_holder)
+    reported: set[str] = set()
+    while not machine.all_finished():
+        rig.step()
+        machine.update(rig.observe())
+        for name in machine.names:
+            if name not in reported and machine.completed_fraction(name) >= 0.5:
+                reported.add(name)
+                on_phase(name)
+
+
+def _run_phases(rig: Rig, no_holder: bool, release_holder: bool, phase: Callable[[str], None]):
+    """Pos mode: the phases one after the other, all envs in lockstep."""
+    geo = _geometry(rig)
+    pregrasp_a, grasp_a = geo["pregrasp_a"], geo["grasp_a"]
+    pregrasp_b, grasp_b = geo["pregrasp_b"], geo["grasp_b"]
 
     # The holder goes first: while its jaws are open next to the cube they would hit the
     # rotator's open jaws, so the rotator only comes down to the face layer once the holder is
@@ -694,34 +620,31 @@ def _run_phases(rig: Rig, no_holder: bool, release_holder: bool, phase: Callable
     if overlap:
         # The rotator's pre-grasp pose is 4 cm above the face layer: clear of the holder.
         rig.follow_many(
-            {
-                0: rig.path(0, pregrasp_a, dir_a, open_a),
-                1: rig.path(1, pregrasp_b, dir_b, open_b),
-            },
+            {0: rig.path(0, *pregrasp_a), 1: rig.path(1, *pregrasp_b)},
             settle=SETTLE_STEPS,
             fly_by=True,
         )
         phase("holder and rotator pregrasp")
-        rig.follow(0, rig.path(0, grasp_a, dir_a, open_a), settle=0)
+        rig.follow(0, rig.path(0, *grasp_a), settle=0)
         rig.grip[0] = np.full(rig.n, GRIPPER_CLOSED)  # the holder's jaws close during the descent
-        q_b_grasp = rig.path(1, grasp_b, dir_b, open_b)
+        q_b_grasp = rig.path(1, *grasp_b)
         rig.follow(1, q_b_grasp, settle=SETTLE_STEPS)
         phase("holder grasp, rotator descent")
         rig.move(grip_b=GRIPPER_CLOSED, settle=20)
         phase("rotator grasp")
     else:
         if not no_holder:
-            rig.follow(0, rig.path(0, pregrasp_a, dir_a, open_a), settle=SETTLE_STEPS)
+            rig.follow(0, rig.path(0, *pregrasp_a), settle=SETTLE_STEPS)
             phase("holder pregrasp")
 
-            rig.follow(0, rig.path(0, grasp_a, dir_a, open_a), settle=SETTLE_STEPS)
+            rig.follow(0, rig.path(0, *grasp_a), settle=SETTLE_STEPS)
             rig.move(grip_a=GRIPPER_CLOSED, settle=20)
             phase("holder grasp")
 
-        rig.follow(1, rig.path(1, pregrasp_b, dir_b, open_b), settle=SETTLE_STEPS)
+        rig.follow(1, rig.path(1, *pregrasp_b), settle=SETTLE_STEPS)
         phase("rotator pregrasp")
 
-        q_b_grasp = rig.path(1, grasp_b, dir_b, open_b)
+        q_b_grasp = rig.path(1, *grasp_b)
         rig.follow(1, q_b_grasp, settle=SETTLE_STEPS)
         rig.move(grip_b=GRIPPER_CLOSED, settle=20)
         phase("rotator grasp")
@@ -737,11 +660,7 @@ def _run_phases(rig: Rig, no_holder: bool, release_holder: bool, phase: Callable
         phase("half turn (holder still holds)")
         rig.move(grip_a=GRIPPER_OPEN, settle=10)
         phase("holder released")
-    # Delta mode ends the turn as soon as every env's face is at its target: the wrist target
-    # overshoots the face's limit, so the wrist's own error would never get within tolerance.
-    delta = rig.control.control == "delta"
-    rig.move(q_b=q_b_turned, settle=0 if delta else 30, until=lambda: _face_turned(rig))
-    rig.hold(1)
+    rig.move(q_b=q_b_turned, settle=30)
     phase("turn")
 
     rig.move(grip_b=GRIPPER_OPEN, settle=20)

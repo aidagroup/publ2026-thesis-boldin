@@ -35,10 +35,12 @@ disables the rule (for the record: what the rotator alone can do without it), an
 prints `face_lock_steps`, the control steps each env spent locked, which on the GPU shows that the
 lock acts per env.
 
-With `--control delta` every report also prints `phase_steps` (the env steps of that phase),
-`reaches` (how the phase's closed-loop reaches ended: tolerance, stall or timeout, and the worst
-remaining joint error, see `callosum.experts._tracking`) and, at the end, the step count of each
-phase.
+With `--control delta` every env runs its own phase state machine (`callosum.experts._phases`):
+no env waits for another one. A status report is printed once per phase, when half of the envs
+have completed it (a snapshot of all envs at that moment, so envs are in different phases), and at
+the end the per-phase distribution of the env step at which each env completed the phase (min /
+median / max, how the phases ended: tolerance, stall, timeout, jaws at rest, face turned), the
+number of failed (IK) envs and the distribution of each env's first success step.
 
 Run it on either backend (`--sim-backend cpu` is one env, also on macOS). Exit status: in the
 default mode 1 if success is not reached in every env after the release; with `--no-holder` or
@@ -59,16 +61,11 @@ import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
 from callosum.configs.face_turn import FaceTurnPhysicsConfig
 from callosum.configs.face_turn_expert import CONTROL_MODES, ExpertControlConfig
 from callosum.envs.face_turn import TARGET_FACE_ANGLE
-from callosum.experts._tracking import summarize_reaches
 from callosum.experts.face_turn_expert import ArmModel, Rig, run_expert
 
 
-def report(rig: Rig, phase: str, steps_before: int = 0) -> dict:
-    """Print the per-phase status line and return it as a dict of numpy values.
-
-    `steps_before` is the env step count at the end of the previous phase, so that the report
-    shows the length of this phase (`phase_steps`) next to the running count (`env_steps`).
-    """
+def report(rig: Rig, phase: str) -> dict:
+    """Print the per-phase status line and return it as a dict of numpy values."""
     b = rig.base
     info = b.evaluate()
     body = b.cube.links_map["body"]
@@ -101,12 +98,9 @@ def report(rig: Rig, phase: str, steps_before: int = 0) -> dict:
         "success": info["success"].cpu().numpy(),
         "face_lock_steps": b.face_lock_engaged_steps.cpu().numpy(),
     }
-    if rig.control.control == "delta":  # the pos-mode output stays as it always was
-        steps = {"phase_steps": np.array([int(b.elapsed_steps[0]) - steps_before])}
-        row = {"env_steps": row.pop("env_steps"), **steps, **row}
     print(f"[{phase}]")
     for key, val in row.items():
-        if key in ("env_steps", "phase_steps"):
+        if key == "env_steps":
             shown = str(int(val[0]))
         elif key == "face_lock_steps":
             shown = (
@@ -121,11 +115,6 @@ def report(rig: Rig, phase: str, steps_before: int = 0) -> dict:
         else:
             shown = f"{val.min():.2f} / {val.mean():.2f} / {val.max():.2f}"
         print(f"  {key:>20}: {shown}")
-    if rig.control.control == "delta":
-        # How the closed-loop reaches of this phase ended (tolerance / stall / timeout): the
-        # timeouts are where the steps go if a phase is slower than its joint distances allow.
-        print(f"  {'reaches':>20}: {summarize_reaches(rig.reach_log)}")
-        rig.reach_log.clear()
     return row
 
 
@@ -178,14 +167,22 @@ def main() -> None:
     report(rig, "reset")
 
     final: dict = {}
-    phase_ends: list[tuple[str, int]] = []
+    delta = control.control == "delta"
+    first_success_step = np.full(rig.n, -1)
 
     def on_phase(name: str) -> None:
-        before = phase_ends[-1][1] if phase_ends else 0
-        final.update(report(rig, name, before))
-        phase_ends.append((name, int(rig.base.elapsed_steps[0])))
+        # pos mode: after each lockstep phase; delta mode: when half of the envs completed it.
+        label = name if not delta else f"{name} (half of the envs completed it)"
+        final.update(report(rig, label))
 
+    def record_success(*cb_args) -> None:
+        success = cb_args[-1]["success"].reshape(-1).cpu().numpy()
+        first_success_step[success & (first_success_step < 0)] = rig.steps
+
+    rig.callbacks.append(record_success)
     run_expert(rig, no_holder=args.no_holder, release_holder=args.release_holder, on_phase=on_phase)
+    if delta:
+        final.update(report(rig, f"end of the run (env step {rig.steps})"))
     if rig.first_success is not None:
         step, reward, before = rig.first_success
         print(
@@ -193,9 +190,19 @@ def main() -> None:
             f"(the step before: {before:.2f})"
         )
     print(f"target face angle: {math.degrees(TARGET_FACE_ANGLE):.1f} deg")
-    if control.control == "delta":
-        steps = [(n, e - (phase_ends[i - 1][1] if i else 0)) for i, (n, e) in enumerate(phase_ends)]
-        print("phase step counts: " + ", ".join(f"{n} {s}" for n, s in steps))
+    if delta:
+        print(f"expert planning (IK) took {rig.plan_seconds:.1f}s")
+        if rig.machine is not None:
+            print("per-phase completion (env step at which each env completed the phase):")
+            print("\n".join(rig.machine.describe()))
+        wins = first_success_step[first_success_step >= 0]
+        print(f"envs that reached success at some step: {len(wins)}/{rig.n}")
+        if len(wins):
+            q = np.percentile(wins, [0, 50, 100])
+            print(
+                f"first-success env step per env: min {q[0]:.0f} / median {q[1]:.0f} / "
+                f"max {q[2]:.0f}"
+            )
 
     env.close()
     if args.no_lock:

@@ -10,10 +10,9 @@ import pytest
 from callosum.configs.face_turn_expert import ExpertControlConfig
 from callosum.experts._tracking import (
     ReachMonitor,
-    ReachRecord,
     describe_progress,
-    reach_reason,
-    summarize_reaches,
+    effective_tol,
+    noise_jitter,
     tracking_action,
     update_bias,
 )
@@ -104,23 +103,23 @@ def test_higher_gain_converges_faster_without_overshoot() -> None:
 
 
 def test_monitor_reports_reached_per_env() -> None:
-    monitor = ReachMonitor(tol=0.01, stall_steps=3, stall_progress=1e-3)
+    monitor = ReachMonitor(tol=0.01, stall_window=3, stall_progress=1e-3)
     reached, stalled = monitor.update(np.array([0.5, 0.005]))
     assert reached.tolist() == [False, True]
     assert not stalled.any()
 
 
 def test_monitor_flags_an_env_without_progress_as_stalled() -> None:
-    monitor = ReachMonitor(tol=0.01, stall_steps=3, stall_progress=1e-3)
+    monitor = ReachMonitor(tol=0.01, stall_window=2, stall_progress=1e-3)
     moving, blocked = 0.5, 0.2
-    for k in range(1, 8):
+    for k in range(1, 10):
         moving -= 0.05  # keeps improving
         _, stalled = monitor.update(np.array([moving, blocked]))
-        assert stalled.tolist() == [False, k >= 4]  # first call sets the baseline, then 3 stale
+        assert stalled.tolist() == [False, k >= 4]  # two full windows of samples are needed
 
 
 def test_monitor_stall_clears_when_progress_resumes() -> None:
-    monitor = ReachMonitor(tol=0.001, stall_steps=2, stall_progress=1e-3)
+    monitor = ReachMonitor(tol=0.001, stall_window=1, stall_progress=1e-3)
     for err in (0.2, 0.2, 0.2):
         _, stalled = monitor.update(np.array([err]))
     assert stalled[0]
@@ -129,7 +128,7 @@ def test_monitor_stall_clears_when_progress_resumes() -> None:
 
 
 def test_monitor_reset_restarts_the_progress_history_of_masked_envs() -> None:
-    monitor = ReachMonitor(tol=np.array([0.001, 0.001]), stall_steps=2, stall_progress=1e-3)
+    monitor = ReachMonitor(tol=np.array([0.001, 0.001]), stall_window=1, stall_progress=1e-3)
     for _ in range(3):
         _, stalled = monitor.update(np.array([0.2, 0.2]))
     assert stalled.tolist() == [True, True]
@@ -138,27 +137,43 @@ def test_monitor_reset_restarts_the_progress_history_of_masked_envs() -> None:
     assert stalled.tolist() == [False, True]
 
 
-def test_reach_reason() -> None:
-    yes, no = np.array([True, True]), np.array([False, True])
-    assert reach_reason(yes, no, None) == "tol"
-    assert reach_reason(no, yes, None) == "stall"
-    assert reach_reason(no, np.array([False, False]), None) == "timeout"
-    # the "done anyway" mask counts like being reached
-    assert reach_reason(no, np.array([False, False]), np.array([True, False])) == "tol"
-    assert reach_reason(np.array([False, False]), no, np.array([True, False])) == "stall"
+def test_monitor_stall_survives_noise_jitter_which_defeats_a_best_so_far_criterion() -> None:
+    jitter = noise_jitter(0.1, LIMIT)
+    rng = np.random.default_rng(0)
+    blocked = 0.2 + jitter * rng.standard_normal((400, 8))  # a blocked env's jittery error
+    monitor = ReachMonitor(tol=0.01, stall_window=3, stall_progress=5e-4)
+    verdicts = np.stack(
+        [monitor.update(row, progress=5e-4 + jitter)[1] for row in blocked]  # noise-aware threshold
+    )
+    first = verdicts.argmax(axis=0)
+    assert verdicts.any(axis=0).all() and (first < 40).all()  # every env is flagged, soon
+    # The old criterion (best error so far must improve by stall_progress) keeps seeing "progress".
+    best, since, old_stall = np.full(8, np.inf), np.zeros(8), []
+    for row in blocked[:60]:
+        improved = row < best - 5e-4
+        best, since = np.where(improved, row, best), np.where(improved, 0, since + 1)
+        old_stall.append(since >= 4)
+    assert not np.stack(old_stall)[10:].all()  # dips keep resetting it
 
 
-def _record(reason: str, error: float, steps: int = 10, unreached: int = 0) -> ReachRecord:
-    return ReachRecord((0, 1), steps, reason, 0.006, unreached, error, 1, 3, 4)
+def test_monitor_does_not_call_a_noisy_converging_env_stalled() -> None:
+    jitter = noise_jitter(0.1, LIMIT)
+    rng = np.random.default_rng(1)
+    monitor = ReachMonitor(tol=0.0, stall_window=3, stall_progress=5e-4)
+    error = 0.5
+    for _ in range(14):  # travelling at about 0.02 rad per step
+        error -= 0.02
+        _, stalled = monitor.update(
+            np.abs(error + jitter * rng.standard_normal(16)), progress=5e-4 + jitter
+        )
+        assert not stalled.any()
 
 
-def test_summaries_are_readable_and_handle_empty_input() -> None:
-    assert summarize_reaches([]) == "no closed-loop reaches"
-    text = summarize_reaches([_record("tol", 0.004), _record("timeout", 0.05, 30, 7)])
-    assert "2 reaches (40 steps)" in text
-    assert "1 by tolerance, 0 by stall, 1 by timeout" in text
-    assert "unreached envs at an end 7" in text
-    assert "0.050 rad (arm 1, env 3, joint 4" in text
+def test_effective_tolerance_and_jitter() -> None:
+    assert noise_jitter(0.0, LIMIT) == 0.0
+    assert noise_jitter(0.1, LIMIT) == pytest.approx(0.1 * LIMIT * 0.39)
+    assert effective_tol(0.006, 0.0, 3.0) == 0.006
+    assert effective_tol(0.006, 0.002, 3.0) == pytest.approx(0.012)
 
 
 def test_describe_progress_counts_stages() -> None:
@@ -193,7 +208,8 @@ def test_config_defaults_and_validation() -> None:
         {"bias_max": -1.0},
         {"joint_limit_margin": -0.01},
         {"approach_tol": 0.0},
-        {"stall_steps": 0},
+        {"stall_window": 0},
+        {"noise_tol_scale": -1.0},
         {"stall_progress": -1e-3},
     ):
         with pytest.raises(ValueError):
