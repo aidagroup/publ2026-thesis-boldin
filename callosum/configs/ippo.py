@@ -8,10 +8,12 @@ field gets an argparse flag instead (`--num-envs`, `--no-anneal-lr`, ...).
 
 import argparse
 import dataclasses
+import json
 import types
 import typing
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from callosum.envs._partner_obs import PARTNER_OBS_MODES, validate_partner_obs
 from callosum.envs._sim_compat import is_cpu_backend
@@ -32,7 +34,14 @@ class IPPOConfig:
     runs_dir: str = "runs"
     seed: int = 1
     checkpoint: str | None = None
-    """Warm start: load both agents' weights from this file (optimizer state is not saved)."""
+    """Warm start: load both agents' weights from this checkpoint file (any format). Optimizer
+    state, counters and the LR schedule start fresh. Mutually exclusive with `resume`."""
+    resume: str | None = None
+    """Exact resume: a run directory (e.g. `runs/faceturn_v3_s2`) with `config.json` and a
+    format-2 `latest.pt`. The run continues in that directory from the saved iteration with the
+    saved optimizer state, RNG states, LR schedule position and best-eval tracking. The
+    hyperparameters, seed and total_timesteps are taken from the directory's `config.json`; any
+    other flag given explicitly must equal the saved value. A finished run returns immediately."""
 
     # --- Environment ---------------------------------------------------------------------
     sim_backend: str = "gpu"
@@ -74,7 +83,8 @@ class IPPOConfig:
     fixed rate was too large for the late, near-deterministic policy (KL above `target_kl` on
     almost every iteration, cutting the PPO epochs short). The schedule belongs to the run: with
     a warm start (`checkpoint`) it restarts from `learning_rate` for the new run's iterations
-    (the optimizer state is not restored either). Disable with `--no-anneal-lr`."""
+    (the optimizer state is not restored either), while `resume` continues at the saved
+    iteration. Disable with `--no-anneal-lr`."""
     gamma: float = 0.99
     """0.99, not the baseline's 0.8: 0.8 is a 5-step horizon, tuned for 50-step tasks with an
     immediate reward. FaceTurn needs hundreds of steps and its grasp/turn reward comes late."""
@@ -241,12 +251,87 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def env_reset_seeds(cfg: IPPOConfig, iteration: int) -> tuple[int, int]:
+    """Seeds for the first reset of the training and the evaluation envs.
+
+    A fresh run (`iteration` 0) uses `seed` and `seed + 1`. A run resumed after `iteration`
+    iterations cannot restore the simulator state, so it re-seeds the resets from the iteration
+    too: the initial states are not a replay of those at the start of the run.
+    """
+    base = cfg.seed + 1_000_003 * iteration
+    return base, base + 1
+
+
+def load_resume_values(resume_dir: str | Path, explicit: dict) -> dict:
+    """`IPPOConfig` field values for resuming the run in `resume_dir` (pure; no torch).
+
+    The values are the run's saved `config.json` (extra derived keys such as `obs_dims` are
+    dropped) with `resume` set, so the resumed run uses exactly the original hyperparameters.
+    `explicit` holds the flags given on the command line (`resume` included): each must equal
+    the saved value, except that `exp_name` / `runs_dir` must match the directory itself. The run
+    directory is `resume_dir`, period: `exp_name` and `runs_dir` are derived from it, so a
+    renamed or moved run still resumes in place.
+
+    Raises:
+        ValueError: no `config.json`, `--checkpoint` given as well, or conflicting flags.
+    """
+    run_dir = Path(resume_dir)
+    if not run_dir.name:
+        run_dir = run_dir.resolve()
+    config_path = run_dir / "config.json"
+    if not config_path.is_file():
+        raise ValueError(f"cannot resume {run_dir}: {config_path} not found")
+    if explicit.get("checkpoint") is not None:
+        raise ValueError("--resume and --checkpoint are mutually exclusive")
+    saved = json.loads(config_path.read_text())
+    field_names = {f.name for f in dataclasses.fields(IPPOConfig)}
+    values = {k: v for k, v in saved.items() if k in field_names}
+
+    explicit = dict(explicit)
+    if is_cpu_backend(values.get("sim_backend", "")):
+        # The original run clamped the env counts on the CPU sim; clamp the flags the same way,
+        # so re-running the very same command resumes cleanly.
+        for name in ("num_envs", "num_eval_envs"):
+            if name in explicit:
+                explicit[name] = 1
+
+    conflicts = []
+    for name, value in explicit.items():
+        if name == "resume":
+            continue
+        if name == "exp_name":
+            if value != run_dir.name:
+                conflicts.append(f"--exp-name {value} (resuming {run_dir.name})")
+        elif name == "runs_dir":
+            if Path(value).resolve() != run_dir.parent.resolve():
+                conflicts.append(f"--runs-dir {value} (resuming in {run_dir.parent})")
+        elif name not in values:
+            conflicts.append(f"--{name.replace('_', '-')} {value} (not in the saved config)")
+        elif values[name] != value:
+            flag = "--" + name.replace("_", "-")
+            conflicts.append(f"{flag} {value} (saved: {values[name]})")
+    if conflicts:
+        raise ValueError(
+            f"flags conflict with the saved config of {run_dir}: " + "; ".join(conflicts)
+        )
+    values.update(resume=str(run_dir), runs_dir=str(run_dir.parent), exp_name=run_dir.name)
+    return values
+
+
 def parse_args(argv: Sequence[str] | None = None) -> IPPOConfig:
     """Parse CLI flags into an `IPPOConfig`, e.g. `--env-id TwoSO101-v0 --num-envs 64`.
 
-    With a CPU `--sim-backend` the env counts are clamped to one (a note is printed).
+    With a CPU `--sim-backend` the env counts are clamped to one (a note is printed). With
+    `--resume DIR` the config is the one saved in `DIR/config.json` (see `load_resume_values`).
     """
-    values = vars(build_parser().parse_args(argv))
+    parser = build_parser()
+    values = vars(parser.parse_args(argv))
+    if values.get("resume") is not None:
+        try:
+            values = load_resume_values(values["resume"], values)
+        except ValueError as err:
+            parser.error(str(err))
+        return IPPOConfig(**values)
     note = clamp_envs_for_cpu_backend(values)
     if note is not None:
         print(note)

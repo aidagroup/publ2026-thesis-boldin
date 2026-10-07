@@ -25,7 +25,7 @@ for things that genuinely need a GPU.
 | Driver | 570.172.08 (CUDA ≤ 12.8 → torch `cu128`) |
 | Access | JupyterHub web UI + its terminal only; **no SSH**; user `jovyan`, no root |
 | Internet | allowlist only (GitHub, PyPI, PyTorch, Hugging Face, lab LLM proxy, …) |
-| `$HOME` | 4.0 GB total, 888 MB free (2026-10-04); persistent (assumed) |
+| `$HOME` | 100 GB, persistent (2026-10-07; was 4.0 GB with 888 MB free); survives a container restart |
 | `/` overlay (`/tmp`) | 291 GB, 76 GB free (2026-10-04); assumed wiped on restart |
 | Missing tools | `uv` (setup installs it), `tmux`, `screen` |
 
@@ -213,7 +213,8 @@ One line per iteration: `iter 12/390 | step 307200 | sps 3700 | ret 31.2 | succ 
 ent a/b 5.1/5.2 | kl a/b 0.01/0.02 | lr 2.9e-04 | eval_succ 0.00 | eval_ret 28.1`. `lr` is
 the learning rate of that iteration: it decays linearly to 0 over the run (`anneal_lr`, on by
 default, `--no-anneal-lr` for a constant rate; with `--checkpoint` the schedule restarts from
-`--learning-rate` for the new run's iterations). `ret`/`succ` are the
+`--learning-rate` for the new run's iterations, with `--resume` it continues at the saved
+iteration). `ret`/`succ` are the
 training episodes that finished during the iteration (`n` = how many; `ret -` / `n=0` until the
 first one ends, and `ret`/`succ` then keep their last value). On `FaceTurn-v0` `ret` and
 `eval_ret` include the one-step success bonus (`success_bonus`, 100 in normalised units, see
@@ -227,9 +228,11 @@ as the untrained baseline). TensorBoard tags (section 4): `train/{return,success
 `eval/{return,success_once,success_at_end,...}`, `losses/agent_{a,b}/{policy_loss,value_loss,
 entropy,approx_kl,clipfrac,explained_variance}`, `policy/agent_{a,b}/action_std`, `charts/{SPS,learning_rate}`.
 Files in `runs/$NAME/`: `config.json`, `events.out.tfevents.*`, `latest.pt` (every 20
-iterations and at the end), `best.pt` (best evaluation success, then return): about 2.3 MB each,
-both agents' weights plus the config, no optimizer state (`--checkpoint <file>` warm-starts from
-the weights).
+iterations and at the end), `best.pt` (best evaluation success, then return): about 7 MB each,
+the full training state (both agents' weights, Adam state, RNG states, counters, best eval,
+config), so `--resume runs/$NAME` continues an interrupted run exactly from the last `latest.pt`
+(see "Long runs"). `--checkpoint <file>` takes only the weights (warm start of a new run; also
+accepts older weights-only files).
 
 ##### FaceTurn v2: three seeds from scratch (success bonus, LR annealing)
 
@@ -237,7 +240,10 @@ the weights).
 seeds one after another** (the envs share the GPU, three at once would slow each). After each
 run its directory is archived into `~/callosum-archive/<name>.tar.gz` (`runs/` is a symlink to
 `~/callosum-runs`; the archive holds the event files, `config.json`, `stdout.log` and both
-checkpoints, a few MB):
+checkpoints, ~15 MB). **The same command is also the restart command**: after a container
+restart or a crash, run it again unchanged. A seed with `runs/$NAME/latest.pt` is continued with
+`--resume` (stdout is appended), otherwise it starts fresh; a finished seed returns immediately
+(and is archived again), so finished seeds are skipped cheaply:
 
 ```bash
 source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
@@ -245,9 +251,15 @@ mkdir -p "$HOME/callosum-archive"
 setsid nohup bash -c '
 for SEED in 1 2 3; do
   NAME=faceturn_v2_s$SEED; mkdir -p runs/$NAME
-  uv run python -m callosum.training.ippo --env-id FaceTurn-v0 \
-      --total-timesteps 30000000 --seed $SEED --exp-name $NAME \
-      > runs/$NAME/stdout.log 2>&1 < /dev/null
+  if [ -f runs/$NAME/latest.pt ]; then
+    uv run python -m callosum.training.ippo --resume runs/$NAME \
+        >> runs/$NAME/stdout.log 2>&1 < /dev/null
+  else
+    rm -rf runs/$NAME; mkdir -p runs/$NAME   # a run killed before its first latest.pt
+    uv run python -m callosum.training.ippo --env-id FaceTurn-v0 \
+        --total-timesteps 30000000 --seed $SEED --exp-name $NAME \
+        > runs/$NAME/stdout.log 2>&1 < /dev/null
+  fi
   tar czf "$HOME/callosum-archive/$NAME.tar.gz" -C runs $NAME
 done' > runs/faceturn_v2_driver.log 2>&1 < /dev/null &
 echo $! > runs/faceturn_v2_driver.pid
@@ -325,16 +337,33 @@ kill <pid>                                    # same, if the pid file is right
 ```
 
 SIGTERM makes the trainer finish the current iteration, run an evaluation and write
-`latest.pt` before exiting (`kill -9` loses everything since the last periodic save).
+`latest.pt` before exiting (`kill -9` or a container restart loses only what happened since the
+last periodic save, `checkpoint_freq` iterations at most).
+
+**Resume after a kill or a container restart:** `uv run python -m callosum.training.ippo
+--resume runs/$NAME` (detached with `setsid nohup`, appending to the log with `>>`, like above).
+The run continues in the same directory from the iteration of `latest.pt`: same learning-rate
+schedule position, Adam moments, RNG states, step counters and best-eval tracking; the
+hyperparameters, seed and `total_timesteps` come from `runs/$NAME/config.json`, so no other flag
+is needed (a flag that is given must equal the saved value, otherwise the trainer refuses;
+`--resume` with `--checkpoint` is an error; a `latest.pt` from before this feature, which holds
+only weights, cannot be resumed, use `--checkpoint` for a warm start instead). Prints
+`resumed <dir> from iter X/N, step S`; a finished run prints that it is complete and exits.
+Not restored exactly: the simulator state (the envs are reset with seeds derived from the
+resumed iteration, so the episodes in flight at the kill start over) and TensorBoard events
+after the checkpoint (the killed process's events are discarded, the curves continue cleanly).
+The code must be the same as when the run started (do not `update_server.sh` in between,
+unless the change does not affect training).
 
 `stdout.log` lives in `$HOME` via the `runs/` symlink, so it survives a restart
-(the run itself does not). Do not run `update_server.sh` / `git pull` / switch branches mid-run: `callosum`
+(the process itself does not; continue it with `--resume`). Do not run `update_server.sh` / `git pull` / switch branches mid-run: `callosum`
 is installed editable, so later imports would see the new code.
 
 **Verify on the server first** that detaching really works: `setsid nohup sleep 600 &`,
 close the browser tab, reopen a terminal, `pgrep sleep`. It must still be there. Also
-unknown: whether the lab kills long-running processes or idle containers; make
-trainers save a checkpoint periodically rather than only at the end.
+unknown: whether the lab kills long-running processes or idle containers; the trainer
+saves a full-state checkpoint periodically (`--checkpoint-freq`, default 20 iterations) so that
+`--resume` loses little.
 
 If a notebook is more convenient than a terminal for reading, `!tail -40
 runs/<name>/stdout.log` in a cell is fine (reading only; never start the run there).
@@ -343,9 +372,9 @@ runs/<name>/stdout.log` in a cell is fine (reading only; never start the run the
 
 Checkpoints and TensorBoard logs live under `runs/` (→ `~/callosum-runs`) and are
 git-ignored, so they do **not** come back via git. `wandb.ai` is not reachable
-from the server, so metrics stay local. **`$HOME` has < 1 GB free**: check
-`du -sh runs/*` after each run, delete checkpoints you will not use, and download
-the keepers promptly (the quota is shared with everything else in `$HOME`).
+from the server, so metrics stay local. `$HOME` is a persistent 100 GB disk, so checkpoints
+(~7 MB each, full training state) can stay there; still check `du -sh runs/*` now and then and
+download the keepers.
 
 TensorBoard has no SSH tunnel to ride on. Two options:
 
@@ -366,7 +395,7 @@ TensorBoard has no SSH tunnel to ride on. Two options:
 
    ```bash
    tar czf ~/runs-logs.tar.gz --exclude='*.pt' -C "$CALLOSUM_REPO" runs
-   du -sh ~/runs-logs.tar.gz                   # must fit in the 888 MB quota
+   du -sh ~/runs-logs.tar.gz
    ```
 
    Download `runs-logs.tar.gz` from the file browser (right-click → Download),

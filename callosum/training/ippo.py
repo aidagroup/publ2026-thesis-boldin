@@ -21,7 +21,13 @@ rollout/GAE/update structure, `ManiSkillVectorEnv` with partial resets and `reco
   (the baseline bootstraps terminations too), see FaceTurnRewardConfig.success_bonus.
 * The learning rate decays linearly to 0 over the run by default (`anneal_lr`).
 * Logging to TensorBoard (`runs/<run_name>/`) and one compact line per iteration on stdout;
-  checkpoints `latest.pt` and `best.pt` (by evaluation success) in the same directory.
+  checkpoints `latest.pt` and `best.pt` (by evaluation success) in the same directory. Both carry
+  the full training state (weights, Adam moments, RNG states, counters, best-eval score), see
+  `_checkpoint`.
+* `--resume <run dir>` continues a killed run exactly where its `latest.pt` stopped (same
+  directory, LR schedule position, optimizer state, counters, best-eval tracking); the simulator
+  state cannot be saved, so the envs are reset with seeds derived from the resumed iteration.
+  `--checkpoint <file>` is the weights-only warm start of a new run.
 
 Envs are always created with `obs_mode="state", render_backend="none"`: the lab server only has a
 software Vulkan device, and the default render device cannot be created there.
@@ -43,10 +49,22 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from torch.utils.tensorboard import SummaryWriter
 
 import callosum.envs.face_turn  # noqa: F401  (registers TwoSO101-v0 and FaceTurn-v0)
-from callosum.configs.ippo import IPPOConfig, learning_rate_at, parse_args, resolve_episode_length
+from callosum.configs.ippo import (
+    IPPOConfig,
+    env_reset_seeds,
+    learning_rate_at,
+    parse_args,
+    resolve_episode_length,
+)
 from callosum.envs._sim_compat import prepare_sim_backend
 from callosum.training._agent_obs import AgentObsBuilder
-from callosum.training._checkpoint import load_agent_weights, load_checkpoint, save_checkpoint
+from callosum.training._checkpoint import (
+    TrainingState,
+    load_agent_weights,
+    load_checkpoint,
+    load_training_state,
+    save_checkpoint,
+)
 from callosum.training._metrics import EpisodeStats, MetricLogger, progress_line
 from callosum.training._ppo_core import ActorCritic, compute_gae, ppo_update
 
@@ -123,25 +141,55 @@ def evaluate(
 
 
 def run(cfg: IPPOConfig) -> Path:
-    """Train; returns the run directory."""
+    """Train (or, with `cfg.resume`, continue a run); returns the run directory."""
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    run_name = cfg.exp_name or f"{cfg.env_id}__ippo__{cfg.seed}__{int(time.time())}"
-    run_dir = Path(cfg.runs_dir) / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    resume_payload = None
+    if cfg.resume:
+        run_dir = Path(cfg.resume)
+        latest = run_dir / "latest.pt"
+        if not latest.is_file():
+            raise FileNotFoundError(f"cannot resume {run_dir}: {latest} not found")
+        resume_payload = load_checkpoint(latest)
+        if resume_payload.get("format") != 2:
+            # Same error as load_training_state, but before the (slow) env creation.
+            load_training_state(resume_payload, [], [])
+        if resume_payload["iteration"] >= cfg.num_iterations:
+            print(
+                f"run {run_dir} is already complete (iter {resume_payload['iteration']}/"
+                f"{cfg.num_iterations}, step {resume_payload['global_step']}); nothing to do"
+            )
+            return run_dir
+    else:
+        run_name = cfg.exp_name or f"{cfg.env_id}__ippo__{cfg.seed}__{int(time.time())}"
+        run_dir = Path(cfg.runs_dir) / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
 
     envs = make_envs(cfg, cfg.num_envs, ignore_terminations=not cfg.partial_reset)
     eval_envs = make_envs(cfg, cfg.num_eval_envs, ignore_terminations=True)
     try:
-        return _train(cfg, run_dir, envs, eval_envs)
+        return _train(cfg, run_dir, envs, eval_envs, resume_payload)
     finally:
         envs.close()
         eval_envs.close()
 
 
+def _best_score_of(run_dir: Path) -> tuple[float, float] | None:
+    """The best-eval score stored in `best.pt` (it can be newer than the one in `latest.pt`)."""
+    path = run_dir / "best.pt"
+    if not path.is_file():
+        return None
+    best = load_checkpoint(path).get("best_score")
+    return None if best is None else (float(best[0]), float(best[1]))
+
+
 def _train(
-    cfg: IPPOConfig, run_dir: Path, envs: ManiSkillVectorEnv, eval_envs: ManiSkillVectorEnv
+    cfg: IPPOConfig,
+    run_dir: Path,
+    envs: ManiSkillVectorEnv,
+    eval_envs: ManiSkillVectorEnv,
+    resume_payload: dict | None = None,
 ) -> Path:
     device = envs.device
     uids = agent_uids_of(envs)
@@ -160,10 +208,14 @@ def _train(
     env_episode_steps = int(gym_utils.find_max_episode_steps_value(envs._env))
     num_eval_steps = resolve_episode_length(cfg, env_episode_steps)
 
-    # Start the envs and build/verify the per-agent observation slicing on both of them.
-    obs, _ = envs.reset(seed=cfg.seed)
+    # Start the envs and build/verify the per-agent observation slicing on both of them. The env
+    # state cannot be restored on resume, so the resets are seeded from the resumed iteration
+    # (a fresh run: `seed` / `seed + 1`) and are not a replay of the start of the run.
+    resumed_iteration = 0 if resume_payload is None else int(resume_payload["iteration"])
+    train_seed, eval_seed = env_reset_seeds(cfg, resumed_iteration)
+    obs, _ = envs.reset(seed=train_seed)
     builder = make_obs_builder(envs, obs, cfg)
-    eval_obs, _ = eval_envs.reset(seed=cfg.seed + 1)
+    eval_obs, _ = eval_envs.reset(seed=eval_seed)
     eval_builder = make_obs_builder(eval_envs, eval_obs, cfg)
     assert eval_builder.fields == builder.fields, "train and eval observations differ"
 
@@ -172,12 +224,20 @@ def _train(
     # stalls on the server.
     agents = [ActorCritic(d, a).to(device) for d, a in zip(builder.obs_dims, action_dims)]
     optimizers = [torch.optim.Adam(a.parameters(), lr=cfg.learning_rate, eps=1e-5) for a in agents]
-    if cfg.checkpoint:
+    resumed: TrainingState | None = None
+    if resume_payload is not None:
+        # After the env resets and the network construction (the last consumers of torch random
+        # numbers during setup), so the restored RNG state is the one at the checkpoint.
+        resumed = load_training_state(resume_payload, agents, optimizers)
+        best_on_disk = _best_score_of(run_dir)
+        if best_on_disk is not None and (
+            resumed.best_score is None or best_on_disk > resumed.best_score
+        ):
+            resumed.best_score = best_on_disk
+    elif cfg.checkpoint:
         load_agent_weights(load_checkpoint(cfg.checkpoint, map_location=device), agents)
         print(f"warm start from {cfg.checkpoint}")
 
-    writer = SummaryWriter(str(run_dir))
-    logger = MetricLogger(writer)
     config_dict = dataclasses.asdict(cfg)
     config_dict.update(
         env_max_episode_steps=env_episode_steps,
@@ -187,11 +247,19 @@ def _train(
         num_iterations=cfg.num_iterations,
         obs_dims=builder.obs_dims,
     )
-    (run_dir / "config.json").write_text(json.dumps(config_dict, indent=2))
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n" + "\n".join(f"|{k}|{v}|" for k, v in config_dict.items()),
-    )
+    if resumed is None:
+        writer = SummaryWriter(str(run_dir))
+        (run_dir / "config.json").write_text(json.dumps(config_dict, indent=2))
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n" + "\n".join(f"|{k}|{v}|" for k, v in config_dict.items()),
+        )
+    else:
+        # config.json and the hyperparameters text are already there. Events the killed process
+        # logged after the checkpoint (steps >= purge_step) are discarded by TensorBoard, so the
+        # curves continue cleanly from the checkpointed iteration.
+        writer = SummaryWriter(str(run_dir), purge_step=resumed.global_step + 1)
+    logger = MetricLogger(writer)
 
     print(
         f"run {run_dir} | env {cfg.env_id} | sim {cfg.sim_backend} on {device} | "
@@ -229,6 +297,12 @@ def _train(
     dones = torch.zeros((steps, n), device=device)
 
     state = {"best_score": None, "last_eval": {}}
+    if resumed is not None:
+        state["best_score"] = resumed.best_score
+        state["last_eval"] = resumed.last_eval
+        # So the stdout line shows the last evaluation until the next one runs.
+        for key, value in resumed.last_eval.items():
+            logger.latest["eval/" + key] = value
 
     def run_eval(iteration: int, global_step: int) -> None:
         eval_start = time.time()
@@ -257,16 +331,32 @@ def _train(
             iteration,
             global_step,
             state["last_eval"],
+            optimizers=optimizers,
+            best_score=state["best_score"],
+            train_seconds=base_seconds + time.time() - start_time,
         )
 
     global_step = 0
+    base_seconds = 0.0  # wall time of the earlier processes of a resumed run
+    first_iteration = 1
     start_time = time.time()
     agent_obs = builder(obs)
     next_done = torch.zeros(n, device=device)
-    run_eval(0, 0)
-    iteration = 0
+    if resumed is None:
+        run_eval(0, 0)
+        iteration = 0
+    else:
+        iteration = resumed.iteration
+        global_step = resumed.global_step
+        base_seconds = resumed.train_seconds
+        first_iteration = iteration + 1
+        print(
+            f"resumed {run_dir} from iter {iteration}/{cfg.num_iterations}, step {global_step}",
+            flush=True,
+        )
+    start_step = global_step  # SPS counts only the steps of this process
 
-    for iteration in range(1, cfg.num_iterations + 1):
+    for iteration in range(first_iteration, cfg.num_iterations + 1):
         lr = learning_rate_at(cfg, iteration)
         for opt in optimizers:
             opt.param_groups[0]["lr"] = lr
@@ -348,7 +438,7 @@ def _train(
         update_time = time.time() - update_start
 
         # --- Logging, evaluation, checkpoints ---------------------------------------------
-        sps = global_step / (time.time() - start_time)
+        sps = (global_step - start_step) / (time.time() - start_time)
         logger.log_many(train_stats.means(), global_step, prefix="train/")
         logger.log("train/episodes", train_stats.num_episodes, global_step)
         logger.log("rollout/step_reward", rewards.mean(), global_step)
@@ -373,10 +463,11 @@ def _train(
         if stop_requested:
             break
 
-    elapsed = time.time() - start_time
+    process_seconds = time.time() - start_time
     print(
-        f"done: {iteration} iterations, {global_step} steps in {elapsed:.0f}s "
-        f"({global_step / elapsed:.0f} sps) | best eval {state['best_score']}",
+        f"done: {iteration} iterations, {global_step} steps in {base_seconds + process_seconds:.0f}s "
+        f"({(global_step - start_step) / process_seconds:.0f} sps) | "
+        f"best eval {state['best_score']}",
         flush=True,
     )
     writer.close()

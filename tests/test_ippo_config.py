@@ -1,12 +1,18 @@
 """Config and CLI parsing of the IPPO trainer (pure stdlib, runs without torch/mani_skill)."""
 
+import dataclasses
+import json
+from pathlib import Path
+
 import pytest
 
 from callosum.configs.ippo import (
     IPPOConfig,
     build_parser,
     clamp_envs_for_cpu_backend,
+    env_reset_seeds,
     learning_rate_at,
+    load_resume_values,
     parse_args,
     resolve_episode_length,
 )
@@ -123,3 +129,109 @@ def test_lr_constant_without_annealing() -> None:
     )
     assert cfg.anneal_lr is False
     assert {learning_rate_at(cfg, k) for k in (1, 5, 10)} == {cfg.learning_rate}
+
+
+# --- --resume ----------------------------------------------------------------------------
+
+
+def _write_run(tmp_path: Path, name: str = "run_a", **overrides) -> Path:
+    """A run directory with a `config.json` as the trainer writes it (derived keys included)."""
+    fields = {
+        "env_id": "TwoSO101-v0", "seed": 7, "total_timesteps": 100_000, "num_envs": 64,
+        "num_steps": 50, "num_minibatches": 4, "exp_name": name, "runs_dir": "runs",
+    }  # fmt: skip
+    cfg = IPPOConfig(**{**fields, **overrides})
+    saved = dataclasses.asdict(cfg)
+    saved.update(
+        env_max_episode_steps=100,
+        num_eval_steps=100,
+        batch_size=cfg.batch_size,
+        minibatch_size=cfg.minibatch_size,
+        num_iterations=cfg.num_iterations,
+        obs_dims=[40, 44],
+    )
+    run_dir = tmp_path / name
+    run_dir.mkdir()
+    (run_dir / "config.json").write_text(json.dumps(saved, indent=2))
+    return run_dir
+
+
+def test_resume_uses_the_saved_config(tmp_path) -> None:
+    run_dir = _write_run(tmp_path, learning_rate=1e-4, target_kl=None, partner_obs="none")
+    cfg = parse_args(["--resume", str(run_dir)])
+    assert cfg.resume == str(run_dir)
+    assert (cfg.env_id, cfg.seed, cfg.total_timesteps) == ("TwoSO101-v0", 7, 100_000)
+    assert (cfg.num_envs, cfg.num_steps, cfg.num_minibatches) == (64, 50, 4)
+    assert cfg.learning_rate == 1e-4 and cfg.target_kl is None and cfg.partner_obs == "none"
+    assert cfg.num_iterations == 100_000 // (64 * 50)
+
+
+def test_resume_run_dir_is_the_given_dir(tmp_path) -> None:
+    run_dir = _write_run(tmp_path, name="orig")
+    renamed = run_dir.rename(tmp_path / "renamed")  # config.json still says exp_name=orig
+    cfg = parse_args(["--resume", str(renamed)])
+    assert Path(cfg.runs_dir) / cfg.exp_name == renamed
+    assert cfg.resume == str(renamed)
+    # A trailing slash does not change it either.
+    cfg = parse_args(["--resume", str(renamed) + "/"])
+    assert Path(cfg.runs_dir) / cfg.exp_name == renamed
+
+
+def test_resume_without_saved_exp_name(tmp_path) -> None:
+    run_dir = _write_run(tmp_path)
+    saved = json.loads((run_dir / "config.json").read_text())
+    saved["exp_name"] = None  # a timestamped default name: the directory still decides
+    (run_dir / "config.json").write_text(json.dumps(saved))
+    cfg = parse_args(["--resume", str(run_dir)])
+    assert cfg.exp_name == run_dir.name and cfg.runs_dir == str(tmp_path)
+
+
+def test_resume_accepts_flags_equal_to_the_saved_values(tmp_path) -> None:
+    run_dir = _write_run(tmp_path)
+    cfg = parse_args(
+        ["--resume", str(run_dir), "--seed", "7", "--env-id", "TwoSO101-v0", "--num-envs", "64",
+         "--exp-name", run_dir.name, "--runs-dir", str(tmp_path), "--anneal-lr"]
+    )  # fmt: skip
+    assert cfg.seed == 7 and cfg.num_envs == 64
+
+
+def test_resume_rejects_conflicting_flags(tmp_path) -> None:
+    run_dir = _write_run(tmp_path)
+    with pytest.raises(SystemExit):
+        parse_args(["--resume", str(run_dir), "--seed", "8"])
+    with pytest.raises(ValueError, match="--seed 8 .*--learning-rate 0.1") as info:
+        load_resume_values(run_dir, {"seed": 8, "learning_rate": 0.1, "num_envs": 64})
+    assert "--num-envs" not in str(info.value)  # equal to the saved value: no conflict
+    with pytest.raises(ValueError, match="--exp-name other"):
+        load_resume_values(run_dir, {"exp_name": "other"})
+    with pytest.raises(ValueError, match="--runs-dir"):
+        load_resume_values(run_dir, {"runs_dir": str(tmp_path / "elsewhere")})
+
+
+def test_resume_rejects_checkpoint_and_missing_config(tmp_path) -> None:
+    run_dir = _write_run(tmp_path)
+    with pytest.raises(SystemExit):
+        parse_args(["--resume", str(run_dir), "--checkpoint", "warm.pt"])
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        load_resume_values(run_dir, {"checkpoint": "warm.pt"})
+    with pytest.raises(SystemExit):
+        parse_args(["--resume", str(tmp_path / "does_not_exist")])
+
+
+def test_resume_ignores_unknown_saved_keys_and_clamps_cpu_flags(tmp_path) -> None:
+    run_dir = _write_run(tmp_path, sim_backend="cpu", num_envs=1, num_eval_envs=1, num_steps=100)
+    saved = json.loads((run_dir / "config.json").read_text())
+    saved["some_future_key"] = 1
+    (run_dir / "config.json").write_text(json.dumps(saved))
+    assert "obs_dims" not in load_resume_values(run_dir, {})
+    # Re-running the original CPU command (which asked for 256 envs, clamped to 1) resumes.
+    cfg = parse_args(["--resume", str(run_dir), "--sim-backend", "cpu", "--num-envs", "256"])
+    assert cfg.num_envs == 1 and cfg.sim_backend == "cpu"
+
+
+def test_env_reset_seeds() -> None:
+    cfg = IPPOConfig(seed=5)
+    assert env_reset_seeds(cfg, 0) == (5, 6)  # a fresh run keeps the historical seeds
+    train, evaluation = env_reset_seeds(cfg, 40)
+    assert (train, evaluation) != (5, 6) and train != evaluation
+    assert env_reset_seeds(cfg, 40) != env_reset_seeds(cfg, 41)

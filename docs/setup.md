@@ -12,8 +12,9 @@ shell machine (image `jupyter/singleuser-gpu_570`, Ubuntu 24.04, user `jovyan`,
 no root; no `tmux`/`screen`; `git`, `curl`, `pip`, `conda`, `gcc`, `nohup`,
 `setsid` are there; probed 2026-08-30). What that means in practice:
 
-- **`$HOME` (`/home/jovyan`) is tiny**: 4.0 GB total, 888 MB free (measured
-  2026-10-04). A torch + CUDA venv alone is ~8 GB, so it cannot live there.
+- **`$HOME` (`/home/jovyan`) is a persistent 100 GB disk** (2026-10-07; it was 4.0 GB
+  with 888 MB free on 2026-10-04). Results live there; the venv and caches still go to
+  scratch (below), which is faster to recreate than to keep in sync with `$HOME`.
 - **The overlay filesystem (`/`, so `/tmp`) is big**: 291 GB, 76 GB free
   (2026-10-04). It is assumed to be **wiped when the container restarts**
   (unconfirmed, so plan for it).
@@ -114,8 +115,9 @@ filesystem) is assumed to be wiped on restart; `$HOME` is small but persistent.
 Consequences: nothing under the checkout is precious (never edit code on the
 server; push from the Mac); re-running setup after a wipe re-downloads torch +
 CUDA wheels (several GB; time not measured yet), so keep that in mind when
-planning a session; and `~/callosum-runs` shares the 888 MB quota, so prune
-checkpoints and download results regularly.
+planning a session. `~/callosum-runs` is on the persistent `$HOME`, so run
+directories (full-state checkpoints, ~7 MB each) survive a restart and
+`python -m callosum.training.ippo --resume runs/<name>` continues a killed run.
 
 Without `~/.callosum-env.sh` sourced, `uv run` does not know about the venv in
 scratch and silently builds a second one inside the checkout. The setup script
@@ -190,7 +192,7 @@ JupyterHub file browser: download results                              (→ dev 
 ```
 
 - **Code** flows dev → server via git push/pull (this repo). There is no rsync/scp/SSH to the server; never edit code on the server (its checkout is disposable).
-- **Results** (checkpoints, TensorBoard logs) are written to `runs/`, which on the server is a symlink into `$HOME` so it survives a container restart (git-ignored). Pull them back with the JupyterHub file browser (right-click → Download; tar up a directory first) and view TensorBoard either through JupyterHub or locally (see [server-runbook.md](server-runbook.md#4-watching-and-collecting-results)). `$HOME` has < 1 GB free: prune checkpoints. There is no hosted experiment tracker: `wandb.ai` is not on the server's allowlist.
+- **Results** (checkpoints, TensorBoard logs) are written to `runs/`, which on the server is a symlink into `$HOME` so it survives a container restart (git-ignored). Pull them back with the JupyterHub file browser (right-click → Download; tar up a directory first) and view TensorBoard either through JupyterHub or locally (see [server-runbook.md](server-runbook.md#4-watching-and-collecting-results)). `$HOME` is a persistent 100 GB disk, so checkpoints may stay there. There is no hosted experiment tracker: `wandb.ai` is not on the server's allowlist.
 - The state-based baseline needs no camera rendering, but SAPIEN still needs a Vulkan device (see the Server section). Camera/vision observations come in later.
 
 > Note: `uv.lock` is committed for reproducibility – the same resolved versions install on both machines.
