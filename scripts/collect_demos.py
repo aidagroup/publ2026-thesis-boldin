@@ -19,7 +19,14 @@ the expert fits into the episode under the training controller.
     python scripts/collect_demos.py --sim-backend cpu --num-batches 20
 
 The file layout is documented in `callosum.training._demos`. Exit status: 1 if no successful
-episode was collected.
+episode was collected. A batch without any success prints how far its episodes got (expert
+phases reached, grasps, face angle, body drift) so that a failed collection can be diagnosed
+from the log.
+
+`--max-episode-steps N` overrides the registered 400-step episode (for diagnosis: does the
+expert succeed at all, and when?). The value is stored in the file's `meta`, and the trainers
+refuse demos whose episode length differs from the env they train in, so demos collected with a
+non-default limit are only usable together with the same `--max-episode-steps` in training.
 """
 
 import sys
@@ -33,6 +40,8 @@ from mani_skill.utils import gym_utils
 
 import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
 from callosum.configs.face_turn_expert import ExpertControlConfig
+from callosum.envs.face_turn import TARGET_FACE_ANGLE
+from callosum.experts._tracking import describe_progress
 from callosum.experts.face_turn_expert import ArmModel, Rig, run_expert
 from callosum.training._agent_obs import AGENT_UIDS, obs_layout
 from callosum.training._demos import (
@@ -76,6 +85,13 @@ def _add_args(parser) -> None:
         "ExpertControlConfig.overlap_approach); default: overlapped.",
     )
     parser.add_argument(
+        "--max-episode-steps",
+        type=int,
+        default=None,
+        help="Episode limit passed to gym.make (diagnosis only; default: the registered 400). "
+        "Stored in the demo metadata; BC/IPPO must train with the same episode length.",
+    )
+    parser.add_argument(
         "--out",
         default=None,
         help="Output file (default: runs/demos/faceturn_delta_<timestamp>.pt).",
@@ -101,6 +117,47 @@ def _recorder(rig: Rig, rows: dict[str, list]):
     return record
 
 
+class _Progress:
+    """Per-env running statistics of a batch (face angle, grasps, body drift), for diagnosis."""
+
+    def __init__(self, n: int) -> None:
+        self.face_max = np.zeros(n)
+        self.face_end = np.zeros(n)
+        self.holder = np.zeros(n, dtype=bool)
+        self.rotator = np.zeros(n, dtype=bool)
+        self.both = np.zeros(n, dtype=bool)
+        self.body_rot = np.zeros(n)
+        self.body_pos = np.zeros(n)
+
+    def update(self, info: dict) -> None:
+        def get(key: str) -> np.ndarray:
+            return info[key].reshape(-1).detach().cpu().numpy()
+
+        self.face_end = get("face_angle")
+        self.face_max = np.maximum(self.face_max, self.face_end)
+        holder, rotator = get("holder_grasp").astype(bool), get("rotator_grasp").astype(bool)
+        self.holder |= holder
+        self.rotator |= rotator
+        self.both |= holder & rotator
+        self.body_rot = np.maximum(self.body_rot, get("body_rot_drift"))
+        self.body_pos = np.maximum(self.body_pos, get("body_pos_drift"))
+
+    def describe(self, cfg) -> list[str]:
+        return describe_progress(
+            self.face_max,
+            self.face_end,
+            self.holder,
+            self.rotator,
+            self.both,
+            self.body_rot,
+            self.body_pos,
+            TARGET_FACE_ANGLE,
+            cfg.angle_tol,
+            cfg.body_rot_tol,
+            cfg.body_pos_tol,
+        )
+
+
 def _print_summary(episodes: list[dict], attempted: int, steps: np.ndarray) -> None:
     """Success rate over all attempted episodes and the first-success step distribution."""
     kept = len(episodes)
@@ -121,15 +178,22 @@ def main() -> None:
     # differ per env. The CPU sim (1 env) is where it was checked.
     args = parse_args(__doc__, _add_args)
     start = time.time()
+    extra = {}
+    if args.max_episode_steps is not None:
+        if args.max_episode_steps < 1:
+            raise SystemExit(f"--max-episode-steps must be >= 1, got {args.max_episode_steps}")
+        extra["max_episode_steps"] = args.max_episode_steps
     env = make_env(
         ENV_ID,
         args,
         control_mode=CONTROL_MODE,
         reward_mode=REWARD_MODE,
         reconfiguration_freq=0,  # as the trainer: the scene is never rebuilt on reset
+        **extra,
     )
     base = env.unwrapped
     max_steps = int(gym_utils.find_max_episode_steps_value(env))
+    print(f"episode limit: {max_steps} steps" + (" (overridden)" if extra else ""))
     control = ExpertControlConfig(control="delta", overlap_approach=not args.no_overlap)
     model = ArmModel()
 
@@ -157,7 +221,10 @@ def main() -> None:
             k: [] for k in ("obs", "actions", "rewards", "terminated", "truncated", "success")
         }
         rig.callbacks.append(_recorder(rig, rows))
-        run_expert(rig)
+        progress = _Progress(base.num_envs)
+        rig.callbacks.append(lambda *cb_args, p=progress: p.update(cb_args[-1]))
+        phase_ends: list[tuple[str, int]] = []
+        run_expert(rig, on_phase=lambda name, r=rig, e=phase_ends: e.append((name, r.steps)))
         batch = split_rollout(
             torch.stack(rows["obs"]),
             torch.stack(rows["actions"]),
@@ -178,6 +245,14 @@ def main() -> None:
             f"({rig.steps} env steps, {time.time() - start:.0f}s elapsed)",
             flush=True,
         )
+        print("  expert phases ended at env step: " + ", ".join(f"{n} {s}" for n, s in phase_ends))
+        if not wins:
+            last = phase_ends[-1][0] if phase_ends else "none"
+            print(
+                f"  no success in this batch: the expert stopped at env step {rig.steps} "
+                f"(episode limit {max_steps}), last completed phase: {last}"
+            )
+            print("\n".join(progress.describe(base.reward_config)), flush=True)
     env.close()
 
     _print_summary(episodes, attempted, np.array(first_steps))

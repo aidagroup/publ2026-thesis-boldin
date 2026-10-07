@@ -229,6 +229,26 @@ def check_layout_matches(meta: dict[str, Any], layout: Sequence[tuple[Sequence[s
         )
 
 
+def episode_length_mismatch(
+    demo_steps: int | None, env_steps: int, source: str = "the demo file"
+) -> str | None:
+    """A message if demos recorded with `demo_steps`-step episodes do not fit an env with
+    `env_steps`, else `None` (also `None` when the file does not record its episode length).
+
+    The demonstrations are time-limited trajectories: the expert's pace, the value targets (the
+    returns of an episode cut by the limit are bootstrapped differently) and the policy's
+    time-to-go cues all assume the episode length they were collected with, so BC and the IPPO
+    fine-tune must run in an env with the same `max_episode_steps`.
+    """
+    if demo_steps is None or int(demo_steps) == int(env_steps):
+        return None
+    return (
+        f"{source} was collected with max_episode_steps={int(demo_steps)} but the training env "
+        f"runs {int(env_steps)}-step episodes: pass the same value (`--max-episode-steps "
+        f"{int(demo_steps)}`) or recollect the demos"
+    )
+
+
 def success_mask(demos: dict[str, Any], only_success: bool = True) -> torch.Tensor:
     """`(S,)` bool mask of the transitions to use (those of successful episodes by default)."""
     import torch

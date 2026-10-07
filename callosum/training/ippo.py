@@ -81,7 +81,12 @@ from callosum.training._checkpoint import (
     load_training_state,
     save_checkpoint,
 )
-from callosum.training._demos import agent_demo_tensors, check_layout_matches, load_demos
+from callosum.training._demos import (
+    agent_demo_tensors,
+    check_layout_matches,
+    episode_length_mismatch,
+    load_demos,
+)
 from callosum.training._diag import DiagStats
 from callosum.training._metrics import (
     EpisodeStats,
@@ -398,6 +403,15 @@ def _train(
         check_warm_start_compat(payload, builder.obs_dims, builder.fields, cfg.partner_obs)
         load_agent_weights(payload, agents)
         print(f"warm start from {cfg.checkpoint}")
+        # A BC checkpoint records the episode length of its demos; only a warning here, because
+        # evaluating such a checkpoint in a longer or shorter episode is a legitimate probe.
+        mismatch = episode_length_mismatch(
+            payload.get("extra", {}).get("demo_max_episode_steps"),
+            env_episode_steps,
+            f"the demos behind {cfg.checkpoint}",
+        )
+        if mismatch:
+            print(f"WARNING: {mismatch}")
 
     # Demonstrations for the auxiliary BC loss (cut with the same per-agent input rule as the
     # rollouts; the file's layout must be the env's). On resume the file is read again: it is
@@ -406,6 +420,11 @@ def _train(
     if cfg.demos and cfg.bc_coef > 0:
         demo_file = load_demos(cfg.demos)
         check_layout_matches(demo_file["meta"], builder.layout)
+        mismatch = episode_length_mismatch(
+            demo_file["meta"].get("max_episode_steps"), env_episode_steps, f"{cfg.demos}"
+        )
+        if mismatch:
+            raise ValueError(mismatch)
         demo_obs, demo_actions = agent_demo_tensors(demo_file, builder)
         demo_batches = [
             {"obs": o.to(device), "actions": a.to(device)}

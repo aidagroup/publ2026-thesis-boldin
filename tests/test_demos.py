@@ -12,6 +12,7 @@ import pytest
 from callosum.training._demos import (
     check_layout_matches,
     discounted_returns,
+    episode_length_mismatch,
     layout_from_meta,
     layout_to_meta,
 )
@@ -143,3 +144,11 @@ def test_assemble_rejects_empty_and_validate_catches_bad_shapes() -> None:
     bad_meta = dict(demos, meta=dict(demos["meta"], obs_layout=[["extra/x", 3]]))
     with pytest.raises(ValueError, match="obs_layout"):
         validate_demos(bad_meta)
+
+
+def test_episode_length_mismatch_message() -> None:
+    assert episode_length_mismatch(400, 400) is None
+    assert episode_length_mismatch(None, 400) is None  # old file without the field
+    msg = episode_length_mismatch(600, 400, "demos.pt")
+    assert msg is not None and "demos.pt" in msg and "600" in msg and "400" in msg
+    assert "--max-episode-steps 600" in msg

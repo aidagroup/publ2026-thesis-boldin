@@ -248,7 +248,8 @@ def run(cfg: BCConfig) -> Path:
     print(
         f"demos {cfg.demos}: {demos['meta']['num_episodes']} episodes in file, using {episodes} "
         f"({data.size} transitions; train {train.size}, val {0 if val is None else val.size}) | "
-        f"partner_obs {cfg.partner_obs} | device {device} | collected at {meta.get('git_commit')}"
+        f"partner_obs {cfg.partner_obs} | device {device} | collected at {meta.get('git_commit')} | "
+        f"episode limit {meta.get('max_episode_steps')}"
     )
     for i, name in enumerate(AGENT_NAMES):
         print(
@@ -296,7 +297,13 @@ def run(cfg: BCConfig) -> Path:
         data.builder.obs_dims,
         list(meta["agent_uids"]),
         data.builder.fields,
-        extra={"final": final, "value_scale": stats["value_scale"], "demos": cfg.demos},
+        extra={
+            "final": final,
+            "value_scale": stats["value_scale"],
+            "demos": cfg.demos,
+            # The episode length of the demos: the IPPO warm start warns if its env differs.
+            "demo_max_episode_steps": meta.get("max_episode_steps"),
+        },
     )
     (run_dir / "bc_log.json").write_text(json.dumps(stats["history"], indent=2))
     print(f"saved {run_dir / 'bc.pt'}")

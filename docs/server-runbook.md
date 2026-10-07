@@ -392,15 +392,26 @@ fine-tune with the same `--partner-obs`).
 
 The expert runs under the training controller: `pd_joint_delta_pos` (the delta is added to the
 *current* joint position, so a joint moves at most about 0.02 rad per step), the registered
-400-step episode, `obs_mode="state"`, `reward_mode="normalized_dense"`. On the Mac CPU sim it
-succeeds in 40/40 seeds, first success at step 294 to 361 (mean about 310), i.e. it needs
-about 300 of the 400 steps; a learned policy therefore has little slack.
+400-step episode, `obs_mode="state"`, `reward_mode="normalized_dense"`. Under the old
+lockstep tracking it succeeded on the Mac CPU sim in 40/40 seeds, first success at step 294 to
+361 (mean about 310), but on the GPU (16 envs) the first success came at step 365 and with 256
+envs nothing succeeded within 400 steps: every waypoint waited for the slowest env, and the turn
+waited for a wrist target the face's joint limit makes unreachable. The tracking was reworked
+(per-env waypoint progress, integral bias, stall detection, turn ends when the face is at 90
+degrees; see `callosum/experts/_tracking.py`); the CPU numbers above predate that and have to be
+re-measured. The lower bound is set by the controller's speed (about 0.02 rad per step): the
+holder's wrist flex travels about 3.2 rad from the rest pose to the pre-grasp (about 165
+steps), the face turn needs a 1.57 rad wrist roll (about 80 steps), so a first success below
+about 280 steps is not possible with this expert; a learned policy has little slack.
 
 ```bash
 source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
 bash scripts/update_server.sh                  # code and venv up to date (not while a job runs)
 
 # 0. The expert under the training controller on the GPU (exit 0 = success in every env).
+#    Prints per phase `phase_steps` (its length in env steps) and `reaches` (how its closed-loop
+#    reaches ended: by tolerance / stall / timeout, and the worst remaining joint error), and
+#    at the end `phase step counts`.
 uv run python scripts/probe_face_turn.py --control delta --overlap
 
 # 1. Collect demonstrations: 256 envs per reset, 2 resets (seeds 0 and 1); successful episodes
@@ -413,7 +424,13 @@ uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --action-n
 ```
 
 Read the summary: `attempted N episodes, successful M (..%)` and the first-success step
-distribution. Reference values from the Mac CPU sim (one env per reset): clean expert 120/120
+distribution. Each batch also prints the env step at which every expert phase ended; a batch
+without a single success prints how far its episodes got (holder / rotator grasp, both at once,
+max face angle, body drift against the tolerances) and the last completed phase. To see how
+long the expert needs at all, collect with a longer episode, e.g. `--max-episode-steps 700
+--num-envs 16 --num-batches 1` (diagnosis only: the demos record the limit in their metadata, and
+`callosum.training.ippo --demos` refuses to run in an env with another episode length; BC
+checkpoints remember it and the IPPO warm start warns). Reference values from the Mac CPU sim (one env per reset): clean expert 120/120
 successful, first success at step 290 to 364 (median 310); with `--action-noise 0.1` 385/400
 (96%; one of the failures is an unreachable cube placement, reported as "IK failure" and
 skipped), median 325, max 393; with 0.2 only 8/10 (up to 376 steps), so do not go above 0.1.
