@@ -13,6 +13,8 @@
 # `git pull`/merge: fetch, then point the local branch exactly at origin/<branch>.
 # Tracked-file changes are refused unless --force. Untracked and ignored files
 # (the `runs` symlink, logs, ...) are never touched: there is no `git clean`.
+# Works from any checkout path; the recommended one on the lab server is ~/callosum
+# (persistent $HOME), see docs/server-runbook.md.
 set -euo pipefail
 
 say() { printf '\n\033[1m>> %s\033[0m\n' "$*"; }

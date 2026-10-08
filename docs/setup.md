@@ -13,13 +13,13 @@ no root; no `tmux`/`screen`; `git`, `curl`, `pip`, `conda`, `gcc`, `nohup`,
 `setsid` are there; probed 2026-08-30). What that means in practice:
 
 - **`$HOME` (`/home/jovyan`) is a persistent 100 GB disk** (2026-10-07; it was 4.0 GB
-  with 888 MB free on 2026-10-04). Results live there; the venv and caches still go to
-  scratch (below), which is faster to recreate than to keep in sync with `$HOME`.
-- **The overlay filesystem (`/`, so `/tmp`) is big**: 291 GB, 76 GB free
-  (2026-10-04). It is assumed to be **wiped when the container restarts**
-  (unconfirmed, so plan for it).
-- **Only `$HOME` is assumed to survive a restart.** Hence the layout below: code,
-  venv and caches in scratch on the overlay, results in `$HOME`.
+  with 888 MB free on 2026-10-04). Checkout, venv, caches and results all live there,
+  so a container restart loses nothing and needs no re-clone or re-download.
+- **The overlay filesystem (`/`, so `/tmp`) is big** (291 GB, 76 GB free on 2026-10-04) but
+  **is wiped when the container restarts** (observed 2026-10-08). Only temporary files
+  belong there.
+- Before 2026-10-07 `$HOME` was too small and everything heavy lived in a `/tmp` scratch
+  directory; that layout still exists as an opt-in (below).
 - **Closing the browser tab kills the notebook kernel**, and with it anything
   started from a notebook cell. Long runs must be detached processes started
   from the terminal (File → New → Terminal), see
@@ -56,16 +56,16 @@ training still need the server.
 
 ### Server (Linux + CUDA)
 
-In a JupyterHub terminal (File → New → Terminal), first time and after every
-container restart:
+In a JupyterHub terminal (File → New → Terminal), **once** (a container restart does not
+repeat this):
 
 ```bash
-S=/tmp/$(id -un)-callosum          # scratch; override with CALLOSUM_SCRATCH (export it first)
-mkdir -p "$S" && cd "$S"
-git clone https://github.com/aidagroup/callosum.git && cd callosum
+git clone -b step/2.1-ippo-so101 https://github.com/aidagroup/publ2026-thesis-boldin.git ~/callosum
+cd ~/callosum
 bash scripts/setup_server.sh --smoke
 ```
 
+The scripts work from any checkout path; `~/callosum` is the recommended one.
 Later: `cd "$CALLOSUM_REPO" && bash scripts/update_server.sh` (hard-syncs the checkout to the
 latest pushed code, safe after force-pushes, then re-runs setup; options in
 [server-runbook.md](server-runbook.md#1-environment-clone-or-update-then-setup)).
@@ -77,9 +77,10 @@ The script is idempotent and never resolves dependencies — `uv sync --frozen`
 installs exactly what `uv.lock` pins. It:
 
 1. checks Linux + `nvidia-smi`, prints GPU and driver;
-2. **picks a layout**. *Scratch mode* is used when `$HOME` has < 30 GB free (or
-   `CALLOSUM_SCRATCH` / `JUPYTERHUB_USER` is set); on an ordinary Linux box with
-   a big home it falls back to plain uv defaults (`.venv`, `~/.cache/uv`);
+2. **picks a layout**. The default is the *home layout* (everything heavy under
+   `~/.callosum`, persistent). The *scratch layout* is used only on request
+   (`CALLOSUM_SCRATCH=<dir>`, or `CALLOSUM_LAYOUT=scratch`) or when the data root has
+   < 30 GB free; see the next section;
 3. installs uv into `~/.local/bin` if missing (no root; installer from
    `astral.sh`, fallback `pip install --user uv`), Python 3.12, and syncs
    `sim` + `train` + `dev`;
@@ -94,34 +95,51 @@ installs exactly what `uv.lock` pins. It:
 6. with `--smoke`, runs the GPU-backend checks that cannot run on macOS
    (`smoke_env.py`, `smoke_face_turn.py`).
 
-### Disk layout on the server (scratch mode)
+### Disk layout on the server
 
-Scratch (`$CALLOSUM_SCRATCH`, default `/tmp/<user>-callosum`, on the big overlay
-filesystem) is assumed to be wiped on restart; `$HOME` is small but persistent.
+Default (*home layout*): everything persistent, under `$HOME`. `CALLOSUM_DATA` moves the
+data root (default `~/.callosum`).
 
 | What | Where | Survives restart? |
 |---|---|---|
-| repo checkout | `$CALLOSUM_SCRATCH/callosum` (cloned there) | no — `git clone` again |
-| venv (`UV_PROJECT_ENVIRONMENT`) | `$CALLOSUM_SCRATCH/venv` | no |
-| uv cache, uv-managed Python | `$CALLOSUM_SCRATCH/uv-cache`, `…/python` | no |
-| Hugging Face cache (`HF_HOME`) | `$CALLOSUM_SCRATCH/hf` | no |
-| ManiSkill assets (`MS_ASSET_DIR`; default is `~/.maniskill`) | `$CALLOSUM_SCRATCH/maniskill` | no |
-| SAPIEN PhysX GPU lib (`~/.sapien`, hardcoded by SAPIEN) | symlink `~/.sapien` → `$CALLOSUM_SCRATCH/sapien` | link yes, target no |
-| other caches (pip, torch hub, matplotlib via `XDG_CACHE_HOME`) | `$CALLOSUM_SCRATCH/cache` | no |
+| repo checkout | `~/callosum` (recommended; any path works) | yes |
+| venv (`UV_PROJECT_ENVIRONMENT`) | `~/.callosum/venv` | yes |
+| uv cache, uv-managed Python | `~/.callosum/uv-cache`, `…/python` (same filesystem as the venv: uv hardlinks) | yes |
+| Hugging Face cache (`HF_HOME`) | `~/.callosum/hf` | yes |
+| ManiSkill assets (`MS_ASSET_DIR`; default is `~/.maniskill`) | `~/.callosum/maniskill` | yes |
+| SAPIEN PhysX GPU lib (`~/.sapien`, hardcoded by SAPIEN) | `~/.sapien`, a real directory | yes |
+| other caches (pip, torch hub, matplotlib via `XDG_CACHE_HOME`) | `~/.callosum/cache` | yes |
+| Vulkan loader + lavapipe (conda env), conda package cache, ICD manifest, libcuda shim, probe logs | `~/.callosum/mesa`, `conda-pkgs`, `vulkan`, `vklib`, `lib`, `*.log` | yes |
 | uv binary | `~/.local/bin` (~50 MB) | yes |
-| **results** `runs/` | symlink `<checkout>/runs` → `~/callosum-runs` (`CALLOSUM_RUNS`) | **yes** |
-| env file for new terminals | `~/.callosum-env.sh`, sourced from `~/.bashrc` | yes (but stale after a wipe) |
+| **results** `runs/` (demos, checkpoints, logs) | symlink `<checkout>/runs` → `~/callosum-runs` (`CALLOSUM_RUNS`); the store stays put when the checkout is re-cloned | yes |
+| archives of finished runs | `~/callosum-archive` | yes |
+| env file for new terminals | `~/.callosum-env.sh`, sourced from `~/.bashrc` | yes |
+| temporary files (`TMPDIR`) | `/tmp` | no |
 
-Consequences: nothing under the checkout is precious (never edit code on the
-server; push from the Mac); re-running setup after a wipe re-downloads torch +
-CUDA wheels (several GB; time not measured yet), so keep that in mind when
-planning a session. `~/callosum-runs` is on the persistent `$HOME`, so run
-directories (full-state checkpoints, ~7 MB each) survive a restart and
-`python -m callosum.training.ippo --resume runs/<name>` continues a killed run.
+A restart therefore costs nothing: open a terminal, `cd ~/callosum`, continue
+(`python -m callosum.training.ippo --resume runs/<name>` continues a killed run from its
+full-state checkpoint). One data root serves one active checkout (the editable install in
+the venv points at the checkout that ran setup last).
 
-Without `~/.callosum-env.sh` sourced, `uv run` does not know about the venv in
-scratch and silently builds a second one inside the checkout. The setup script
-removes such a stray `.venv`; new terminals source the file via `~/.bashrc`.
+*Scratch layout* (opt-in with `CALLOSUM_SCRATCH=/big/disk/dir bash scripts/setup_server.sh`,
+or `CALLOSUM_LAYOUT=scratch`; automatic only when the data root has < 30 GB free): the same
+sub-directories under `$CALLOSUM_SCRATCH` (default `/tmp/<user>-callosum`), and `~/.sapien`
+becomes a symlink into it. Assumed wiped on restart: re-run setup then (re-downloads torch
+and the CUDA wheels, several GB). `runs/` is still the `~/callosum-runs` symlink.
+`CALLOSUM_LAYOUT=home` never falls back to scratch.
+
+`~/.callosum-env.sh` is rewritten from scratch on every setup run (first line:
+`# callosum-layout: home|scratch`), so exports of an earlier layout do not linger, and
+sourcing it twice does not duplicate `LD_LIBRARY_PATH` entries. Without it sourced, `uv run`
+does not know about the venv and silently builds a second one inside the checkout; setup
+removes such a stray `.venv`, and new terminals source the file via `~/.bashrc`.
+
+Coming from the old `/tmp` layout (old `~/.callosum-env.sh` with `/tmp` exports, a
+`~/.sapien` symlink into `/tmp`): nothing has to be cleaned by hand. Clone into
+`~/callosum` and run setup. It ignores the inherited `CALLOSUM_SCRATCH`, drops stale
+`/tmp` library paths, replaces a dangling `~/.sapien` link by a real directory (copying
+the old target if it still exists), and rewrites the env file. `~/callosum-runs` and
+`~/callosum-archive` are never touched. Details: [server-runbook.md](server-runbook.md#migration-from-the-tmp-layout).
 
 Rendering: SAPIEN needs a **Vulkan render device even for state-only
 observations** (its URDF loader builds `RenderMaterial()` unconditionally;

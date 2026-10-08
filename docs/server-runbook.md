@@ -26,7 +26,7 @@ for things that genuinely need a GPU.
 | Access | JupyterHub web UI + its terminal only; **no SSH**; user `jovyan`, no root |
 | Internet | allowlist only (GitHub, PyPI, PyTorch, Hugging Face, lab LLM proxy, …) |
 | `$HOME` | 100 GB, persistent (2026-10-07; was 4.0 GB with 888 MB free); survives a container restart |
-| `/` overlay (`/tmp`) | 291 GB, 76 GB free (2026-10-04); assumed wiped on restart |
+| `/` overlay (`/tmp`) | 291 GB, 76 GB free (2026-10-04); **wiped on restart** (observed 2026-10-08): temporary files only |
 | Missing tools | `uv` (setup installs it), `tmux`, `screen` |
 
 ## Access (JupyterHub, no SSH)
@@ -37,37 +37,39 @@ browser tab closes, and so does anything it started. Files move only through the
 JupyterHub file browser (upload / right-click → Download); code moves through
 `git` from GitHub. There is no SSH alias, `scp` or `rsync` to the server.
 
-Layout (details in [setup.md](setup.md#disk-layout-on-the-server-scratch-mode)):
-checkout, venv and caches in scratch `/tmp/<user>-callosum` (big, assumed wiped on
-restart), results in `~/callosum-runs` (small, persistent) reached through the
-`runs/` symlink in the checkout.
+Layout (details in [setup.md](setup.md#disk-layout-on-the-server)): everything is
+persistent in `$HOME`. Checkout `~/callosum`, venv, uv cache, Python, HF/ManiSkill caches and
+the conda Vulkan loader under `~/.callosum`, `~/.sapien`, results in `~/callosum-runs`
+(reached through the `runs/` symlink in the checkout), archives in `~/callosum-archive`.
+A container restart loses none of it. Only `/tmp` is wiped.
 
 ## Session order
 
 ### 1. Environment: clone or update, then setup
 
-Open a terminal and look at what survived:
+Open a terminal and look at what is there:
 
 ```bash
-ls ~/.callosum-env.sh ~/callosum-runs      # these persist across restarts
-ls -d /tmp/$(id -un)-callosum/callosum    # scratch checkout: gone after a restart
+ls -d ~/callosum ~/.callosum ~/callosum-runs     # all persistent across restarts
 ```
 
-**Scratch is gone (first session, or after a restart)** — start from a fresh clone:
+**First time (no `~/callosum`)** — fresh install, once:
 
 ```bash
-S=/tmp/$(id -un)-callosum                  # or export CALLOSUM_SCRATCH=<dir> first
-mkdir -p "$S" && cd "$S"
-git clone https://github.com/aidagroup/callosum.git && cd callosum
-# git checkout <branch>                    # if the session is not on main
-bash scripts/setup_server.sh
+git clone -b step/2.1-ippo-so101 https://github.com/aidagroup/publ2026-thesis-boldin.git ~/callosum
+cd ~/callosum                                    # the branch of the session (or main)
+bash scripts/setup_server.sh --smoke             # drop --smoke to skip the GPU smoke tests
 ```
 
-**Scratch is still there** — update in place:
+(See [Migration from the /tmp layout](#migration-from-the-tmp-layout) if this account still
+has the old env file, `~/.sapien` link and so on: the same commands handle it.) Open a **new**
+terminal afterwards (or `source ~/.callosum-env.sh`) so the variables are set.
+
+**Every later session, also after a restart** — the checkout and venv are still there:
 
 ```bash
-source ~/.callosum-env.sh
-cd "$CALLOSUM_REPO"
+source ~/.callosum-env.sh                  # automatic in new terminals via ~/.bashrc
+cd "$CALLOSUM_REPO"                        # = ~/callosum
 bash scripts/update_server.sh              # fetch + hard-sync, then setup_server.sh
 ```
 
@@ -108,17 +110,46 @@ CUDA build, ManiSkill + our `so101_pg` agent, and that both envs register. Stop 
 fix if anything here fails — everything below depends on it. The very first
 `uv sync` is also the confirmation that the `cu128` torch wheels download from
 `download.pytorch.org` (see the network notes in [setup.md](setup.md#network-access-on-the-server)).
-After a restart the uv cache is gone, so setup re-downloads torch and the CUDA
-libraries (several GB); expect it to take minutes, not seconds.
+Only the very first setup downloads torch and the CUDA libraries (several GB, minutes);
+the uv cache, venv and Vulkan loader are persistent, so later runs and runs after a restart
+take seconds (unless `uv.lock` changed).
 
 If the repository turns out to be private, `git clone` over HTTPS asks for a
 username and a read-only token (verify on the server).
 
 In every **new** terminal, `~/.callosum-env.sh` is sourced automatically via
 `~/.bashrc` (verify that terminals read it; otherwise `source` it by hand). It
-sets `UV_PROJECT_ENVIRONMENT`, the caches, `MS_ASSET_DIR` and the Vulkan/libcuda
-variables. A notebook kernel that was started before setup does not have them;
+sets `CALLOSUM_REPO`, `UV_PROJECT_ENVIRONMENT`, the caches, `MS_ASSET_DIR` and the
+Vulkan/libcuda variables. It is rewritten by every setup run. A notebook kernel that was started before setup does not have them;
 restart it or work in the terminal.
+
+#### Migration from the /tmp layout
+
+Until 2026-10-07 `$HOME` was too small, so checkout, venv and caches lived in `/tmp`
+(`/tmp/callosum`, `/tmp/<user>-callosum`), and `~/.callosum-env.sh`, a `~/.bashrc` hook and a
+`~/.sapien` symlink pointed there. `/tmp` is wiped on a restart, which leaves exactly these
+leftovers in `$HOME`: an env file with dead `/tmp` exports, the `.bashrc` hook (harmless, it
+is reused), a dangling `~/.sapien` link, and the results in `~/callosum-runs` and
+`~/callosum-archive` (**keep these**: demos, `bc_full`, interrupted runs with `latest.pt`).
+
+No manual cleanup is needed; the first-time commands above do it:
+
+- an inherited `CALLOSUM_SCRATCH=/tmp/...` from the old env file is recognised (the old file
+  has no `# callosum-layout:` marker) and ignored, with a warning; the home layout is chosen;
+- stale `/tmp/...` entries in `LD_LIBRARY_PATH` and a stale `VK_ICD_FILENAMES` are dropped
+  before the libcuda and Vulkan probes, so those probes judge the real system;
+- the dangling `~/.sapien` link is replaced by a real directory (if the old target still
+  exists its contents are copied, never deleted), then PhysX is fetched into it;
+- `~/.callosum-env.sh` is rewritten, `~/.bashrc` is not duplicated, `runs/` in the new
+  checkout becomes the symlink to `~/callosum-runs`, so existing results are visible at once.
+
+Then continue the interrupted fine-tune from the new checkout with the usual resume
+command (section 3). If `/tmp/callosum` or `/tmp/<user>-callosum` happen to still exist
+(no restart yet), setup prints them at the end and removes nothing; once no run uses them:
+`rm -rf /tmp/callosum /tmp/<user>-callosum` (no trailing slash: the `runs` symlink inside is
+deleted, not its target). Do not run `scripts/setup_server.sh` from the old `/tmp` checkout
+while a run there is active; it would only add a warning, but the GPU smoke tests would
+compete with the run.
 
 ### 2. Phase-1 debt: the GPU-backend checks
 
@@ -539,6 +570,38 @@ PYTHONPATH=. uv run -q --no-project --python 3.12 --with mani-skill==3.0.1 --wit
     --exp-name smoke_ft
 ```
 
+#### Continue a fine-tune after a restart
+
+If a fine-tune run like `ft_full_s1` was started before a container restart:
+
+```bash
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+
+# Check if the run has a checkpoint from before the restart.
+ls ~/callosum-runs/ft_full_s1/
+
+# If latest.pt exists, continue from there (stdout appends):
+if [ -f runs/ft_full_s1/latest.pt ]; then
+  setsid nohup uv run python -m callosum.training.ippo --resume runs/ft_full_s1 \
+      >> runs/ft_full_s1/train.log 2>&1 < /dev/null &
+else
+  # Otherwise (first-time setup), launch with the same command as before.
+  # This is the template; fill in the exact flags from your earlier run.
+  setsid nohup uv run python -m callosum.training.ippo --resume runs/ft_full_s1 \
+      --checkpoint runs/bc_full/bc.pt --demos runs/demos/faceturn_a.pt \
+      --critic-warmup-iters 10 --bc-coef 1.0 --bc-decay-iters 100 \
+      --learning-rate 1e-4 --partner-obs full --total-timesteps 10000000 \
+      --seed 1 --exp-name ft_full_s1 \
+      >> runs/ft_full_s1/train.log 2>&1 < /dev/null &
+fi
+echo $!
+tail -f runs/ft_full_s1/train.log
+```
+
+The `--resume` flag continues from the latest checkpoint if it exists; otherwise it starts fresh.
+The same command is the restart command: after a shutdown or crash, run it again unchanged, and the run
+picks up where it left off or starts over if there is no checkpoint.
+
 Unverified on the GPU server (everything above was run on the Mac CPU sim only): the expert and
 `collect_demos.py` with many envs, BC on CUDA, and the fine-tune loop at scale.
 
@@ -593,9 +656,9 @@ Vulkan part of `bash scripts/update_server.sh`: `✓ ... GPU render device (NVID
 
 | Symptom | Cause | What setup does |
 |---|---|---|
-| `OSError: libcuda.so: cannot open shared object file` from `sapien/physx/__init__.py` (`enable_gpu`), while torch sees the GPU | SAPIEN loads the *unversioned* `libcuda.so`; the container runtime only injects `libcuda.so.1` | symlinks `libcuda.so.1` into `<scratch>/lib/libcuda.so`, prepends it to `LD_LIBRARY_PATH` |
-| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"`; or `Failed to find a supported physical device "cuda:0"` (lavapipe) | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) is too old for the 570.x NVIDIA ICD; the pod has the NVIDIA user-space libs (`libGLX_nvidia.so.0`, despite `NVIDIA_DRIVER_CAPABILITIES=compute,utility`) but a usable ICD manifest may be missing, and when `/usr/share/vulkan/icd.d/nvidia_icd.json` is absent SAPIEN swaps in its own bundled manifest (api 1.2.140), which hides the driver | **Expected result: hardware NVIDIA Vulkan** via a manifest generated at `<scratch>/vulkan/icd.d/nvidia_icd.json` (absolute path to `libGLX_nvidia.so.0`) plus a current loader: `conda create -p <scratch>/mesa -c conda-forge mesalib vulkan-tools` (conda cache moved off `$HOME`), only `libvulkan.so.1` symlinked into `<scratch>/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch). Setup **probes** candidates in order (generated manifest + current loader, + system loader, stock, other system manifests, lavapipe) in fresh processes and takes the first that constructs `RenderMaterial()` **and** `RenderSystem("cuda:0")` (proof it is the GPU). It is re-evaluated on every run (a past lavapipe pick is not sticky; inherited `VK_ICD_FILENAMES`/`vklib` are ignored) and `~/.callosum-env.sh` is rewritten. Lavapipe (software) is only the fallback: fine for state training with `render_backend="none"`, not for vision. **History:** hardware worked on this server in Aug 2026 (archived `step/2.1-ippo`); on 2026-10-04 the first `setup_server.sh` run ended on lavapipe (that version only scanned manifests already on disk and never wrote its own for `libGLX_nvidia.so.0`; the exact cause on the new pod is unconfirmed, the probe log will tell). Check the current state with `bash scripts/diagnose_vulkan.sh` (NVIDIA libs, manifests, loader versions, `vulkaninfo --summary` per candidate, SAPIEN's view); every probe's stderr is in `<scratch>/vulkan-probe.log` |
-| First `gym.make(..., sim_backend="gpu")` hangs/fails while downloading | SAPIEN fetches `libPhysXGpu_64.so` (~240 MB unpacked) from a `github.com` release into `~/.sapien/physx/<version>/` | `~/.sapien` is a symlink into scratch; setup pre-fetches via `physx.enable_gpu()`. Manual fallback: download the `linux-so.zip` named in SAPIEN's message elsewhere, upload, unzip into that directory |
+| `OSError: libcuda.so: cannot open shared object file` from `sapien/physx/__init__.py` (`enable_gpu`), while torch sees the GPU | SAPIEN loads the *unversioned* `libcuda.so`; the container runtime only injects `libcuda.so.1` | symlinks `libcuda.so.1` into `~/.callosum/lib/libcuda.so`, prepends it to `LD_LIBRARY_PATH` |
+| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"`; or `Failed to find a supported physical device "cuda:0"` (lavapipe) | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) is too old for the 570.x NVIDIA ICD; the pod has the NVIDIA user-space libs (`libGLX_nvidia.so.0`, despite `NVIDIA_DRIVER_CAPABILITIES=compute,utility`) but a usable ICD manifest may be missing, and when `/usr/share/vulkan/icd.d/nvidia_icd.json` is absent SAPIEN swaps in its own bundled manifest (api 1.2.140), which hides the driver | **Expected result: hardware NVIDIA Vulkan** via a manifest generated at `~/.callosum/vulkan/icd.d/nvidia_icd.json` (absolute path to `libGLX_nvidia.so.0`) plus a current loader: `conda create -p ~/.callosum/mesa -c conda-forge mesalib vulkan-tools` (conda cache in `~/.callosum/conda-pkgs`; persistent, so this runs once), only `libvulkan.so.1` symlinked into `~/.callosum/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch). Setup **probes** candidates in order (generated manifest + current loader, + system loader, stock, other system manifests, lavapipe) in fresh processes and takes the first that constructs `RenderMaterial()` **and** `RenderSystem("cuda:0")` (proof it is the GPU). It is re-evaluated on every run (a past lavapipe pick is not sticky; inherited `VK_ICD_FILENAMES`/`vklib` are ignored) and `~/.callosum-env.sh` is rewritten. Lavapipe (software) is only the fallback: fine for state training with `render_backend="none"`, not for vision. **History:** hardware worked on this server in Aug 2026 (archived `step/2.1-ippo`); on 2026-10-04 the first `setup_server.sh` run ended on lavapipe (that version only scanned manifests already on disk and never wrote its own for `libGLX_nvidia.so.0`; the exact cause on the new pod is unconfirmed, the probe log will tell). Check the current state with `bash scripts/diagnose_vulkan.sh` (NVIDIA libs, manifests, loader versions, `vulkaninfo --summary` per candidate, SAPIEN's view); every probe's stderr is in `~/.callosum/vulkan-probe.log` |
+| First `gym.make(..., sim_backend="gpu")` hangs/fails while downloading | SAPIEN fetches `libPhysXGpu_64.so` (~240 MB unpacked) from a `github.com` release into `~/.sapien/physx/<version>/` | `~/.sapien` is a real directory in `$HOME` (persistent); setup pre-fetches via `physx.enable_gpu()`. Manual fallback: download the `linux-so.zip` named in SAPIEN's message elsewhere, upload, unzip into that directory |
 
 Notes:
 
@@ -625,6 +688,6 @@ Everything above that is not a measured fact, in the order it will bite:
 3. `~/.bashrc` is read by new JupyterHub terminals (so `~/.callosum-env.sh` loads).
 4. `setsid nohup` runs survive closing the tab; whether the lab kills long processes.
 5. `jupyter-server-proxy` present? (for TensorBoard)
-6. Is `/tmp` really wiped on restart, and is `$HOME` really kept? Is the repo public
+6. (`/tmp` wiped and `$HOME` kept: confirmed 2026-10-08.) Is the repo public
    (HTTPS clone without credentials)?
-7. How long a from-scratch setup takes after a wipe (add the number here).
+7. How long the first from-scratch setup into `~/.callosum` takes (add the number here); that the home-layout setup runs cleanly over the leftovers of the old `/tmp` layout.

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Bootstrap callosum on a Linux + NVIDIA (CUDA) machine: the lab training server
-# (JupyterHub container, no SSH, no root, persistent $HOME but heavy files go to
-# /tmp scratch) or any CUDA box.
-# Idempotent and cheap to re-run: after every `git pull`, and again from scratch
-# after the server wipes /tmp on restart.
+# (JupyterHub container, no SSH, no root, persistent 100 GB $HOME) or any CUDA box.
+# Idempotent and cheap to re-run: after every `git pull`, and again after a
+# container restart (nothing heavy is lost then, see the layout below).
 #
 #   bash scripts/setup_server.sh            # set up + verify
 #   bash scripts/setup_server.sh --smoke    # ... and run the GPU smoke scripts
@@ -11,17 +10,30 @@
 # Everything the project needs is pinned in uv.lock, so this never resolves
 # dependencies; it installs the exact locked versions.
 #
-# Two layouts, chosen automatically:
+# Two layouts, chosen automatically (same sub-directories in both):
 #
-#   scratch mode  ($HOME has < 30 GB free, or $JUPYTERHUB_USER / $CALLOSUM_SCRATCH is set)
-#       Everything heavy goes to $CALLOSUM_SCRATCH (default /tmp/$USER-callosum):
-#       venv, uv cache, uv-managed Python, HF cache, ManiSkill/SAPIEN assets, library
-#       shims. This directory is assumed to be WIPED on server restart. Only results
-#       survive: runs/ is a symlink to $CALLOSUM_RUNS (default ~/callosum-runs) when
-#       the checkout itself is outside $HOME. A sourceable env file is written to
-#       ~/.callosum-env.sh and hooked into ~/.bashrc.
-#   normal mode   (plenty of space in $HOME)
-#       uv defaults: .venv in the checkout, ~/.cache/uv. Nothing is moved.
+#   home layout   (default)
+#       Everything heavy is PERSISTENT, under $CALLOSUM_DATA (default ~/.callosum):
+#         venv/  uv-cache/  python/  hf/  maniskill/  cache/ (XDG)  mesa/ (conda Vulkan
+#         loader)  lib/ vklib/ vulkan/ (library shims, ICD manifest)  conda-pkgs/
+#       plus ~/.sapien as a real directory (SAPIEN hardcodes that path). The recommended
+#       checkout is ~/callosum, but the scripts work from any path. The venv, uv cache and
+#       uv-managed Python are on one filesystem on purpose (uv hardlinks wheels).
+#       A container restart loses nothing: no re-clone, no re-download of torch.
+#   scratch layout  (opt-in, or automatic when the data root has < 30 GB free)
+#       The same sub-directories under $CALLOSUM_SCRATCH (default /tmp/$USER-callosum)
+#       and ~/.sapien as a symlink into it. Assumed WIPED on restart: re-run this
+#       script then. Opt in with `CALLOSUM_SCRATCH=/big/disk/dir bash scripts/setup_server.sh`
+#       (or CALLOSUM_LAYOUT=scratch; CALLOSUM_LAYOUT=home never falls back to scratch).
+#
+# In both layouts runs/ in the checkout is a symlink to $CALLOSUM_RUNS (default
+# ~/callosum-runs): results survive re-cloning the checkout. A sourceable env file is
+# written to ~/.callosum-env.sh (and hooked into ~/.bashrc); it is rewritten from scratch
+# on every run, so exports of an earlier layout do not linger.
+#
+# Coming from the old /tmp-based layout needs nothing special: run this script from a fresh
+# clone (an old ~/.callosum-env.sh, a dangling ~/.sapien link into /tmp and stale exports are
+# handled below). Temporary files (TMPDIR) stay in /tmp.
 #
 # Network needs (allowlisted server): github.com (SAPIEN downloads its PhysX GPU
 # library from a GitHub release on first use; uv downloads Python from GitHub),
@@ -65,6 +77,13 @@ join_path() {
   printf '%s' "$out"
 }
 
+# Nearest existing ancestor of $1 (for df on a directory that is not created yet).
+existing_ancestor() {
+  local d="$1"
+  while [ ! -e "$d" ] && [ "$d" != "/" ] && [ -n "$d" ]; do d="$(dirname "$d")"; done
+  printf '%s' "$d"
+}
+
 # ---------------------------------------------------------------- 1. platform
 say "Platform"
 [ "$(uname -s)" = "Linux" ] || die "Linux required (ManiSkill/SAPIEN GPU sim). On macOS use 'make dev' instead."
@@ -79,14 +98,45 @@ fi
 
 # ----------------------------------------------------------------- 2. layout
 say "Layout"
-home_free="$(free_gb "$HOME")"
-SCRATCH_MODE=0
-if [ -n "${CALLOSUM_SCRATCH:-}" ] || [ -n "${JUPYTERHUB_USER:-}" ] \
-   || { [ -n "$home_free" ] && [ "$home_free" -lt "$NEED_GB" ]; }; then
-  SCRATCH_MODE=1
+ENV_FILE="$HOME/.callosum-env.sh"
+
+# Value a variable has after sourcing the PREVIOUS env file, read in a clean process
+# (nothing is exported into this one). Empty when the file or the variable is absent.
+env_file_value() {
+  [ -f "$ENV_FILE" ] || return 0
+  env -i HOME="$HOME" bash -c '. "$1" >/dev/null 2>&1; printf %s "${!2:-}"' _ "$ENV_FILE" "$1" 2>/dev/null || true
+}
+PREV_SCRATCH="$(env_file_value CALLOSUM_SCRATCH)"   # old scratch layout, if any
+PREV_REPO="$(env_file_value CALLOSUM_REPO)"
+
+# An env file from before the home layout exported CALLOSUM_SCRATCH into every new
+# terminal. That inherited value is not a request for scratch mode (the new file has a
+# "# callosum-layout:" marker; the old one does not): ignore it, unless the user also
+# says CALLOSUM_LAYOUT=scratch.
+if [ -n "${CALLOSUM_SCRATCH:-}" ] && [ "${CALLOSUM_LAYOUT:-auto}" != "scratch" ] \
+   && [ -f "$ENV_FILE" ] && ! grep -q '^# callosum-layout:' "$ENV_FILE" \
+   && [ "$CALLOSUM_SCRATCH" = "$PREV_SCRATCH" ]; then
+  warn "ignoring CALLOSUM_SCRATCH=$CALLOSUM_SCRATCH inherited from the old ~/.callosum-env.sh (home layout is the default now)"
+  warn "to really use scratch: CALLOSUM_LAYOUT=scratch CALLOSUM_SCRATCH=<dir> bash scripts/setup_server.sh"
+  unset CALLOSUM_SCRATCH
 fi
 
-ENV_FILE="$HOME/.callosum-env.sh"
+LAYOUT="${CALLOSUM_LAYOUT:-auto}"
+case "$LAYOUT" in auto|home|scratch) ;; *) die "CALLOSUM_LAYOUT must be auto, home or scratch (got '$LAYOUT')" ;; esac
+DATA_ROOT="${CALLOSUM_DATA:-$HOME/.callosum}"
+data_free="$(free_gb "$(existing_ancestor "$DATA_ROOT")")"
+SCRATCH_MODE=0
+if [ "$LAYOUT" = "scratch" ]; then
+  SCRATCH_MODE=1
+elif [ "$LAYOUT" = "auto" ]; then
+  if [ -n "${CALLOSUM_SCRATCH:-}" ]; then
+    SCRATCH_MODE=1
+  elif [ -n "$data_free" ] && [ "$data_free" -lt "$NEED_GB" ]; then
+    warn "only ${data_free} GB free for $DATA_ROOT (< ${NEED_GB}): falling back to the scratch layout"
+    SCRATCH_MODE=1
+  fi
+fi
+
 if [ "$SCRATCH_MODE" = "1" ]; then
   SCRATCH="${CALLOSUM_SCRATCH:-/tmp/$USER_NAME-callosum}"
   mkdir -p "$SCRATCH" || die "cannot create $SCRATCH — set CALLOSUM_SCRATCH to a writable directory with >= ${NEED_GB} GB free"
@@ -95,27 +145,50 @@ if [ "$SCRATCH_MODE" = "1" ]; then
     die "$SCRATCH has only ${scratch_free} GB free (< ${NEED_GB}); set CALLOSUM_SCRATCH elsewhere"
   fi
   WORK="$SCRATCH"
-  ok "scratch mode: \$HOME has ${home_free:-?} GB free, heavy files go to $SCRATCH (${scratch_free:-?} GB free)"
+  ok "scratch layout: heavy files go to $SCRATCH (${scratch_free:-?} GB free)"
   warn "assuming $SCRATCH is wiped on server restart: re-run this script then"
+else
+  mkdir -p "$DATA_ROOT" || die "cannot create $DATA_ROOT — set CALLOSUM_DATA to a writable directory"
+  WORK="$DATA_ROOT"
+  ok "home layout (persistent): heavy files go to $WORK (${data_free:-?} GB free)"
+fi
 
-  export UV_PROJECT_ENVIRONMENT="$SCRATCH/venv"
-  export UV_CACHE_DIR="$SCRATCH/uv-cache"
-  export UV_PYTHON_INSTALL_DIR="$SCRATCH/python"
-  export HF_HOME="$SCRATCH/hf"
-  # ManiSkill v3.0.1 reads MS_ASSET_DIR (mani_skill/__init__.py); default ~/.maniskill.
-  export MS_ASSET_DIR="$SCRATCH/maniskill"
-  # pip, matplotlib, torch hub, ...: anything that honours XDG leaves $HOME alone.
-  export XDG_CACHE_HOME="$SCRATCH/cache"
-  mkdir -p "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$HF_HOME" "$MS_ASSET_DIR" "$XDG_CACHE_HOME"
-  VENV_DIR="$UV_PROJECT_ENVIRONMENT"
-  ok "venv         -> $VENV_DIR"
-  ok "uv cache     -> $UV_CACHE_DIR"
-  ok "HF_HOME      -> $HF_HOME"
-  ok "MS_ASSET_DIR -> $MS_ASSET_DIR"
+export UV_PROJECT_ENVIRONMENT="$WORK/venv"
+export UV_CACHE_DIR="$WORK/uv-cache"
+export UV_PYTHON_INSTALL_DIR="$WORK/python"
+export HF_HOME="$WORK/hf"
+# ManiSkill v3.0.1 reads MS_ASSET_DIR (mani_skill/__init__.py); default ~/.maniskill.
+export MS_ASSET_DIR="$WORK/maniskill"
+# pip, matplotlib, torch hub, ...: anything that honours XDG goes to the same root.
+export XDG_CACHE_HOME="$WORK/cache"
+mkdir -p "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$HF_HOME" "$MS_ASSET_DIR" "$XDG_CACHE_HOME"
+VENV_DIR="$UV_PROJECT_ENVIRONMENT"
+ok "venv         -> $VENV_DIR"
+ok "uv cache     -> $UV_CACHE_DIR"
+ok "HF_HOME      -> $HF_HOME"
+ok "MS_ASSET_DIR -> $MS_ASSET_DIR"
 
-  # SAPIEN hardcodes Path.home()/.sapien (PhysX GPU library, ~240 MB) with no env
-  # override, so redirect it with a symlink.
-  link="$HOME/.sapien"; target="$SCRATCH/sapien"
+# Library dirs of ANY callosum layout (the old scratch, ~/.callosum, this run's) must
+# not leak from an inherited LD_LIBRARY_PATH into the probes below: a stale
+# libcuda.so shim would make "libcuda.so resolves" true for the wrong reason.
+STALE_ROOT="${PREV_SCRATCH:-/nonexistent-callosum}"
+ld_clean=""
+IFS=: read -ra _ld_parts <<< "${LD_LIBRARY_PATH:-}"
+for _p in ${_ld_parts[@]+"${_ld_parts[@]}"}; do
+  case "$_p" in
+    ""|*/.callosum/lib|*/.callosum/vklib|*-callosum/lib|*-callosum/vklib) ;;
+    "$WORK/lib"|"$WORK/vklib"|"$STALE_ROOT/lib"|"$STALE_ROOT/vklib") ;;
+    *) ld_clean="${ld_clean:+$ld_clean:}$_p" ;;
+  esac
+done
+unset _ld_parts _p
+if [ -n "$ld_clean" ]; then export LD_LIBRARY_PATH="$ld_clean"; else unset LD_LIBRARY_PATH; fi
+
+# SAPIEN hardcodes Path.home()/.sapien (PhysX GPU library, ~240 MB) with no env override.
+link="$HOME/.sapien"
+if [ "$SCRATCH_MODE" = "1" ]; then
+  # scratch layout: redirect it with a symlink into scratch.
+  target="$SCRATCH/sapien"
   mkdir -p "$target"
   if [ -L "$link" ]; then
     ln -sfn "$target" "$link"          # also repairs a link left dangling by a wipe
@@ -125,10 +198,30 @@ if [ "$SCRATCH_MODE" = "1" ]; then
   fi
   ok "\$HOME/.sapien -> $target"
 else
-  WORK="$HOME/.local/share/callosum"   # only used for library shims, if any are needed
-  mkdir -p "$WORK"
-  VENV_DIR="${UV_PROJECT_ENVIRONMENT:-$REPO_ROOT/.venv}"
-  ok "normal mode: \$HOME has ${home_free:-?} GB free, uv defaults (venv at $VENV_DIR)"
+  # home layout: ~/.sapien is a real directory. An earlier scratch layout left a symlink
+  # into /tmp there: copy what its target still holds (never delete the target, a running
+  # process may have the PhysX library mapped), then put the copy in place of the link.
+  tmp_sapien="$HOME/.sapien.migrating"
+  if [ -L "$link" ]; then
+    old_target="$(readlink -f "$link" 2>/dev/null || true)"
+    rm -rf "$tmp_sapien"; mkdir -p "$tmp_sapien"
+    if [ -n "$old_target" ] && [ -d "$old_target" ]; then
+      cp -a "$old_target/." "$tmp_sapien/" || { rm -rf "$tmp_sapien"; die "could not copy $old_target to $tmp_sapien"; }
+      ok "copied ~/.sapien from $old_target"
+    fi
+    rm -f "$link"; mv "$tmp_sapien" "$link"
+  elif [ ! -e "$link" ]; then
+    if [ -d "$tmp_sapien" ]; then mv "$tmp_sapien" "$link"; else mkdir -p "$link"; fi   # tmp: an interrupted copy
+  fi
+  ok "\$HOME/.sapien is a real directory (persistent)"
+fi
+
+if [ "$SCRATCH_MODE" != "1" ]; then
+  case "$REPO_ROOT" in
+    /tmp/*|/var/tmp/*)
+      warn "this checkout ($REPO_ROOT) is under /tmp and is lost on a container restart;"
+      warn "the persistent place is ~/callosum: git clone there and run setup from it (docs/server-runbook.md)" ;;
+  esac
 fi
 VENV_PY="$VENV_DIR/bin/python"
 
@@ -209,8 +302,8 @@ say "libcuda.so"
 SHIM_DIR=""
 if "$VENV_PY" -c 'import ctypes; ctypes.CDLL("libcuda.so")' 2>/dev/null; then
   ok "libcuda.so resolves"
-  # It may resolve only because this terminal sourced the env file written by an
-  # earlier run: keep that shim in the rewritten file instead of silently dropping it.
+  # (Library dirs of earlier layouts were stripped from LD_LIBRARY_PATH above, so this is
+  # not a stale shim.) Keep a shim from an earlier run of THIS layout in the env file.
   if [ -e "$WORK/lib/libcuda.so" ]; then SHIM_DIR="$WORK/lib"; fi
 else
   LIBCUDA=""
@@ -273,17 +366,6 @@ fi
 # not remembered) and the env file below is rewritten from it.
 say "Vulkan render device"
 
-# $1 = ':'-separated list, $2 = entry to drop.
-strip_path() {
-  local out="" p
-  local -a parts=()
-  IFS=: read -ra parts <<< "$1"
-  for p in ${parts[@]+"${parts[@]}"}; do
-    if [ -n "$p" ] && [ "$p" != "$2" ]; then out="${out:+$out:}$p"; fi
-  done
-  printf '%s' "$out"
-}
-
 # Start from a clean slate: a terminal that sourced ~/.callosum-env.sh after an
 # earlier run carries that run's VK_ICD_FILENAMES (e.g. lavapipe) and loader dir,
 # which would make every probe below test the OLD answer.
@@ -291,8 +373,17 @@ if [ -n "${VK_ICD_FILENAMES:-}" ]; then
   warn "ignoring inherited VK_ICD_FILENAMES=$VK_ICD_FILENAMES (re-evaluating from scratch)"
 fi
 unset VK_ICD_FILENAMES VK_DRIVER_FILES VK_ADD_DRIVER_FILES
-LD_LIBRARY_PATH="$(strip_path "${LD_LIBRARY_PATH:-}" "$WORK/vklib")"
-if [ -n "$LD_LIBRARY_PATH" ]; then export LD_LIBRARY_PATH; else unset LD_LIBRARY_PATH; fi
+# Strip $WORK/vklib from LD_LIBRARY_PATH for a clean Vulkan probe (same logic as at startup).
+vklib_clean=""
+IFS=: read -ra _ld_parts <<< "${LD_LIBRARY_PATH:-}"
+for _p in ${_ld_parts[@]+"${_ld_parts[@]}"}; do
+  case "$_p" in
+    ""|"$WORK/vklib") ;;
+    *) vklib_clean="${vklib_clean:+$vklib_clean:}$_p" ;;
+  esac
+done
+unset _ld_parts _p
+if [ -n "$vklib_clean" ]; then export LD_LIBRARY_PATH="$vklib_clean"; else unset LD_LIBRARY_PATH; fi
 
 # --- NVIDIA user-space libraries (ldconfig, then well-known directories) ---
 LDCONFIG="$(command -v ldconfig 2>/dev/null || true)"
@@ -342,7 +433,7 @@ fi
 MESA="$WORK/mesa"
 if [ ! -e "$MESA/lib/libvulkan.so.1" ] && command -v conda >/dev/null 2>&1; then
   warn "installing a current Vulkan loader (+ lavapipe, vulkaninfo) with conda into $MESA (needs conda-forge)"
-  # conda's package cache defaults to ~/.conda/pkgs: keep it off $HOME (heavy files live in scratch).
+  # conda's package cache defaults to ~/.conda/pkgs: keep it with the other heavy files.
   CONDA_PKGS_DIRS="$WORK/conda-pkgs" \
     with_timeout 900 conda create -y -q -p "$MESA" -c conda-forge mesalib vulkan-tools >/dev/null 2>&1 \
     || warn "conda install failed (conda-forge not reachable from the server?)"
@@ -471,23 +562,45 @@ fi
 
 # ------------------------------------------------------------ 5. env file, runs/
 # One file that any NEW terminal sources. ~/.bashrc only reaches shells started
-# after setup (not `bash script.sh`, not an already-running kernel).
+# after setup (not `bash script.sh`, not an already-running kernel). It is rewritten
+# from scratch on every run, so exports of an earlier layout (e.g. the old /tmp
+# scratch paths) are gone from new terminals afterwards.
 say "Environment file"
 {
+  echo "# callosum-layout: $([ "$SCRATCH_MODE" = "1" ] && echo scratch || echo home)"
   echo "# Generated by scripts/setup_server.sh. Source it in every new terminal:"
   echo "#     source ~/.callosum-env.sh"
   echo "# Without it, uv would not know where the venv lives and would build a second one."
   printf 'export PATH="$HOME/.local/bin:$PATH"\n'
   if [ "$SCRATCH_MODE" = "1" ]; then
     printf 'export CALLOSUM_SCRATCH=%q\n' "$SCRATCH"
-    printf 'export CALLOSUM_REPO=%q\n' "$REPO_ROOT"
-    printf 'export UV_PROJECT_ENVIRONMENT=%q\n' "$UV_PROJECT_ENVIRONMENT"
-    printf 'export UV_CACHE_DIR=%q\n' "$UV_CACHE_DIR"
-    printf 'export UV_PYTHON_INSTALL_DIR=%q\n' "$UV_PYTHON_INSTALL_DIR"
-    printf 'export HF_HOME=%q\n' "$HF_HOME"
-    printf 'export MS_ASSET_DIR=%q\n' "$MS_ASSET_DIR"
-    printf 'export XDG_CACHE_HOME=%q\n' "$XDG_CACHE_HOME"
+    echo 'unset CALLOSUM_DATA'
+  else
+    printf 'export CALLOSUM_DATA=%q\n' "$WORK"
+    echo 'unset CALLOSUM_SCRATCH'
   fi
+  printf 'export CALLOSUM_REPO=%q\n' "$REPO_ROOT"
+  printf 'export UV_PROJECT_ENVIRONMENT=%q\n' "$UV_PROJECT_ENVIRONMENT"
+  printf 'export UV_CACHE_DIR=%q\n' "$UV_CACHE_DIR"
+  printf 'export UV_PYTHON_INSTALL_DIR=%q\n' "$UV_PYTHON_INSTALL_DIR"
+  printf 'export HF_HOME=%q\n' "$HF_HOME"
+  printf 'export MS_ASSET_DIR=%q\n' "$MS_ASSET_DIR"
+  printf 'export XDG_CACHE_HOME=%q\n' "$XDG_CACHE_HOME"
+  # Library dirs of any earlier layout, or of an earlier `source` of this file, must not
+  # pile up in LD_LIBRARY_PATH: drop them before the current ones are prepended.
+  echo '__cl_keep=""'
+  echo 'if [ -n "${LD_LIBRARY_PATH:-}" ]; then'
+  echo '  IFS=: read -ra __cl_parts <<< "$LD_LIBRARY_PATH"'
+  echo '  for __cl_p in ${__cl_parts[@]+"${__cl_parts[@]}"}; do'
+  echo '    case "$__cl_p" in'
+  echo '      ""|*/.callosum/lib|*/.callosum/vklib|*-callosum/lib|*-callosum/vklib) ;;'
+  printf '      %q|%q) ;;\n' "$WORK/lib" "$WORK/vklib"
+  echo '      *) __cl_keep="${__cl_keep:+$__cl_keep:}$__cl_p" ;;'
+  echo '    esac'
+  echo '  done'
+  echo 'fi'
+  echo 'if [ -n "$__cl_keep" ]; then export LD_LIBRARY_PATH="$__cl_keep"; else unset LD_LIBRARY_PATH; fi'
+  echo 'unset __cl_keep __cl_parts __cl_p'
   if [ -n "$SHIM_DIR" ]; then
     printf 'export LD_LIBRARY_PATH=%q"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' "$SHIM_DIR"
   fi
@@ -501,53 +614,47 @@ say "Environment file"
     # Stock config won: drop any VK_ICD_FILENAMES left over from an earlier run.
     echo 'unset VK_ICD_FILENAMES'
   fi
-  if [ "$SCRATCH_MODE" = "1" ]; then
-    printf '[ -d %q ] || echo "callosum: scratch was wiped; re-run: bash scripts/setup_server.sh (see docs/server-runbook.md)" >&2\n' "$VENV_DIR"
-  fi
+  printf '[ -d %q ] || echo "callosum: venv missing; run: bash %q/scripts/setup_server.sh (docs/server-runbook.md)" >&2\n' "$VENV_DIR" "$REPO_ROOT"
 } > "$ENV_FILE"
 ok "wrote $ENV_FILE"
 
-if [ "$SCRATCH_MODE" = "1" ]; then
-  # Hook it into new interactive terminals (idempotent; the file may be stale or
-  # missing after a wipe, hence the guard).
-  if ! grep -q 'callosum-env.sh' "$HOME/.bashrc" 2>/dev/null; then
-    printf '\n# callosum (added by scripts/setup_server.sh)\n[ -f "$HOME/.callosum-env.sh" ] && . "$HOME/.callosum-env.sh"\n' >> "$HOME/.bashrc"
-    ok "hooked into ~/.bashrc"
+# Hook it into new interactive terminals (idempotent; the file may be stale or
+# missing, hence the guard).
+if ! grep -q 'callosum-env.sh' "$HOME/.bashrc" 2>/dev/null; then
+  printf '\n# callosum (added by scripts/setup_server.sh)\n[ -f "$HOME/.callosum-env.sh" ] && . "$HOME/.callosum-env.sh"\n' >> "$HOME/.bashrc"
+  ok "hooked into ~/.bashrc"
+else
+  ok "already hooked into ~/.bashrc"
+fi
+
+# An accidental in-repo .venv (uv run without the env file) wastes space.
+if [ -d "$REPO_ROOT/.venv" ] && [ "$VENV_DIR" != "$REPO_ROOT/.venv" ]; then
+  warn "removing stray $REPO_ROOT/.venv (created by uv run without the env file)"
+  rm -rf "$REPO_ROOT/.venv"
+fi
+
+# Results must survive re-cloning the checkout (and a restart, if the checkout is in
+# /tmp): runs/ is a symlink to a store in $HOME, whatever the checkout path.
+say "runs/ (results)"
+RUNS_STORE="${CALLOSUM_RUNS:-$HOME/callosum-runs}"
+mkdir -p "$RUNS_STORE"
+if [ "$(readlink -f "$RUNS_STORE")" = "$(readlink -f "$REPO_ROOT/runs" 2>/dev/null || true)" ]; then
+  ok "runs/ is the store itself ($RUNS_STORE)"
+else
+  if [ -L "$REPO_ROOT/runs" ]; then
+    ln -sfn "$RUNS_STORE" "$REPO_ROOT/runs"
   else
-    ok "already hooked into ~/.bashrc"
+    # A real runs/ from before the symlink: keep its contents, then link.
+    if [ -d "$REPO_ROOT/runs" ]; then
+      cp -a "$REPO_ROOT/runs/." "$RUNS_STORE/" && rm -rf "$REPO_ROOT/runs"
+    fi
+    ln -s "$RUNS_STORE" "$REPO_ROOT/runs"
   fi
-
-  # An accidental in-repo .venv (uv run without the env file) wastes scratch space.
-  if [ -d "$REPO_ROOT/.venv" ] && [ "$VENV_DIR" != "$REPO_ROOT/.venv" ]; then
-    warn "removing stray $REPO_ROOT/.venv (created by uv run without the env file)"
-    rm -rf "$REPO_ROOT/.venv"
+  runs_free="$(free_mb "$RUNS_STORE")"
+  ok "runs -> $RUNS_STORE ($(du -sh "$RUNS_STORE" 2>/dev/null | cut -f1) used, ${runs_free:-?} MB free)"
+  if [ -n "$runs_free" ] && [ "$runs_free" -lt "$RUNS_LOW_MB" ]; then
+    warn "\$HOME (runs/) has only ${runs_free} MB free: prune checkpoints you do not need and download results (JupyterHub file browser)"
   fi
-
-  # Results must survive a restart, and scratch does not. If the checkout lives
-  # outside $HOME, keep runs/ in $HOME and symlink it in. If the checkout is in
-  # $HOME already, runs/ is as persistent as it can get.
-  say "runs/ (results)"
-  case "$REPO_ROOT" in
-    "$HOME"/*) ok "checkout is under \$HOME; runs/ stays a plain directory" ;;
-    *)
-      RUNS_STORE="${CALLOSUM_RUNS:-$HOME/callosum-runs}"
-      mkdir -p "$RUNS_STORE"
-      if [ -L "$REPO_ROOT/runs" ]; then
-        ln -sfn "$RUNS_STORE" "$REPO_ROOT/runs"
-      else
-        # A real runs/ from before the symlink: keep its contents, then link.
-        if [ -d "$REPO_ROOT/runs" ]; then
-          cp -a "$REPO_ROOT/runs/." "$RUNS_STORE/" && rm -rf "$REPO_ROOT/runs"
-        fi
-        ln -s "$RUNS_STORE" "$REPO_ROOT/runs"
-      fi
-      runs_free="$(free_mb "$RUNS_STORE")"
-      ok "runs -> $RUNS_STORE ($(du -sh "$RUNS_STORE" 2>/dev/null | cut -f1) used, ${runs_free:-?} MB free)"
-      if [ -n "$runs_free" ] && [ "$runs_free" -lt "$RUNS_LOW_MB" ]; then
-        warn "\$HOME (runs/) has only ${runs_free} MB free: prune checkpoints you do not need and download results (JupyterHub file browser)"
-      fi
-      ;;
-  esac
 fi
 
 # ----------------------------------------------------------- 6. verification
@@ -629,12 +736,21 @@ else
 fi
 
 say "Done"
+echo "   Checkout : $REPO_ROOT"
 if [ "$SCRATCH_MODE" = "1" ]; then
-  echo "   Checkout : $REPO_ROOT"
   echo "   Scratch  : $SCRATCH   (assumed wiped on server restart: re-run this script)"
-  echo "   Results  : $REPO_ROOT/runs"
-  echo "   In a new terminal 'source ~/.callosum-env.sh' (automatic via ~/.bashrc), then use"
-  echo "   'uv run <cmd>'. Long runs: see docs/server-runbook.md (detached with setsid nohup)."
 else
-  echo "   Use 'uv run <cmd>' — or activate with: source $VENV_DIR/bin/activate"
+  echo "   Data     : $WORK   (venv, caches, Vulkan loader; persistent)"
+fi
+echo "   Results  : $REPO_ROOT/runs -> $RUNS_STORE"
+echo "   Open a NEW terminal (or 'source ~/.callosum-env.sh') so the variables are set, then use"
+echo "   'uv run <cmd>'. Long runs: see docs/server-runbook.md (detached with setsid nohup)."
+if [ "$SCRATCH_MODE" != "1" ]; then
+  # Leftovers of the old /tmp layout (only present if /tmp was not wiped): never removed here.
+  for old in "$PREV_SCRATCH" "$PREV_REPO"; do
+    if [ -n "$old" ] && [ -d "$old" ] && [ "$old" != "$WORK" ] && [ "$old" != "$REPO_ROOT" ]; then
+      warn "old layout still on disk: $old"
+      warn "  once no run uses it: rm -rf $old   (a runs symlink inside it is removed, not its target)"
+    fi
+  done
 fi

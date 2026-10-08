@@ -11,13 +11,12 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 hr() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 
-# Where setup_server.sh put things (scratch mode); the env file knows.
+# Where setup_server.sh put things (~/.callosum, or the scratch dir); the env file knows.
 if [ -f "$HOME/.callosum-env.sh" ]; then
   # shellcheck disable=SC1091
   . "$HOME/.callosum-env.sh" 2>/dev/null || true
 fi
-WORK="${CALLOSUM_SCRATCH:-/tmp/${USER:-$(id -un)}-callosum}"
-[ -d "$WORK" ] || WORK="$HOME/.local/share/callosum"
+WORK="${CALLOSUM_SCRATCH:-${CALLOSUM_DATA:-$HOME/.callosum}}"
 VENV_PY="${UV_PROJECT_ENVIRONMENT:-$WORK/venv}/bin/python"
 MESA="$WORK/mesa"
 VKINFO="$(command -v vulkaninfo 2>/dev/null || true)"
@@ -29,7 +28,7 @@ hr "Environment of this shell"
 echo "  VK_ICD_FILENAMES = ${VK_ICD_FILENAMES:-<unset>}"
 echo "  LD_LIBRARY_PATH  = ${LD_LIBRARY_PATH:-<unset>}"
 echo "  NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-<unset>}  NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-<unset>}"
-echo "  scratch=$WORK  python=$VENV_PY"
+echo "  data root=$WORK  python=$VENV_PY"
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | sed 's/^/  GPU: /'
 
 hr "NVIDIA Vulkan user-space libraries"
