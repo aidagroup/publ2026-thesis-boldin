@@ -65,7 +65,7 @@
 | Skill-level среда + IPPO над примитивами (шаг 2.3) | ветка `step/2.3-skill-level-marl` (текущая) | специфицируется (change `add-skill-level-cube-assembly`); код не начат |
 | Модуль Bi-JEPA (шаг 3.1) | ветка `step/3.1-bijepa-module` | готов (24 теста, чистый torch), не влит |
 | Интеграция Bi-JEPA в политику (3.2) и ablation-харнесс (3.3) | — | не начаты (весна, отдельные изменения) |
-| Server storage: persistent layout, `update_server.sh` | `main` | скрипты готовы; серверная верификация отложена до первого cloud-прогона |
+| Server storage: persistent layout, `update_server.sh` | ветка `step/2.1-ippo-so101` (наследуется текущей `step/2.3-skill-level-marl`) | скрипты готовы; серверная верификация отложена до первого cloud-прогона; в `main` не влиты |
 
 ## Дорожная карта
 
