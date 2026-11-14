@@ -20,14 +20,14 @@
 ## Compute и ветки
 
 - Ветка работы: `step/2.3-skill-level-marl` (от `step/2.1-ippo-so101`). `main` заморожен до server-верификации storage-скриптов. Push в step-ветки регулярно.
-- Compute (решено 2026-11-14): **Nebius**, регион eu-north1, VM **Preemptible NVIDIA L40S 48 ГБ** (пресет 1 GPU / 16 CPUs / 96 GiB RAM), диск ~200 GiB (не дефолтные 1280), образ Ubuntu с предустановленным драйвером NVIDIA. Обоснование: state-based симуляция + MLP-политики не требуют H100; preemptible безопасен благодаря точному `--resume` тренера (latest.pt каждые 20 итераций) + циклу авто-рестарта `scripts/cloud_resume_loop.sh`. H100-preemptible ($2.15/ч из калькулятора) — запасной вариант, если L40S не хватит.
+- Compute (обновлено 2026-11-14): **RunPod** (Nebius отменён). GPU Pod **RTX 4090 24 ГБ**, On-Demand по умолчанию (Spot — для дешёвых длинных прогонов); container disk ~30–50 ГБ; network volume ~100 ГБ в `/workspace`, симлинк `~/callosum-runs → /workspace/callosum-runs` (чекпоинты переживают удаление пода); официальный PyTorch/CUDA-12 шаблон. 24 ГБ достаточно (state-based симуляция + MLP); L40S/A100 — опция на будущее (VLA). Прерывания безопасны: точный `--resume` тренера + `scripts/cloud_resume_loop.sh`. Ранбук: `docs/cloud-gpu.md`.
 - Мак локально: ruff, юнит-pytest, чтение кода; изредка 1–2-средовые CPU-пробы в одноразовом окружении; никаких тренировок, GPU, 256-сред.
 - Первый cloud-прогон верифицирует storage-скрипты (`scripts/update_server.sh`).
 
 ## Now: cloud-подготовка + код 2.3
 
 1. [x] Openspec-формализация документации — готово (коммиты f8b0ee9, 6d5a240; validate 7/7).
-2. [ ] Cloud-подготовка (исполнитель — субагент): `docs/cloud-gpu.md` (выбор конфигурации Nebius, чек-лист первого запуска: nvidia-smi → клон ветки → `bash scripts/update_server.sh` (= серверная верификация storage) → GPU smoke-прогоны smoke_env/smoke_face_turn/probe_face_turn; поведение preemption и resume; стоимость per-second, советы по диску) + `scripts/cloud_resume_loop.sh` (bash-цикл авто-рестарта тренера с `--resume` и SIGTERM-forwarding; `bash -n` чист) + синхронно обновить compute-строки в PLAN.md (уже сделано) и `openspec/project.md`. Коммит `feat: nebius cloud gpu runbook and preemption resume loop`, push.
+2. [x] Cloud-подготовка: `docs/cloud-gpu.md` (ранбук RunPod: конфигурация пода, чек-лист первого запуска, preemption/персистентность, стоимость) + `scripts/cloud_resume_loop.sh` (bash-цикл авто-рестарта тренера с `--resume` и SIGTERM-forwarding) + compute-строки в `openspec/project.md` и `server-storage`-спеке. Коммиты: 6f8995a (Nebius-вариант) + обновление под RunPod.
 3. [ ] Код 2.3 (локально, чистая логика + юнит-тесты): `callosum/envs/_skills.py` (реестр примитивов и пар, маски наблюдений), конфиг многослойного кубика, генератор планов (random/Kociemba). Затем обвязка IPPO категориальной головой, eval-harness. Тяжёлое — только на cloud GPU.
 
 ## Standing rules
