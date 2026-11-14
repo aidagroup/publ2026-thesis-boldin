@@ -20,26 +20,15 @@
 ## Compute и ветки
 
 - Ветка работы: `step/2.3-skill-level-marl` (от `step/2.1-ippo-so101`). `main` заморожен до server-верификации storage-скриптов. Push в step-ветки регулярно.
-- Compute: аренда cloud GPU, доступ API/SSH (ждём факты: провайдер / GPU / бюджет / старт; ориентир — одной 4090 достаточно).
+- Compute (решено 2026-11-14): **Nebius**, регион eu-north1, VM **Preemptible NVIDIA L40S 48 ГБ** (пресет 1 GPU / 16 CPUs / 96 GiB RAM), диск ~200 GiB (не дефолтные 1280), образ Ubuntu с предустановленным драйвером NVIDIA. Обоснование: state-based симуляция + MLP-политики не требуют H100; preemptible безопасен благодаря точному `--resume` тренера (latest.pt каждые 20 итераций) + циклу авто-рестарта `scripts/cloud_resume_loop.sh`. H100-preemptible ($2.15/ч из калькулятора) — запасной вариант, если L40S не хватит.
 - Мак локально: ruff, юнит-pytest, чтение кода; изредка 1–2-средовые CPU-пробы в одноразовом окружении; никаких тренировок, GPU, 256-сред.
 - Первый cloud-прогон верифицирует storage-скрипты (`scripts/update_server.sh`).
 
-## Now: openspec-формализация всей документации (docs-only)
+## Now: cloud-подготовка + код 2.3
 
-Исполнитель: субагент. Тексты русские, thesis-grade; структурные заголовки и SHALL/MUST английские (см. `openspec/config.yaml`). Цель: openspec становится единственной точкой ориентации в проекте и его текущем статусе; источники — вся папка `docs/` (implementation-plan.md, thesis/01–05 + glossary, setup.md, server-runbook.md, README) и этот PLAN.md.
-
-1. `openspec/project.md`: тема, научный вопрос, формализация координации + метрики, допущения, таблица статусов активов (готово в `main` / в ветке 2.1 / в ветке 3.1 / не начато — с негативными результатами), дорожная карта (14.12 предзащита → весна), ограничения (compute, заморозка main), глоссарий (ссылка на `docs/thesis/glossary.md` + новые термины: плейбек, cross-play, E1–E4, predicted-direct).
-2. As-is спеки существующего в `openspec/specs/` (по одной на capability; поведение «как есть», включая зафиксированные негативные результаты): `two-arm-workspace` (сцена, so101_pg, расстановка 90°, наблюдения/действия, partner_obs), `face-turn-task` (турнтейбл-кубик, блокировка грани, допуски, термы награды с гейтами, face_friction), `scripted-expert` (фазовые автоматы, delta-режим, DART, демо 364/512, probe), `ippo-training` (GPU IPPO, resume, диагностика, BC + DAPG; RL с нуля не схватывает, BC: holder 1.00 / rotator 0.02 / success 0), `bijepa-module` (энкодеры, предсказатель, EMA target, анти-коллапс; ветка 3.1), `server-storage` (persistent layout, update_server.sh; проверка отложена до cloud GPU).
-3. Change `add-skill-level-cube-assembly` — завершить (proposal.md и specs/skill-action-space уже написаны): дописать specs-дельты `cube-environment` и `coordination-metrics`, design.md, tasks.md. Содержание — по PLAN.md (пункты прежнего блока Now.2) и proposal.md.
-4. `docs/implementation-plan.md`: после заголовка добавить блок-цитату «Архив (2026-11-14): актуальная дорожная карта — openspec/». Ничего не удалять.
-5. `.kilo/command/opsx/`: копия 6 файлов из `.claude/commands/opsx/`.
-6. Коммит `docs: openspec specs and project status formalization` (включая `openspec/`, `.claude/`, `.kilo/`, PLAN.md), push `-u origin step/2.3-skill-level-marl`. В коммит НЕ включать `.DS_Store` и `harbour-space-letter/`.
-
-Готовность шага: `openspec validate --all` проходит; все артефакты change готовы по `openspec status`; as-is спеки покрывают docs/ без потери существенных фактов (включая негативные результаты); коммит запушен; код и docs/thesis/ не тронуты.
-
-## Next (после ревью): код 2.3 локально
-
-Чистая логика + юнит-тесты на маке: `callosum/envs/_skills.py` (реестр примитивов и пар), билдер многослойного кубика, генератор планов (random/Kociemba), маски наблюдений. Затем обвязка IPPO категориальной головой, eval-harness, cloud-скрипты. Тяжёлое — только на cloud GPU.
+1. [x] Openspec-формализация документации — готово (коммиты f8b0ee9, 6d5a240; validate 7/7).
+2. [ ] Cloud-подготовка (исполнитель — субагент): `docs/cloud-gpu.md` (выбор конфигурации Nebius, чек-лист первого запуска: nvidia-smi → клон ветки → `bash scripts/update_server.sh` (= серверная верификация storage) → GPU smoke-прогоны smoke_env/smoke_face_turn/probe_face_turn; поведение preemption и resume; стоимость per-second, советы по диску) + `scripts/cloud_resume_loop.sh` (bash-цикл авто-рестарта тренера с `--resume` и SIGTERM-forwarding; `bash -n` чист) + синхронно обновить compute-строки в PLAN.md (уже сделано) и `openspec/project.md`. Коммит `feat: nebius cloud gpu runbook and preemption resume loop`, push.
+3. [ ] Код 2.3 (локально, чистая логика + юнит-тесты): `callosum/envs/_skills.py` (реестр примитивов и пар, маски наблюдений), конфиг многослойного кубика, генератор планов (random/Kociemba). Затем обвязка IPPO категориальной головой, eval-harness. Тяжёлое — только на cloud GPU.
 
 ## Standing rules
 
@@ -50,6 +39,5 @@
 
 ## Ждём от пользователя (не блокирует)
 
-- cloud GPU: провайдер / GPU / бюджет / старт;
 - путь к прошлогодней презентации;
 - дата основной защиты (рабочая гипотеза: июнь 2027).

@@ -75,7 +75,7 @@
 
 ## Ограничения
 
-- **Compute:** лабораторный сервер недоступен — аренда cloud GPU (ждём факты: провайдер / GPU / бюджет / старт; ориентир — одной 4090 достаточно). Первый cloud-прогон верифицирует storage-скрипты (`scripts/update_server.sh`).
+- **Compute (решено 2026-11-14):** Nebius, регион eu-north1, VM Preemptible NVIDIA L40S 48 ГБ (пресет 1 GPU / 16 vCPU / 96 GiB RAM, Network SSD 200 GiB, образ `ubuntu24.04-cuda12`; запасной вариант — Preemptible H100). Ранбук первого запуска — `docs/cloud-gpu.md`; авто-рестарт при preemption — `scripts/cloud_resume_loop.sh`. Первый cloud-прогон верифицирует storage-скрипты (`scripts/update_server.sh`).
 - **`main` заморожен** до server-верификации storage-скриптов; работа в step-ветках, push регулярно.
 - **Мак локально:** ruff, юнит-pytest, чтение кода; изредка 1–2-средовые CPU-пробы в одноразовом окружении; никаких тренировок, GPU, 256-сред.
 - Язык: доки на русском; код, комментарии и коммиты на английском; коммиты `type: msg` без атрибуции.
