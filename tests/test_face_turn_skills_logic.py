@@ -564,7 +564,8 @@ def test_conductor_rotator_waits_while_face_not_up() -> None:
 
 def test_conductor_rotator_hold_belief_sets_and_clears() -> None:
     """The partner-hold belief: set by a grasp streak, cleared by any holder
-    selection that opens the jaws or parks them (release/retreat/approach/flip)."""
+    selection that opens the jaws or parks them away (release/retreat/approach)
+    -- a flip selection KEEPS it (the flip macro holds through by design)."""
     conductor = SkillsConductor(settle_decisions=1)
     upright = (0.0, 0.0, 0.0, 1.0)
     obs = _obs(Role.ROTATOR, face="F", quat=upright)  # F not up yet
@@ -573,11 +574,19 @@ def test_conductor_rotator_hold_belief_sets_and_clears() -> None:
     assert conductor.act("rotator", obs, info) == ROTATOR_ID["wait"]  # belief set, gate shut
     half = math.sqrt(0.5)
     f_up = _obs(Role.ROTATOR, face="F", quat=(half, 0.0, 0.0, half))
-    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["release"])) == ROTATOR_ID["wait"]
-    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["flip90"])) == ROTATOR_ID["wait"]
-    # A fresh grasp streak re-establishes the hold: approach.
-    assert conductor.act("rotator", f_up, info) == ROTATOR_ID["wait"]  # streak 1
-    assert conductor.act("rotator", f_up, info) == ROTATOR_ID["approach_face"]
+    # A flip selection does NOT clear the hold belief -- but the gate opens only
+    # with the face up; both hold here.
+    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["flip90"])) == ROTATOR_ID[
+        "approach_face"
+    ]
+    # The holder releases: the belief clears, and re-opening needs a fresh streak.
+    reset = SkillsConductor(settle_decisions=1)
+    assert reset.act("rotator", obs, info) == ROTATOR_ID["wait"]
+    assert reset.act("rotator", obs, info) == ROTATOR_ID["wait"]
+    assert reset.act("rotator", f_up, _info(holder=HOLDER_ID["release"])) == ROTATOR_ID["wait"]
+    assert reset.act("rotator", f_up, _info(holder=HOLDER_ID["retreat"])) == ROTATOR_ID["wait"]
+    assert reset.act("rotator", f_up, info) == ROTATOR_ID["wait"]  # streak 1
+    assert reset.act("rotator", f_up, info) == ROTATOR_ID["approach_face"]
 
 
 def test_conductor_rotator_trusts_a_standing_hold_between_moves() -> None:

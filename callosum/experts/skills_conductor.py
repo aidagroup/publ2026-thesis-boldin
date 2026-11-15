@@ -237,17 +237,15 @@ class SkillsConductor:
             state.streak = 0
         # Partner-hold belief, from the holder's primitive stream alone: a grasp
         # held for the streak margin means the jaws closed on the core (and stay
-        # closed through the holder's `wait`), so the belief survives the holder
-        # idling between plan moves -- the streak alone would never re-arm after
-        # a flip or across moves. Anything that opens the jaws or parks them away
-        # (release/retreat/approach) or a flip macro (which ends in its own
-        # release leg) clears it.
+        # closed through the holder's `wait` AND its flips -- the flip macro
+        # keeps the grip by design), so the belief survives the holder idling
+        # between plan moves and across flips -- the streak alone would never
+        # re-arm after one. Only selections that open the jaws or park them away
+        # (release/retreat/approach) clear it.
         if partner in (
             HOLDER_ID["release"],
             HOLDER_ID["retreat"],
             HOLDER_ID["approach_body"],
-            HOLDER_ID["flip90"],
-            HOLDER_ID["flip180"],
         ):
             state.partner_hold = False
         elif state.streak >= _GRASP_PARTNER_STREAK:
