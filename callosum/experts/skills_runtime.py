@@ -62,7 +62,13 @@ TODO(review): read the real control-step dt on the first cloud probe instead."""
 # torch/mani_skill at import time and so cannot be imported here). Metres / radians.
 HOLDER_GRASP_OFFSET = 0.02  # holder TCP this far from the cube centre, towards the holder
 HOLDER_GRASP_Z = -0.005  # TCP height offset from the cube centre (the core's equator)
-HOLDER_DEPRESSION = np.deg2rad(10)  # holder fingers point this far below horizontal
+HOLDER_DEPRESSION = np.deg2rad(0)  # holder fingers horizontal (see the note below)
+"""The fingers point horizontally at the cube. A depressed (downward-tilted)
+finger made the released cube slide ALONG the lower jaw during the flip's
+set-down ride -- the tine tilts as the wrist un-rolls and the cube walked
+2.5+ cm down the incline, past the success position tolerance and into the
+rotator's marginal-IK zone. With horizontal fingers the tine stays level and
+the cube stays put on it."""
 ROTATOR_TILT = np.deg2rad(6)  # rotator fingers this far off vertical, towards the cube
 ROTATOR_GRASP_Z = 0.018  # TCP height above the cube centre: mid of the up layer (hs - t/2)
 HOLDER_BACKOFF = 0.03  # pre-grasp: this far back along the approach direction ...

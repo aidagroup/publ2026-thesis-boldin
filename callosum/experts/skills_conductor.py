@@ -57,11 +57,12 @@ _FLIP_RETRIES = 8  # flip attempts before holding anyway (the episode budget cap
 _GRASP_RETRIES = 8  # grasp attempts (a failed one reads as open jaws) before giving up
 _SEQ_HOLD = 2  # decisions each step of a release/retreat sequence is held
 _NOT_HOLDING_OPENING = 0.9
-_HOLDING_OPENING_MIN = 0.3
-"""The holder/rotator read their own `own_gripper_opening` to verify a grasp:
-fully open is 1.0 (an injected failure never closes the jaws), clamped on a slab
-the opening settles around 0.8, and jaws fully closed (0.0) closed on AIR -- a
-grasp counts only inside the (min, max] band."""
+_HOLDING_OPENING_MIN = 0.1
+"""A hand verifies its grasp through its own `own_gripper_opening`: fully open is
+1.0 (an injected failure never closes the jaws), jaws fully closed (0.0) closed
+on air, and a real clamp reads the grasped width: the holder pinching the full
+cube (~57 mm) settles around 0.77, the rotator pinching the layer rim (~19 mm)
+around 0.16-0.26. Only the (min, max] band counts as a hold."""
 
 
 def _to_float(value) -> float:
