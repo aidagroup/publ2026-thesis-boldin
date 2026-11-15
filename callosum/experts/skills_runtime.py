@@ -601,8 +601,10 @@ class SkillsRuntime:
             # press a gripped cube the last centimetres onto the table (the joint
             # sags into its limit under the hanging weight), so the lower leg brings
             # the cube as far down as the arm manages and the release drops it the
-            # short remaining distance; the retreat then clears the gripper. The
-            # conductor re-grasps afterwards (a table-supported grasp has no sag).
+            # short remaining distance onto the lower jaw (the roll turned the jaw
+            # plane vertical); the unroll tips it off onto the table and the retreat
+            # clears the gripper. The conductor re-grasps afterwards (a
+            # table-supported grasp has no sag).
             return Sequence(
                 n,
                 name,
@@ -626,6 +628,9 @@ class SkillsRuntime:
                         settle=SETTLE_STEPS,
                     ),
                     lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
+                    lambda: TrackPath(
+                        n, "flip unroll", lambda envs: self._plan_reorient(0, envs), settle=SETTLE_STEPS
+                    ),
                     lambda: TrackPath(
                         n, "flip retreat", lambda envs: self._plan_retreat(0, envs), settle=SETTLE_STEPS
                     ),
@@ -815,6 +820,23 @@ class SkillsRuntime:
         q = self.cmd.q[arm][envs]
         tcp, finger, open_axis = self._tool_world(arm, q, envs)
         return self._plan_path_world(arm, envs, tcp + height * _UP, finger, open_axis)
+
+    def _plan_reorient(self, arm: int, envs: np.ndarray):
+        """The flip macro's `flip unroll` leg: wrist back to the natural jaw
+        orientation at the SAME tool pose.
+
+        The flip roll turns the jaw plane vertical, so the released cube balances
+        on the lower jaw like a fork tine; rotating the jaw plane back horizontal
+        tips the cube off deterministically (it slides within the first degrees)
+        and leaves the arm unrolled for the retreat."""
+        q = self.cmd.q[arm][envs]
+        tcp, finger, _ = self._tool_world(arm, q, envs)
+        if arm == 0:
+            _, _, _, open_axis = self._holder_directions(envs)
+        else:
+            fwd = self._horizontal_unit(arm, envs)
+            open_axis = np.cross(_UP, fwd)
+        return self._plan_path_world(arm, envs, tcp, finger, open_axis)
 
     def _plan_retreat(self, arm: int, envs: np.ndarray):
         """`retreat`: back along the approach and up (holder), or straight up (rotator)."""

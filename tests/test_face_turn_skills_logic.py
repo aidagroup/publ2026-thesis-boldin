@@ -210,7 +210,9 @@ def test_runtime_actions_shape_and_grip_passthrough() -> None:
 
 
 def test_flip_macro_sets_the_cube_down_and_retreats() -> None:
-    """The flip ends by releasing the cube and retreating: the loaded wrist cannot
+    """The flip ends by releasing the cube, un-rolling the wrist (the roll turns
+    the jaw plane vertical, so the cube balances on the lower jaw like a tine --
+    the unroll tips it onto the table) and retreating: the loaded wrist cannot
     press a gripped cube onto the table, so the macro sets it down and the
     conductor re-grasps with the table carrying the weight."""
     from callosum.experts.skills_runtime import Sequence
@@ -224,6 +226,7 @@ def test_flip_macro_sets_the_cube_down_and_retreats() -> None:
             "flip roll",
             "flip lower",
             "flip release",
+            "flip unroll",
             "flip retreat",
         ]
 
