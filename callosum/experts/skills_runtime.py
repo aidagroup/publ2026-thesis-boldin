@@ -150,14 +150,29 @@ def up_face_from_quat(quat: np.ndarray) -> str:
 
 
 def orientation_from_quat(quat: np.ndarray) -> CubeOrientation:
-    """The full `CubeOrientation` (which face points along each world slot)."""
+    """The full `CubeOrientation` (which face points along each world slot).
+
+    Greedy one-to-one assignment (all (slot, face) dot products sorted descending,
+    first come first served) instead of per-slot argmax: mid-flip quaternions (cube
+    held at 45 degrees) make two world slots maximise the SAME cube face, and
+    per-slot argmax then returns a non-permutation, which `CubeOrientation` rejects.
+    For axis-aligned orientations this picks exactly the argmax permutation.
+    """
     rot = _quat_to_matrix(quat)
-    slots: list[str] = []
+    scores: list[tuple[float, str, str]] = []
     for slot in ("U", "D", "F", "B", "R", "L"):
         body_dir = rot.T @ np.asarray(_FACE_VECTORS[slot], dtype=float)
-        face = max(_FACE_VECTORS, key=lambda f: float(body_dir @ _FACE_VECTORS[f]))
-        slots.append(face)
-    return CubeOrientation(tuple(slots))
+        for face in _FACE_VECTORS:
+            scores.append((float(body_dir @ _FACE_VECTORS[face]), slot, face))
+    scores.sort(reverse=True)
+    by_slot: dict[str, str] = {}
+    used: set[str] = set()
+    for _score, slot, face in scores:
+        if slot in by_slot or face in used:
+            continue
+        by_slot[slot] = face
+        used.add(face)
+    return CubeOrientation(tuple(by_slot[slot] for slot in ("U", "D", "F", "B", "R", "L")))
 
 
 def own_block_key_layout(role: Role) -> tuple[tuple[str, int], ...]:

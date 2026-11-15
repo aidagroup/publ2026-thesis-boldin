@@ -538,3 +538,19 @@ def test_env_module_imports_resolve() -> None:
             )
             checked += 1
     assert checked > 10, "expected to statically resolve a meaningful number of imports"
+
+
+def test_orientation_from_quat_degenerate_45deg() -> None:
+    """A mid-flip 45-deg quaternion must still yield a valid permutation."""
+    import numpy as np
+
+    from callosum.experts.skills_runtime import orientation_from_quat
+
+    half = np.cos(np.pi / 4)
+    quat = (half, half, 0.0, 0.0)  # 90 deg about +x == two 45-deg assignments meet
+    ori = orientation_from_quat(quat)
+    assert sorted(ori.slots) == ["B", "D", "F", "L", "R", "U"]
+    # Exactly on the diagonal between two faces the greedy tie-break is stable.
+    diag = (1.0, np.sin(np.pi / 8), 0.0, 0.0)
+    ori2 = orientation_from_quat(diag)
+    assert sorted(ori2.slots) == ["B", "D", "F", "L", "R", "U"]
