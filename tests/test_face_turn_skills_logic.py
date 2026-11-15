@@ -369,7 +369,7 @@ def _obs(
     quat=(0.0, 0.0, 0.0, 1.0),
     progress: float = 0.0,
     angle_rad: float = 0.0,
-    gripper: float = 0.0,
+    gripper: float = 0.6,
 ) -> np.ndarray:
     n_own = num_primitives(role)
     vec = np.zeros(own_block_size(n_own))
@@ -478,20 +478,24 @@ def test_conductor_holder_sets_down_a_cube_left_held_aloft() -> None:
 
 
 def test_conductor_holder_redoes_a_failed_grasp() -> None:
-    """An injected grasp failure leaves the jaws open: serving must notice through
-    the own gripper opening and re-approach instead of holding air."""
-    conductor = SkillsConductor(settle_decisions=1)
-    failed = _obs(Role.HOLDER, face="U", quat=(0.0, 0.0, 0.0, 1.0), progress=1.0, gripper=1.0)
-    info = _info()
-    for expected in (HOLDER_ID["approach_body"], HOLDER_ID["grasp"], HOLDER_ID["wait"]):
-        assert conductor.act("holder", failed, info) == expected
-    # U is already up (no flip needed) but the jaws hold nothing: re-approach.
-    assert conductor.act("holder", failed, info) == HOLDER_ID["approach_body"]
-    assert conductor.act("holder", failed, info) == HOLDER_ID["grasp"]
-    # The retry closed on the core (gripper reads clamped): serving holds.
-    holding = _obs(Role.HOLDER, face="U", quat=(0.0, 0.0, 0.0, 1.0), progress=1.0)
-    assert conductor.act("holder", holding, info) == HOLDER_ID["wait"]
-    assert conductor.act("holder", holding, info) == HOLDER_ID["wait"]
+    """A grasp that failed reads as open jaws (an injected failure, 1.0) or fully
+    closed on air (a miss, 0.0): serving must notice through the own gripper
+    opening and re-approach instead of holding air."""
+    for gripper in (1.0, 0.0):
+        conductor = SkillsConductor(settle_decisions=1)
+        failed = _obs(
+            Role.HOLDER, face="U", quat=(0.0, 0.0, 0.0, 1.0), progress=1.0, gripper=gripper
+        )
+        info = _info()
+        for expected in (HOLDER_ID["approach_body"], HOLDER_ID["grasp"], HOLDER_ID["wait"]):
+            assert conductor.act("holder", failed, info) == expected
+        # U is already up (no flip needed) but the jaws hold nothing: re-approach.
+        assert conductor.act("holder", failed, info) == HOLDER_ID["approach_body"]
+        assert conductor.act("holder", failed, info) == HOLDER_ID["grasp"]
+        # The retry clamped the core (gripper reads in-band): serving holds.
+        holding = _obs(Role.HOLDER, face="U", quat=(0.0, 0.0, 0.0, 1.0), progress=1.0)
+        assert conductor.act("holder", holding, info) == HOLDER_ID["wait"]
+        assert conductor.act("holder", holding, info) == HOLDER_ID["wait"]
 
 
 def test_conductor_rotator_turns_and_recovers() -> None:
@@ -517,17 +521,39 @@ def test_conductor_rotator_retries_a_slipped_turn() -> None:
     conductor = SkillsConductor(settle_decisions=1)
     half = math.sqrt(0.5)
     quat_f_up = (half, 0.0, 0.0, half)
-    obs = _obs(Role.ROTATOR, face="F", quat=quat_f_up)
-    done = _obs(Role.ROTATOR, face="F", quat=quat_f_up, progress=1.0)
+    obs = _obs(Role.ROTATOR, face="F", quat=quat_f_up, gripper=0.6)
+    done = _obs(Role.ROTATOR, face="F", quat=quat_f_up, progress=1.0, gripper=0.6)
     slipped = _info(holder=HOLDER_ID["grasp"], angle_deg=30.0)
     assert conductor.act("rotator", obs, slipped) == ROTATOR_ID["wait"]
     assert conductor.act("rotator", obs, slipped) == ROTATOR_ID["approach_face"]
     assert conductor.act("rotator", done, slipped) == ROTATOR_ID["grasp"]
     assert conductor.act("rotator", done, slipped) == ROTATOR_ID["turn90"]
-    # The turn "finished" at 30 deg (a slip): two retries, then resync (release).
+    # The turn "finished" at 30 deg (a slip). A retry must INTERRUPT the completed
+    # turn (one `wait` decision) before re-issuing it: re-selecting the same id
+    # would only hold the finished primitive.
+    assert conductor.act("rotator", done, slipped) == ROTATOR_ID["wait"]
     assert conductor.act("rotator", done, slipped) == ROTATOR_ID["turn90"]
+    assert conductor.act("rotator", done, slipped) == ROTATOR_ID["wait"]
     assert conductor.act("rotator", done, slipped) == ROTATOR_ID["turn90"]
+    # Retries exhausted: resync (release, retreat, approach).
     assert conductor.act("rotator", done, slipped) == ROTATOR_ID["release"]
+
+
+def test_conductor_rotator_redoes_a_missed_grasp() -> None:
+    """A grasp that missed the layer (jaws fully closed on air read 0.0) or never
+    closed (injected failure, reads 1.0) is resynchronized, never turned."""
+    for gripper in (0.0, 1.0):
+        conductor = SkillsConductor(settle_decisions=1)
+        half = math.sqrt(0.5)
+        quat_f_up = (half, 0.0, 0.0, half)
+        obs = _obs(Role.ROTATOR, face="F", quat=quat_f_up, gripper=0.6)
+        missed = _obs(Role.ROTATOR, face="F", quat=quat_f_up, progress=1.0, gripper=gripper)
+        info = _info(holder=HOLDER_ID["grasp"])
+        assert conductor.act("rotator", obs, info) == ROTATOR_ID["wait"]
+        assert conductor.act("rotator", obs, info) == ROTATOR_ID["approach_face"]
+        assert conductor.act("rotator", missed, info) == ROTATOR_ID["grasp"]
+        # The grasp "completed" holding nothing: release/retreat/approach, not turn.
+        assert conductor.act("rotator", missed, info) == ROTATOR_ID["release"]
 
 
 def test_conductor_rotator_waits_while_face_not_up() -> None:

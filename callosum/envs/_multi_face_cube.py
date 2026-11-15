@@ -31,6 +31,7 @@ its face normal as qpos changes.
 
 import numpy as np
 import sapien
+import sapien.physx
 import sapien.render
 from mani_skill.envs.scene import ManiSkillScene
 from mani_skill.utils.structs.articulation import Articulation
@@ -108,6 +109,14 @@ def build_multi_face_cube(
     hs = config.cube_half_size
     t = config.layer_thickness
     gap = config.layer_gap
+    # The explicit contact material: with PhysX's defaults the cube glides across
+    # the table at constant speed after any lateral kick (A40 probe measurement --
+    # the flip's set-down flicked it 30+ cm off the table edge).
+    material = sapien.physx.PhysxMaterial(
+        static_friction=config.contact_static_friction,
+        dynamic_friction=config.contact_dynamic_friction,
+        restitution=config.contact_restitution,
+    )
 
     builder = scene.create_articulation_builder()
     builder.set_scene_idxs(scene_idxs)
@@ -128,6 +137,7 @@ def build_multi_face_cube(
     core_half = hs - t - gap / 2
     core.add_box_collision(
         half_size=[core_half, core_half, core_half],
+        material=material,
     )
     core.add_box_visual(
         half_size=[core_half, core_half, core_half],
@@ -148,6 +158,7 @@ def build_multi_face_cube(
         layer.set_name(f"layer_{face}")
         layer.add_box_collision(
             half_size=half,
+            material=material,
         )
         layer.add_box_visual(
             half_size=half,

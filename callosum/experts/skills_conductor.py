@@ -57,9 +57,11 @@ _FLIP_RETRIES = 8  # flip attempts before holding anyway (the episode budget cap
 _GRASP_RETRIES = 8  # grasp attempts (a failed one reads as open jaws) before giving up
 _SEQ_HOLD = 2  # decisions each step of a release/retreat sequence is held
 _NOT_HOLDING_OPENING = 0.9
-"""`own_gripper_opening` above this means the jaws hold nothing: fully open is 1.0
-and clamped on a slab the opening settles around 0.8. The holder reads its own
-jaws to notice an injected grasp failure (the doomed close leaves them open)."""
+_HOLDING_OPENING_MIN = 0.3
+"""The holder/rotator read their own `own_gripper_opening` to verify a grasp:
+fully open is 1.0 (an injected failure never closes the jaws), clamped on a slab
+the opening settles around 0.8, and jaws fully closed (0.0) closed on AIR -- a
+grasp counts only inside the (min, max] band."""
 
 
 def _to_float(value) -> float:
@@ -151,8 +153,13 @@ class SkillsConductor:
         return up_face_from_quat(fields["cube_orientation_quat"])
 
     def _holding(self, fields: dict) -> bool:
-        """Whether the holder's own jaws read as clamping something (proprioception)."""
-        return float(fields["own_gripper_opening"][0]) <= _NOT_HOLDING_OPENING
+        """Whether this hand's own jaws read as clamping something (proprioception).
+
+        Clamped on the slab the normalized opening settles around 0.8; an injected
+        failure leaves the jaws open (1.0) and a grasp that missed its target closes
+        fully on air (0.0) -- only the in-between band counts as a hold."""
+        opening = float(fields["own_gripper_opening"][0])
+        return _HOLDING_OPENING_MIN < opening <= _NOT_HOLDING_OPENING
 
     def _needed_flip(self, fields: dict) -> Flip | None:
         face = self._move_face(fields)
@@ -263,6 +270,10 @@ class SkillsConductor:
             return self._after_settle(state, "grasp", ids["grasp"])
         if phase == "grasp":
             if state.done_settle >= self.settle_decisions:
+                if not self._holding(fields):
+                    # The jaws missed the layer (fully closed on air reads 0.0) or
+                    # never closed (an injected failure reads fully open): retry.
+                    return self._resync(state)
                 # Remember the move's target NOW: after the turn the angle has moved,
                 # so recomputing `turn_target_rad` later would target the NEXT detent.
                 state.target_deg = math.degrees(
@@ -271,6 +282,11 @@ class SkillsConductor:
                 return self._enter(state, "turn", self._turn_choice(fields))
             return self._reselect(state)
         if phase == "turn":
+            if state.step == 1:
+                # The one-decision gap interrupted the finished turn; re-issue a
+                # FRESH one (the changed selection replans from the current angle).
+                state.step = 0
+                return self._turn_choice(fields)
             if state.done_settle >= self.settle_decisions:
                 angle = _to_float(info.get(INFO_ACTIVE_LAYER_ANGLE_DEG, 0.0))
                 target = state.target_deg if state.target_deg is not None else angle
@@ -279,7 +295,10 @@ class SkillsConductor:
                 if state.retries >= 2:
                     return self._resync(state)  # slipped: re-approach and re-grasp
                 state.retries += 1
-                return self._enter(state, "turn", self._turn_choice(fields))
+                state.step = 1
+                # Interrupt the finished turn with `wait` this decision: re-selecting
+                # the same turn id would only CONTINUE (hold) the completed primitive.
+                return ids["wait"]
             return self._reselect(state)
         if phase == "seq":
             return self._sequence(state, state.seq_steps, state.seq_then)

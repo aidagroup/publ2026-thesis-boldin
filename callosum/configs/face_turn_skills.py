@@ -113,12 +113,14 @@ class FaceTurnSkillsConfig:
     as executed (FaceTurn-v0 used 0.05 rad ~ 2.9 deg on the single face; a touch looser
     here because flips re-seat the cube between moves)."""
 
-    body_pos_tol: float = 0.012
+    body_pos_tol: float = 0.02
     """Success tolerance (m) of the cube-center displacement from its initial pose.
-    Slightly above FaceTurn's 0.01: flips bounce the cube a little when re-seated.
-    Rotation vs the initial pose is deliberately NOT checked -- flips are required
-    plan actions; stability instead means the layers are at rest and the position
-    bound holds."""
+    The flip macro sets the cube down with a short drop off the lower jaw (the
+    loaded wrist cannot press it fully onto the table), so the cube realistically
+    drifts ~1 cm per flip (roll arc + landing nudge); the friction material keeps
+    the drift bounded, the tolerance admits it. Rotation vs the initial pose is
+    deliberately NOT checked -- flips are required plan actions; stability instead
+    means the layers are at rest and the position bound holds."""
 
     body_settle_qvel: float = 0.3
     """Max layer-joint speed (rad/s) for the cube to count as settled at success

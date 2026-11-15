@@ -123,6 +123,20 @@ class MultiFaceCubeConfig:
     layers: tuple[LayerSpec, ...] = field(default_factory=default_layers)
     """The six outer layers; must cover each face exactly once."""
 
+    contact_static_friction: float = 1.0
+    """Static friction of the cube's contact material (core and slabs). Without an
+    explicit material the collision boxes get PhysX defaults, and on the A40 probe
+    the cube GLIDED across the table at constant speed after the flip's set-down
+    tipped it off the jaw -- a lateral kick must die within millimetres, not carry
+    the cube off the table (body_pos_tol is 1-2 cm)."""
+
+    contact_dynamic_friction: float = 0.8
+    """Dynamic friction of the cube's contact material."""
+
+    contact_restitution: float = 0.12
+    """Restitution of the cube's contact material: the set-down drops the cube the
+    last ~2 cm onto the table/jaw, and a bouncy cube would drift and tip."""
+
     def __post_init__(self) -> None:
         if self.cube_half_size <= 0:
             raise ValueError(f"cube_half_size must be > 0, got {self.cube_half_size}")
@@ -135,6 +149,9 @@ class MultiFaceCubeConfig:
             raise ValueError(
                 f"layer_gap must be within [0, {self.layer_thickness}) m, got {self.layer_gap}"
             )
+        for name in ("contact_static_friction", "contact_dynamic_friction", "contact_restitution"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
         faces = [layer.face for layer in self.layers]
         if len(faces) != 6 or set(faces) != set(FACE_NORMALS):
             raise ValueError(f"layers must cover each of the 6 faces exactly once, got {faces}")
