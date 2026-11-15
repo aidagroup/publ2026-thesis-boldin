@@ -70,6 +70,13 @@ HOLDER_LIFT = 0.01  # ... and this far above the grasp pose (jaws open)
 ROTATOR_LIFT = 0.04  # rotator pre-grasp: this far straight above the grasp pose
 FLIP_LIFT = 0.06  # how high the holder lifts the cube before flipping it
 LIFT_HEIGHT = 0.04  # the `lift` primitive's rise (a preparation hold, not a flip)
+_UNROLL_SPEED = 0.25
+"""Speed scale of the flip macro's unroll leg. The released cube rests on the
+lower jaw like a fork tine (the roll turned the jaw plane vertical); unrolling
+at the delta-limit speed flings it off with the tine's tangential velocity and
+it lands edge-first, bounces and tumbles (observed: a 5 cm toss and a quarter
+turn past the target). A quasi-static unroll lets the cube slide off gently
+near the friction angle and land flat."""
 IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
@@ -525,10 +532,11 @@ class SkillsRuntime:
         The same closed-loop tracking as the scripted expert (`Rig._delta_action`):
         normalised error towards the commanded joints plus the integral bias, here
         additionally scaled by the episode's per-hand speed multiplier (randomization)
-        and clipped -- a slower hand converges over more substeps, never a jumpier one.
-        The gripper entry is absolute and never scaled. The controller's per-substep
-        bound (`ARM_DELTA_LIMIT`) is injected by the env (the robots module pulls
-        sapien and is not importable on macOS).
+        and the running primitive's own `speed_scale` (a macro leg may move
+        quasi-statically), then clipped -- a slower hand converges over more
+        substeps, never a jumpier one. The gripper entry is absolute and never
+        scaled. The controller's per-substep bound (`ARM_DELTA_LIMIT`) is injected
+        by the env (the robots module pulls sapien and is not importable on macOS).
         """
         limit = self._delta_limit
         outs = []
@@ -540,9 +548,28 @@ class SkillsRuntime:
             self.cmd.bias[arm] = update_bias(
                 self.cmd.bias[arm], error, self.control.ki, self.control.bias_max, saturated
             )
-            action = np.clip(action * self.speed[arm][:, None], -1.0, 1.0)
+            speed = self.speed[arm] * self._running_speed_scale(arm)
+            action = np.clip(action * speed[:, None], -1.0, 1.0)
             outs.append(np.concatenate([action, self.cmd.grip[arm][:, None]], axis=1))
         return outs
+
+    def _running_speed_scale(self, arm: int) -> np.ndarray:
+        """`(n,)` speed scale of each env's running primitive (Sequence: its
+        current child; `wait` and unknown primitives: 1.0)."""
+        scale = np.ones(self.n)
+        for primitive_id in np.unique(self.selection[arm]):
+            if primitive_id == 0:
+                continue
+            primitive = self._primitives.get((arm, int(primitive_id)))
+            if primitive is None:
+                continue
+            for env in np.flatnonzero(self.selection[arm] == primitive_id):
+                running = primitive
+                if isinstance(primitive, Sequence):
+                    stage = min(int(primitive.stage[env]), len(primitive.children) - 1)
+                    running = primitive.children[stage]
+                scale[env] = getattr(running, "speed_scale", 1.0)
+        return scale
 
     def selections(self) -> np.ndarray:
         """`(2, n)` currently-selected primitive ids (a slip abort reads as `wait`)."""
@@ -629,7 +656,11 @@ class SkillsRuntime:
                     ),
                     lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
                     lambda: TrackPath(
-                        n, "flip unroll", lambda envs: self._plan_reorient(0, envs), settle=SETTLE_STEPS
+                        n,
+                        "flip unroll",
+                        lambda envs: self._plan_reorient(0, envs),
+                        settle=SETTLE_STEPS,
+                        speed_scale=_UNROLL_SPEED,
                     ),
                     lambda: TrackPath(
                         n, "flip retreat", lambda envs: self._plan_retreat(0, envs), settle=SETTLE_STEPS

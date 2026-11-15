@@ -164,6 +164,7 @@ class TrackPath(Primitive):
         settle: int = 0,
         until: Callable[[Context], np.ndarray] | None = None,
         hold_on_done: bool = False,
+        speed_scale: float = 1.0,
     ) -> None:
         super().__init__(n, name)
         self.planner = planner
@@ -171,6 +172,11 @@ class TrackPath(Primitive):
         self.settle = settle
         self.until = until
         self.hold_on_done = hold_on_done
+        self.speed_scale = float(speed_scale)
+        """Multiplier on the tracking action while this primitive runs (<1 = slower
+        than the delta-limit top speed; the skills runtime consults it so a
+        macro leg can move quasi-statically -- e.g. tipping a resting cube off
+        the jaw, where full-speed rotation flings it)."""
         self.paths: np.ndarray | None = None  # (n, W, 5)
         self.pointer = np.zeros(n, dtype=int)
         self.budget = np.zeros(n, dtype=int)
