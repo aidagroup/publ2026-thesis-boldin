@@ -928,12 +928,25 @@ class SkillsRuntime:
             tcp, finger, open_axis = self._holder_grasp_pose(envs)
             backoff = tcp - HOLDER_BACKOFF * finger + HOLDER_LIFT * _UP
             pre, ok_pre = self._plan_path_world(arm, envs, backoff, finger, open_axis)
-            # The descent starts where the backoff leg ends (chained, like the expert's paths).
-            saved = self.cmd.q[arm][envs].copy()
-            self.cmd.q[arm][envs] = pre[:, -1]
-            grasp, ok_grasp = self._plan_path_world(arm, envs, tcp, finger, open_axis)
-            self.cmd.q[arm][envs] = saved
-            return np.concatenate([pre, grasp], axis=1), ok_pre & ok_grasp
+        else:
+            tcp, finger, open_axis = self._rotator_grasp_pose(envs)
+            # HOVER above the rim, then a pure vertical drop: a strict-tolerance
+            # pose 4 cm above the rim is pitch-infeasible across the rotator's
+            # whole workspace (workspace-mapped on the pod: the straight-up
+            # backoff fails everywhere while the rim pose itself solves from
+            # x >= -0.04), so the sweep to the hover runs with a LOOSE finger
+            # angle tolerance -- the orientation only has to be right where it
+            # matters, at the rim. The vertical drop then straddles the rim
+            # without shoving the hanging cube sideways (a diagonal entry
+            # pushed the cube 5 cm aside and tangled the arms).
+            hover = tcp + _ROTATOR_HOVER * _UP
+            pre, ok_pre = self._plan_path_world(arm, envs, hover, finger, open_axis, angle_tol=0.5)
+        # The descent starts where the sweep leg ends (chained, like the expert's paths).
+        saved = self.cmd.q[arm][envs].copy()
+        self.cmd.q[arm][envs] = pre[:, -1]
+        grasp, ok_grasp = self._plan_path_world(arm, envs, tcp, finger, open_axis)
+        self.cmd.q[arm][envs] = saved
+        return np.concatenate([pre, grasp], axis=1), ok_pre & ok_grasp
 
     def _plan_vertical(self, arm: int, envs: np.ndarray, height: float):
         """`lift` / `lower` (and the flip macro's lift/lower legs): straight vertical."""
