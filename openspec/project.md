@@ -65,7 +65,7 @@
 | Skill-level среда + IPPO над примитивами (шаг 2.3) | ветка `step/2.3-skill-level-marl` (текущая) | специфицируется (change `add-skill-level-cube-assembly`); код не начат |
 | Модуль Bi-JEPA (шаг 3.1) | ветка `step/3.1-bijepa-module` | готов (24 теста, чистый torch), не влит |
 | Интеграция Bi-JEPA в политику (3.2) и ablation-харнесс (3.3) | — | не начаты (весна, отдельные изменения) |
-| Server storage: persistent layout, `update_server.sh` | ветка `step/2.1-ippo-so101` (наследуется текущей `step/2.3-skill-level-marl`) | скрипты готовы; серверная верификация отложена до первого cloud-прогона; в `main` не влиты |
+| Server storage: persistent layout, `update_server.sh` | ветка `step/2.1-ippo-so101` (наследуется текущей `step/2.3-skill-level-marl`) | **верифицирован 2026-11-15** (RunPod A40: setup+update+smoke+probe 15/16); в `main` не влиты — влив возможен |
 
 ## Дорожная карта
 
@@ -75,7 +75,7 @@
 
 ## Ограничения
 
-- **Compute (обновлено 2026-11-14):** RunPod (Nebius отменён): GPU Pod RTX 4090 24 ГБ, On-Demand по умолчанию / Spot для длинных прогонов, container disk ~30–50 ГБ, network volume `/workspace` (~100 ГБ) под `~/callosum-runs` (симлинк; чекпоинты переживают удаление пода), PyTorch/CUDA-12 шаблон. Ранбук первого запуска — `docs/cloud-gpu.md`; авто-рестарт при прерываниях — `scripts/cloud_resume_loop.sh`. Первый cloud-прогон верифицирует storage-скрипты (`scripts/setup_server.sh --smoke`).
+- **Compute (обновлено 2026-11-15):** RunPod, GPU Pod **A40 48 ГБ** (Ampere; раннее решение про A6000/4090 скорректировано по наличию), On-Demand по умолчанию / Spot для длинных прогонов, container disk ~50 ГБ, network volume `/workspace` (20 ГБ) под `~/callosum-runs` (симлинк; чекпоинты переживают удаление пода). State-обучение работает (Vulkan — software/lavapipe; hardware-Vulkan для видеорендера — открытый вопрос, не блокирует E1/E2). Ранбук — `docs/cloud-gpu.md`; авто-рестарт — `scripts/cloud_resume_loop.sh`. Storage-скрипты верифицированы первым прогоном 2026-11-15.
 - **`main` заморожен** до server-верификации storage-скриптов; работа в step-ветках, push регулярно.
 - **Мак локально:** ruff, юнит-pytest, чтение кода; изредка 1–2-средовые CPU-пробы в одноразовом окружении; никаких тренировок, GPU, 256-сред.
 - Язык: доки на русском; код, комментарии и коммиты на английском; коммиты `type: msg` без атрибуции.

@@ -19,7 +19,7 @@
 
 ## Compute и ветки
 
-- Ветка работы: `step/2.3-skill-level-marl` (от `step/2.1-ippo-so101`). `main` заморожен до server-верификации storage-скриптов. Push в step-ветки регулярно.
+- Ветка работы: `step/2.3-skill-level-marl` (от `step/2.1-ippo-so101`). Storage-скрипты **верифицированы на сервере 2026-11-15** (RunPod A40: fresh setup + update + GPU smokes + probe 15/16) — блокировка `main` снята, влив 2.1 возможен. Push в step-ветки регулярно.
 - Compute (обновлено 2026-11-14): **RunPod** (Nebius отменён). GPU Pod **RTX 4090 24 ГБ**, On-Demand по умолчанию (Spot — для дешёвых длинных прогонов); container disk ~30–50 ГБ; network volume ~100 ГБ в `/workspace`, симлинк `~/callosum-runs → /workspace/callosum-runs` (чекпоинты переживают удаление пода); официальный PyTorch/CUDA-12 шаблон. 24 ГБ достаточно (state-based симуляция + MLP); L40S/A100 — опция на будущее (VLA). Прерывания безопасны: точный `--resume` тренера + `scripts/cloud_resume_loop.sh`. Ранбук: `docs/cloud-gpu.md`.
 - Мак локально: ruff, юнит-pytest, чтение кода; изредка 1–2-средовые CPU-пробы в одноразовом окружении; никаких тренировок, GPU, 256-сред.
 - Первый cloud-прогон верифицирует storage-скрипты (`scripts/update_server.sh`).

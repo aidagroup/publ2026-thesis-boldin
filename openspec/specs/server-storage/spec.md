@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Хранение и обновление на вычислительном сервере: персистентный layout в `$HOME`, скрипты `setup_server.sh` / `update_server.sh`, обработка причуд SAPIEN/Vulkan. Существующее поведение «как есть» (в `main`); серверная верификация скриптов отложена до первого cloud-прогона.
+Хранение и обновление на вычислительном сервере: персистентный layout в `$HOME`, скрипты `setup_server.sh` / `update_server.sh`, обработка причуд SAPIEN/Vulkan. Существующее поведение «как есть» (в `main`); серверная верификация: **пройдена 2026-11-15** на RunPod (GPU Pod A40: fresh install, update-синхронизация, GPU smoke-тесты, scripted-эксперт 15/16; Vulkan — software fallback через lavapipe, достаточно для state-обучения).
 
 ## Requirements
 
