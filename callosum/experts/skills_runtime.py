@@ -68,13 +68,16 @@ grasp pose unreachable for this base layout), but it tilts the lower jaw like a
 10 deg incline: during the flip's set-down ride the cube slides 2.5+ cm down it,
 past the success position tolerance. The macro therefore LEVELS the tine (a
 small pitch-up at constant TCP) right after the release, before the unroll."""
-ROTATOR_TILT = np.deg2rad(0)  # rotator fingers point straight down
-"""Vertical fingers: the 6 deg inward tilt of the FaceTurn expert consumed the
-rotator's wrist-pitch joint -- the rim-depth descent needs ~7 deg more pitch
-than the (margin-shrunk) joint limit has, so the descent stalled 1.7 cm above
-the layer rim and only the fingertip tips caught it (a tip pinch cannot
-transmit the turn torque; the rim slips out, gR -> 0, angle unmoved)."""
-ROTATOR_GRASP_Z = 0.018  # TCP height above the cube centre: mid of the up layer (hs - t/2)
+ROTATOR_TILT = np.deg2rad(4)  # rotator fingers this far off vertical, towards the cube
+"""The tilt must thread a needle: 6 deg (the FaceTurn expert's value) makes the
+rim-depth descent demand ~7 deg more wrist pitch than the joint has (the
+descent stalled 1.7 cm above the layer rim and only the fingertip tips caught
+it -- a tip pinch cannot transmit the turn torque), 0 deg makes even the
+backoff pose unreachable. 4 deg plus the rotator's tighter IK margin and the
+slightly shallower rim target covers the demand."""
+ROTATOR_GRASP_Z = 0.022  # TCP height above the cube centre: upper half of the rim
+# (the rim spans hs-t .. hs above the centre; 0.022 bites its top 6.5 mm, a
+# trade of pinch depth for wrist-pitch reach -- see ROTATOR_TILT)
 HOLDER_BACKOFF = 0.03  # pre-grasp: this far back along the approach direction ...
 HOLDER_LIFT = 0.01  # ... and this far above the grasp pose (jaws open)
 ROTATOR_LIFT = 0.04  # rotator pre-grasp: this far straight above the grasp pose
@@ -92,6 +95,11 @@ ride time)."""
 IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
+_ROTATOR_IK_MARGIN = 0.01
+"""The rotator's IK keeps joints this far inside their limits instead of the
+config's 0.05: its wrist-pitch is the binding constraint of the rim grasp and
+the layer's weight is trivial, so the delta-sag-near-limits risk the margin
+guards against does not apply (see ROTATOR_TILT)."""
 """`ARM_DELTA_LIMIT` (rad per substep of the delta controller), duplicated from
 `callosum.robots.so101_parallel_gripper` (not importable on macOS) only to size the
 offline timeout/turn-duration estimates; at runtime `SkillsRuntime` receives the real
@@ -753,13 +761,18 @@ class SkillsRuntime:
             goal_finger = to_base @ finger[i]
             goal_open = to_base @ open_axis[i]
             found = False
+            margin = (
+                min(self.control.joint_limit_margin, _ROTATOR_IK_MARGIN)
+                if arm == 1
+                else self.control.joint_limit_margin
+            )
             for sign in (1.0, -1.0):
                 q, pos_err, angle_err = model.solve(
                     goal_tcp,
                     goal_finger,
                     sign * goal_open,
                     seeds[i],
-                    self.control.joint_limit_margin,
+                    margin,
                 )
                 if pos_err < IK_POSITION_TOL and angle_err < IK_ANGLE_TOL:
                     out[i], found = q, True
