@@ -230,6 +230,7 @@ def test_flip_macro_sets_the_cube_down_and_retreats() -> None:
             "flip roll",
             "flip lower",
             "flip release",
+            "flip level",
             "flip unroll",
             "flip retreat",
         ]

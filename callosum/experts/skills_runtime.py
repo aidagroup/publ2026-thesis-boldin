@@ -62,13 +62,12 @@ TODO(review): read the real control-step dt on the first cloud probe instead."""
 # torch/mani_skill at import time and so cannot be imported here). Metres / radians.
 HOLDER_GRASP_OFFSET = 0.02  # holder TCP this far from the cube centre, towards the holder
 HOLDER_GRASP_Z = -0.005  # TCP height offset from the cube centre (the core's equator)
-HOLDER_DEPRESSION = np.deg2rad(0)  # holder fingers horizontal (see the note below)
-"""The fingers point horizontally at the cube. A depressed (downward-tilted)
-finger made the released cube slide ALONG the lower jaw during the flip's
-set-down ride -- the tine tilts as the wrist un-rolls and the cube walked
-2.5+ cm down the incline, past the success position tolerance and into the
-rotator's marginal-IK zone. With horizontal fingers the tine stays level and
-the cube stays put on it."""
+HOLDER_DEPRESSION = np.deg2rad(10)  # holder fingers point this far below horizontal
+"""The depressed finger is what the arm can reach (horizontal fingers make the
+grasp pose unreachable for this base layout), but it tilts the lower jaw like a
+10 deg incline: during the flip's set-down ride the cube slides 2.5+ cm down it,
+past the success position tolerance. The macro therefore LEVELS the tine (a
+small pitch-up at constant TCP) right after the release, before the unroll."""
 ROTATOR_TILT = np.deg2rad(6)  # rotator fingers this far off vertical, towards the cube
 ROTATOR_GRASP_Z = 0.018  # TCP height above the cube centre: mid of the up layer (hs - t/2)
 HOLDER_BACKOFF = 0.03  # pre-grasp: this far back along the approach direction ...
@@ -635,9 +634,10 @@ class SkillsRuntime:
             # sags into its limit under the hanging weight), so the lower leg brings
             # the cube as far down as the arm manages and the release drops it the
             # short remaining distance onto the lower jaw (the roll turned the jaw
-            # plane vertical); the unroll tips it off onto the table and the retreat
-            # clears the gripper. The conductor re-grasps afterwards (a
-            # table-supported grasp has no sag).
+            # plane vertical); the level leg stops the incline slide, the unroll
+            # tips the cube off onto the table and the retreat clears the gripper.
+            # The conductor re-grasps afterwards (a table-supported grasp has no
+            # sag).
             return Sequence(
                 n,
                 name,
@@ -661,6 +661,12 @@ class SkillsRuntime:
                         settle=SETTLE_STEPS,
                     ),
                     lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
+                    lambda: TrackPath(
+                        n,
+                        "flip level",
+                        lambda envs: self._plan_level_tine(0, envs),
+                        settle=SETTLE_STEPS,
+                    ),
                     lambda: TrackPath(
                         n,
                         "flip unroll",
@@ -857,6 +863,20 @@ class SkillsRuntime:
         q = self.cmd.q[arm][envs]
         tcp, finger, open_axis = self._tool_world(arm, q, envs)
         return self._plan_path_world(arm, envs, tcp + height * _UP, finger, open_axis)
+
+    def _plan_level_tine(self, arm: int, envs: np.ndarray):
+        """The flip macro's `flip level` leg: pitch the depressed finger back to
+        horizontal at the SAME tool pose.
+
+        The cube released onto the lower jaw rests on a 10 deg incline (the grasp
+        depression) and slides down it during the ride; levelling the tine right
+        after the release stops the slide. The pitch rotates about the open axis
+        through the TCP, where the cube rests, so the cube is barely disturbed."""
+        q = self.cmd.q[arm][envs]
+        tcp, finger, open_axis = self._tool_world(arm, q, envs)
+        level = finger - _UP * (finger @ _UP)
+        norm = np.maximum(np.linalg.norm(level, axis=1, keepdims=True), 1e-9)
+        return self._plan_path_world(arm, envs, tcp, level / norm, open_axis)
 
     def _plan_reorient(self, arm: int, envs: np.ndarray):
         """The flip macro's `flip unroll` leg: wrist back to the natural jaw
