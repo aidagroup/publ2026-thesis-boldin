@@ -300,10 +300,11 @@ class Sequence(Primitive):
             done_envs = running[finished]
             if stage + 1 < len(self.children):
                 self.stage[done_envs] = stage + 1
-                ok = np.asarray(
-                    self.children[stage + 1].start(ctx, arm, done_envs), dtype=bool
-                )
-                self.stage[done_envs[~ok]] = len(self.children)
+                if len(done_envs):
+                    ok = np.asarray(
+                        self.children[stage + 1].start(ctx, arm, done_envs), dtype=bool
+                    )
+                    self.stage[done_envs[~ok]] = len(self.children)
             else:
                 self.stage[done_envs] = len(self.children)
         return self.stage[envs] >= len(self.children)
@@ -634,6 +635,8 @@ class SkillsRuntime:
 
     def _tool_world(self, arm: int, q: np.ndarray, envs: np.ndarray):
         """World TCP / finger direction / jaw axis (each `(len(envs), 3)`) at `q`."""
+        if len(envs) == 0:
+            return np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0, 3))
         view = self._require_view()
         model = self._arm_model()
         rot, pos = view.base_rot[arm][envs], view.base_pos[arm][envs]
