@@ -67,6 +67,7 @@ from callosum.envs._skills_obs import (
 )
 from callosum.envs.two_so101_base import NUM_ARM_JOINTS, TwoSO101Base
 from callosum.experts.skills_runtime import (
+    LAYER_DETENTS_RAD,
     STEP_SECONDS,
     DecisionFacts,
     InjectionSource,
@@ -308,11 +309,14 @@ class FaceTurnSkills(TwoSO101Base):
         return held
 
     def _before_control_step(self):
+        # Clamp every layer while the holder does not grasp the core (the FaceTurn
+        # face-lock rule lifted to all six layers; a guarantee, not a reward).
         if not self.skills_config.lock_layers_unless_held:
             return
         held = self._holder_holds()
         want = ~held  # every layer locks while the core is not held
         qpos = self.cube.get_qpos()
+        was_locked = self._layer_locked.clone()
         for col in range(6):
             self._layer_locked[:, col], self._layer_lock_angle[:, col] = update_face_lock(
                 self._layer_locked[:, col],
@@ -321,16 +325,50 @@ class FaceTurnSkills(TwoSO101Base):
                 qpos[:, col],
             )
         self._any_layer_locked = bool(self._layer_locked.any())
+        # A freshly engaged lock latches at the NEAREST DETENT, not the raw angle:
+        # the detents are the rest states the solver itself prefers, so the
+        # corrective pull converges instead of fighting it (a mid-air raw latch --
+        # e.g. right before the set-down's tumble -- left slabs at angles the
+        # solver continuously argued with, which the GPU depenetration expelled
+        # as a constant-velocity glide).
+        engaged = self._layer_locked & ~was_locked
+        if bool(engaged.any()):
+            detents = torch.as_tensor(LAYER_DETENTS_RAD, device=self.device)
+            angle = self._layer_lock_angle
+            snapped = detents[torch.argmin((angle[..., None] - detents).abs(), dim=-1)]
+            self._layer_lock_angle = torch.where(engaged, snapped, angle)
+        # The one PER-DECISION position correction (rate-limited): pulling back a
+        # layer that deviated past the tolerance. Never per substep -- continuous
+        # kinematic writes fight the GPU solver (see the config's lock notes).
+        if self._any_layer_locked:
+            deviation = qpos - self._layer_lock_angle
+            pull = self.skills_config.lock_pull_step_rad
+            correct = self._layer_lock_angle + deviation.clamp(-pull, pull)
+            qpos = torch.where(
+                self._layer_locked
+                & (deviation.abs() >= self.skills_config.lock_write_tol_rad),
+                correct,
+                qpos,
+            )
+            if self.gpu_sim_enabled:
+                # TODO(review): GPU path unverified (no GPU on the dev machine), same as the
+                # FaceTurn face lock it generalizes.
+                px = self.scene.px
+                px.gpu_fetch_articulation_qpos()
+                px.gpu_fetch_articulation_qvel()
+            self.cube.set_qpos(qpos)
+            if self.gpu_sim_enabled:
+                px.gpu_apply_articulation_qpos()
+                px.gpu_update_articulation_kinematics()
 
     def _after_simulation_step(self):
-        # Correct the locked envs' layer joints after every physics substep (the
-        # FaceTurn mechanism generalized; per joint column, GPU fetch/apply as there)
-        # -- RATE-LIMITED: a deviating layer is pulled towards its latched angle by
-        # at most `lock_pull_step` per substep. A snap-back teleport re-introduces a
-        # micro-penetration every substep and the GPU solver's depenetration then
-        # EXPELS the cube (a constant-velocity glide across the table); a bounded
-        # step cannot inject that drive, and sub-`lock_write_tol` wiggle is left to
-        # the joints' own friction entirely.
+        # Zero the locked layers' joint velocities after every physics substep
+        # (the FaceTurn mechanism generalized; per joint column, GPU fetch/apply as
+        # there). VELOCITIES ONLY: a velocity write darts the layer's wiggle but
+        # cannot inject position, so the solver's contact cycle has nothing to
+        # expel. Position corrections happen once per DECISION (in
+        # `_before_control_step`), never per substep -- continuous kinematic
+        # position writes fight the GPU solver into a constant-velocity glide.
         if not (self.skills_config.lock_layers_unless_held and self._any_layer_locked):
             return
         if self.gpu_sim_enabled:
@@ -339,18 +377,9 @@ class FaceTurnSkills(TwoSO101Base):
             px = self.scene.px
             px.gpu_fetch_articulation_qpos()
             px.gpu_fetch_articulation_qvel()
-        locked = self._layer_locked
-        cfg = self.skills_config
-        deviation = self.cube.get_qpos() - self._layer_lock_angle
-        correct = self._layer_lock_angle + deviation.clamp(
-            -cfg.lock_pull_step_rad, cfg.lock_pull_step_rad
-        )
-        qpos = torch.where(
-            locked & (deviation.abs() >= cfg.lock_write_tol_rad), correct, self.cube.get_qpos()
-        )
         qvel = self.cube.get_qvel()
-        qvel = torch.where(locked, torch.zeros_like(qvel), qvel)
-        self.cube.set_qpos(qpos)
+        qvel = torch.where(self._layer_locked, torch.zeros_like(qvel), qvel)
+        self.cube.set_qpos(self.cube.get_qpos())  # no-op passthrough (see above)
         self.cube.set_qvel(qvel)
         if self.gpu_sim_enabled:
             px.gpu_apply_articulation_qpos()

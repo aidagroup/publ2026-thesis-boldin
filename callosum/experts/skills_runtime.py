@@ -83,15 +83,14 @@ HOLDER_LIFT = 0.01  # ... and this far above the grasp pose (jaws open)
 ROTATOR_LIFT = 0.04  # rotator pre-grasp: this far straight above the grasp pose
 FLIP_LIFT = 0.06  # how high the holder lifts the cube before flipping it
 LIFT_HEIGHT = 0.04  # the `lift` primitive's rise (a preparation hold, not a flip)
-_UNROLL_SPEED = 0.5
+_UNROLL_SPEED = 0.25
 """Speed scale of the flip macro's unroll leg. The released cube rests on the
 lower jaw like a fork tine (the roll turned the jaw plane vertical); unrolling
 at the delta-limit speed flings it off with the tine's tangential velocity and
 it lands edge-first, bounces and tumbles (observed: a 5 cm toss and a quarter
 turn past the target). A slowed unroll lets the cube leave gently near the
-friction angle and land flat; 0.5 balances that against the cube sliding down
-the tine's 10 deg depression incline while it rides (the walk scales with the
-ride time)."""
+friction angle and land flat (0.5x already tumbles it edge-first past the target). The
+cube's ride walk is re-centred afterwards by the grasp macro's home drag."""
 IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05

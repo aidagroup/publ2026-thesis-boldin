@@ -110,26 +110,28 @@ class FaceTurnSkillsConfig:
     reward)."""
 
     lock_write_tol_deg: float = 3.0
-    """Skip threshold (deg) of the lock's per-substep qpos correction: a locked
+    """Skip threshold (deg) of the lock's PER-DECISION qpos correction: a locked
     layer whose angle deviates less than this from its latched value is never
-    written (only its velocity is zeroed, which darts the wiggle but cannot
-    inject position). The unheld slabs jitter +-1-2.5 deg continuously -- the
-    GPU solver's table-contact micro-bounce cycle shakes the whole cube and the
-    layer joints' friction barely resists -- so ANY smaller threshold means a
-    kinematic write every substep, and continuous kinematic writes fight the
-    solver (each re-introduces a micro-penetration the depenetration expels as a
-    constant-velocity drive; observed: the cube coasting up to 48 cm after the
-    flip's set-down). 3 deg sits above the jitter and below `angle_tol_deg`; a
-    real turn attempt still triggers the rate-limited pull-back."""
+    repositioned (only its velocity is zeroed every substep, which darts the
+    wiggle but cannot inject position). The unheld slabs jitter +-1-2.5 deg
+    continuously -- the GPU solver's table-contact micro-bounce cycle shakes
+    the whole cube and the layer joints' friction barely resists -- so ANY
+    smaller threshold plus per-substep writes means a kinematic position write
+    every substep, and continuous kinematic writes fight the solver (each
+    re-introduces a micro-penetration the depenetration expels as a
+    constant-velocity drive; observed: the cube gliding/coasting up to 48 cm
+    across the table and off its edge). 3 deg sits above the jitter and below
+    `angle_tol_deg`; a real turn attempt still triggers the rate-limited
+    pull-back."""
 
-    lock_pull_step_deg: float = 0.2
-    """Rate limit (deg per sim substep) of the lock's qpos correction once a layer
+    lock_pull_step_deg: float = 1.0
+    """Rate limit (deg per DECISION) of the lock's qpos correction once a layer
     deviates beyond `lock_write_tol_deg`: the layer is pulled back towards its
-    latched angle by at most this much per substep instead of being teleported.
-    A snap-back re-introduces a large micro-penetration in one step; the bounded
-    step keeps the injected displacement at the solver's own contact
-    micro-bounce scale, and a 90 deg forced deviation is still undone within one
-    decision period."""
+    latched angle by at most this much per decision instead of being teleported.
+    The correction runs once per decision (never per substep) and targets the
+    nearest detent, a state the solver itself prefers -- so the correction
+    converges instead of fighting. A 90 deg forced deviation is undone within a
+    couple of decisions."""
     angle_tol_deg: float = 4.0
     """Tolerance (deg) of a layer angle to its detent target for a plan move to count
     as executed (FaceTurn-v0 used 0.05 rad ~ 2.9 deg on the single face; a touch looser
