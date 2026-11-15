@@ -83,14 +83,6 @@ HOLDER_LIFT = 0.01  # ... and this far above the grasp pose (jaws open)
 ROTATOR_LIFT = 0.04  # rotator pre-grasp: this far straight above the grasp pose
 FLIP_LIFT = 0.06  # how high the holder lifts the cube before flipping it
 LIFT_HEIGHT = 0.04  # the `lift` primitive's rise (a preparation hold, not a flip)
-_UNROLL_SPEED = 0.25
-"""Speed scale of the flip macro's unroll leg. The released cube rests on the
-lower jaw like a fork tine (the roll turned the jaw plane vertical); unrolling
-at the delta-limit speed flings it off with the tine's tangential velocity and
-it lands edge-first, bounces and tumbles (observed: a 5 cm toss and a quarter
-turn past the target). A slowed unroll lets the cube leave gently near the
-friction angle and land flat (0.5x already tumbles it edge-first past the target). The
-cube's ride walk is re-centred afterwards by the grasp macro's home drag."""
 IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
@@ -291,7 +283,6 @@ class RuntimeView:
     layer_at_target: np.ndarray  # (n,) bool, that layer within tolerance of its target
     needed_flip: list = field(default_factory=list)  # per env: Flip | None
     t: int = 0  # simulation substeps since the env was created
-    cube_home: np.ndarray | None = None  # (n, 3) the episode's initial cube position
 
 
 class Hold(Primitive):
@@ -629,26 +620,7 @@ class SkillsRuntime:
         if name == "approach_body":
             return TrackPath(n, name, lambda envs: self._plan_approach(0, envs), settle=SETTLE_STEPS)
         if name == "grasp":
-            # A two-leg macro: close the jaws on the core, then DRAG the clamped
-            # cube back to the episode's home position. A flip's set-down walks
-            # the cube 1-3 cm sideways (the rolling-contact drag of the tine
-            # ride), and the rotator's wrist-pitch budget cannot reach a cube
-            # displaced from the centre -- the retarget happens at the grasp
-            # height with the table carrying the cube's weight, so the arm only
-            # overcomes sliding friction.
-            return Sequence(
-                n,
-                name,
-                [
-                    lambda: Grip(n, "grasp close", GRIPPER_CLOSED, CLOSE_STEPS),
-                    lambda: TrackPath(
-                        n,
-                        "grasp home",
-                        lambda envs_: self._plan_home_drag(envs_),
-                        settle=SETTLE_STEPS,
-                    ),
-                ],
-            )
+            return Grip(n, name, GRIPPER_CLOSED, CLOSE_STEPS)
         if name == "release":
             return Grip(n, name, GRIPPER_OPEN, CLOSE_STEPS)
         if name == "lift":
@@ -663,17 +635,16 @@ class SkillsRuntime:
             return TrackPath(n, name, lambda envs: self._plan_retreat(0, envs), settle=SETTLE_STEPS)
         if name in ("flip90", "flip180"):
             quarter = 1 if name == "flip90" else 2
-            # The macro ends by SETTING THE CUBE DOWN: the loaded wrist-pitch cannot
-            # press a gripped cube the last centimetres onto the table (the joint
-            # sags into its limit under the hanging weight), so the lower leg brings
-            # the cube as far down as the arm manages and the release drops it the
-            # short remaining distance onto the lower jaw (the roll turned the jaw
-            # plane vertical); the unroll tips the cube off onto the table (the
-            # ride down the 10 deg incline first is admitted by body_pos_tol) and
-            # the retreat clears the gripper. The conductor re-grasps afterwards
-            # (a table-supported grasp has no sag). NOTE: re-orientations beyond
-            # the unroll are IK-infeasible from the stalled posture -- the level
-            # leg experiment (pitching the tine flat) parked the whole macro.
+            # Hold the cube THROUGH the flip: the loaded wrist-pitch cannot press
+            # a gripped cube the last centimetres onto the table anyway (the
+            # joint sags into its limit), so the lower leg ends with the cube
+            # gripped at the stall height and the holder KEEPS the grip -- the
+            # rotator turns the layer of the hanging cube (a higher rim is
+            # easier to reach), and the cube only meets the table at the final
+            # release, once, with a flat bottom and no spin. (The previous
+            # set-down design -- release onto the lower jaw and tip the cube off
+            # -- tumbled the cube past its target roughly half the time and
+            # walked it out of the rotator's reach.)
             return Sequence(
                 n,
                 name,
@@ -695,17 +666,6 @@ class SkillsRuntime:
                         "flip lower",
                         lambda envs: self._plan_vertical(0, envs, -FLIP_LIFT),
                         settle=SETTLE_STEPS,
-                    ),
-                    lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
-                    lambda: TrackPath(
-                        n,
-                        "flip unroll",
-                        lambda envs: self._plan_reorient(0, envs),
-                        settle=SETTLE_STEPS,
-                        speed_scale=_UNROLL_SPEED,
-                    ),
-                    lambda: TrackPath(
-                        n, "flip retreat", lambda envs: self._plan_retreat(0, envs), settle=SETTLE_STEPS
                     ),
                 ],
             )
@@ -861,28 +821,12 @@ class SkillsRuntime:
         open_axis = np.cross(_UP, finger_dir)
         return fwd, grasp_finger, finger_dir, open_axis
 
-    def _holder_grasp_pose(self, envs: np.ndarray, *, home: bool = False):
-        """`(tcp, finger_dir, open_axis)` of the holder clamping the core's equator.
-
-        With `home=True` the target XY is the episode's initial cube position
-        instead of the live one (the grasp macro's drag leg pulls the cube back
-        there; the Z stays live so the retarget never lifts)."""
+    def _holder_grasp_pose(self, envs: np.ndarray):
+        """`(tcp, finger_dir, open_axis)` of the holder clamping the core's equator."""
         view = self._require_view()
         _, grasp_finger, finger_dir, open_axis = self._holder_directions(envs)
-        position = view.cube_pos[envs]
-        if home and view.cube_home is not None:
-            position = np.concatenate(
-                [view.cube_home[envs][:, :2], view.cube_pos[envs][:, 2:3]], axis=1
-            )
-        tcp = position + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger_dir
+        tcp = view.cube_pos[envs] + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger_dir
         return tcp, grasp_finger, open_axis
-
-    def _plan_home_drag(self, envs: np.ndarray):
-        """The grasp macro's `grasp home` leg: straight-line drag to the home
-        grasp pose (the jaws stay clamped; the commanded retarget is tracked at
-        the delta-limit speed, so the pull is smooth)."""
-        tcp, finger, open_axis = self._holder_grasp_pose(envs, home=True)
-        return self._plan_path_world(0, envs, tcp, finger, open_axis)
 
     def _rotator_grasp_pose(self, envs: np.ndarray):
         """`(tcp, finger_dir, open_axis)` of the rotator pinching the up layer top-down."""
@@ -915,23 +859,6 @@ class SkillsRuntime:
         tcp, finger, open_axis = self._tool_world(arm, q, envs)
         return self._plan_path_world(arm, envs, tcp + height * _UP, finger, open_axis)
 
-    def _plan_reorient(self, arm: int, envs: np.ndarray):
-        """The flip macro's `flip unroll` leg: wrist back to the natural jaw
-        orientation at the SAME tool pose.
-
-        The flip roll turns the jaw plane vertical, so the released cube balances
-        on the lower jaw like a fork tine; rotating the jaw plane back horizontal
-        tips the cube off deterministically (it slides within the first degrees)
-        and leaves the arm unrolled for the retreat."""
-        q = self.cmd.q[arm][envs]
-        tcp, finger, _ = self._tool_world(arm, q, envs)
-        if arm == 0:
-            _, _, _, open_axis = self._holder_directions(envs)
-        else:
-            fwd = self._horizontal_unit(arm, envs)
-            open_axis = np.cross(_UP, fwd)
-        return self._plan_path_world(arm, envs, tcp, finger, open_axis)
-
     def _plan_retreat(self, arm: int, envs: np.ndarray):
         """`retreat`: back along the approach and up (holder), or straight up (rotator)."""
         q = self.cmd.q[arm][envs]
@@ -950,10 +877,17 @@ class SkillsRuntime:
         axis `f` rotates the cube by `delta * sign(w . f)` about the flip axis `w` --
         the sign below makes the cube turn the way `Flip`'s right-hand convention
         demands. No IK: the target is the current command with the wrist offset.
+
+        AIM GATE: the roll only flips the right face if the finger line is close
+        to the flip axis. A grip aimed at a previous move's axis cannot roll
+        about a perpendicular one -- the planner fails that env, the macro parks
+        with the grip intact, and the conductor's verify (face not up) resyncs:
+        release, retreat and a fresh approach aimed at THIS move's axis.
         """
         q = self.cmd.q[arm][envs].copy()
         _, finger, _ = self._tool_world(arm, q, envs)
         theta = quarter_turns * (math.pi / 2)
+        ok = np.ones(len(envs), dtype=bool)
         for i, env in enumerate(envs):
             axis = self._flip_axis_of(int(env))
             if axis is None:
@@ -961,9 +895,13 @@ class SkillsRuntime:
                 # axis (F) anyway -- the choice is the policy's (the conductor never
                 # flips then); the rotation is real and changes the orientation.
                 axis = np.asarray(_FACE_VECTORS["F"], dtype=float)
+            aim = abs(float(axis @ finger[i]))
+            if aim < 0.5:  # more than 60 deg off the flip axis: this grip cannot flip
+                ok[i] = False
+                continue
             sign = 1.0 if float(axis @ finger[i]) >= 0 else -1.0
             q[i, -1] += sign * theta
-        return q[:, None, :], np.ones(len(envs), dtype=bool)
+        return q[:, None, :], ok
 
     def _plan_turn(self, envs: np.ndarray, quarter_turns: int):
         """`turn90` / `turn180`: wrist roll dragging the up layer toward the move target.

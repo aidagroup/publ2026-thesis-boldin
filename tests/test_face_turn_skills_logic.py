@@ -213,26 +213,11 @@ def test_runtime_actions_shape_and_grip_passthrough() -> None:
         np.testing.assert_allclose(arm_action[:, 5], 1.0)  # gripper open (+1)
 
 
-def test_holder_grasp_is_a_close_then_home_drag_macro() -> None:
-    """The holder's grasp ends by dragging the clamped cube back to the episode's
-    home position: a flip's set-down walks the cube 1-3 cm sideways and the
-    rotator cannot reach a displaced cube."""
-    from callosum.experts.skills_runtime import Sequence
-
-    macro = SkillsRuntime(1)._holder_primitive("grasp")
-    assert isinstance(macro, Sequence)
-    assert [child.name for child in macro.children] == ["grasp close", "grasp home"]
-    # The rotator's grasp stays a plain jaw close.
-    plain = SkillsRuntime(1)._rotator_primitive("grasp")
-    assert not isinstance(plain, Sequence)
-
-
-def test_flip_macro_sets_the_cube_down_and_retreats() -> None:
-    """The flip ends by releasing the cube, un-rolling the wrist (the roll turns
-    the jaw plane vertical, so the cube balances on the lower jaw like a tine --
-    the unroll tips it onto the table) and retreating: the loaded wrist cannot
-    press a gripped cube onto the table, so the macro sets it down and the
-    conductor re-grasps with the table carrying the weight."""
+def test_flip_macro_holds_the_cube_through_the_flip() -> None:
+    """The flip keeps the grip: the lower leg ends holding the cube at the stall
+    height (the loaded wrist cannot press it onto the table), the rotator turns
+    the layer of the hanging cube, and the cube only meets the table at the
+    final release -- once, flat, without spin."""
     from callosum.experts.skills_runtime import Sequence
 
     runtime = SkillsRuntime(1)
@@ -243,9 +228,6 @@ def test_flip_macro_sets_the_cube_down_and_retreats() -> None:
             "flip lift",
             "flip roll",
             "flip lower",
-            "flip release",
-            "flip unroll",
-            "flip retreat",
         ]
 
 
@@ -448,7 +430,7 @@ def test_conductor_holder_recovers_a_slipped_flip() -> None:
     assert conductor.act("holder", done, info) == HOLDER_ID["approach_body"]
 
 
-def test_conductor_holder_regrasps_after_the_flip_macro() -> None:
+def test_conductor_holder_keeps_the_grip_after_the_flip() -> None:
     conductor = SkillsConductor(settle_decisions=1)
     half = math.sqrt(0.5)
     quat_f_up = (half, 0.0, 0.0, half)  # rotation about +x: F up
@@ -461,22 +443,19 @@ def test_conductor_holder_regrasps_after_the_flip_macro() -> None:
         HOLDER_ID["flip90"],
     ):
         assert conductor.act("holder", done, info) == expected
-    # The flip landed (F now up) and the macro's release leg opened the jaws: the
-    # turn needs the core held again, so re-approach and re-grasp.
-    flipped_open = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0, gripper=1.0)
-    assert conductor.act("holder", flipped_open, info) == HOLDER_ID["approach_body"]
-    regrasp = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0)
-    assert conductor.act("holder", regrasp, info) == HOLDER_ID["grasp"]
-    assert conductor.act("holder", regrasp, info) == HOLDER_ID["wait"]  # serving holds
-    # Plan finished: let go.
+    # The flip landed (F now up) with the grip intact: serving holds the hanging
+    # cube for the rotator's turn.
+    flipped = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0)
+    assert conductor.act("holder", flipped, info) == HOLDER_ID["wait"]
+    assert conductor.act("holder", flipped, info) == HOLDER_ID["wait"]
+    # Plan finished: let go (the cube drops the short distance to the table).
     finished = _obs(Role.HOLDER, face=None, quat=quat_f_up, progress=1.0)
     assert conductor.act("holder", finished, info) == HOLDER_ID["release"]
 
 
-def test_conductor_holder_sets_down_a_cube_left_held_aloft() -> None:
-    """A failed macro leg can park the sequence with the jaws still clamping the
-    cube in the air: the post-flip check must notice (own jaws read closed) and
-    release before approaching again."""
+def test_conductor_holder_redoes_a_lost_grip_after_the_flip() -> None:
+    """A grip lost at the end of the flip (jaws read open) is re-approached from
+    serving instead of holding air."""
     conductor = SkillsConductor(settle_decisions=1)
     half = math.sqrt(0.5)
     quat_f_up = (half, 0.0, 0.0, half)
@@ -489,10 +468,10 @@ def test_conductor_holder_sets_down_a_cube_left_held_aloft() -> None:
         HOLDER_ID["flip90"],
     ):
         assert conductor.act("holder", done, info) == expected
-    flipped_holding = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0)
-    assert conductor.act("holder", flipped_holding, info) == HOLDER_ID["release"]
-    assert conductor.act("holder", flipped_holding, info) == HOLDER_ID["release"]
-    assert conductor.act("holder", flipped_holding, info) == HOLDER_ID["retreat"]
+    lost = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0, gripper=1.0)
+    assert conductor.act("holder", lost, info) == HOLDER_ID["wait"]  # enter serving
+    assert conductor.act("holder", lost, info) == HOLDER_ID["approach_body"]  # redo
+    assert conductor.act("holder", lost, info) == HOLDER_ID["grasp"]
 
 
 def test_conductor_holder_redoes_a_failed_grasp() -> None:

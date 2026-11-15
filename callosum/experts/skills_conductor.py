@@ -212,14 +212,14 @@ class SkillsConductor:
             if state.done_settle >= self.settle_decisions:
                 # Verify through the OWN observation: did the move's face come up?
                 if self._up_face(fields) != self._move_face(fields):
-                    return self._resync(state)  # grasp failed or slipped: redo it
-                # The macro released the cube onto the table (its last legs): the
-                # turn needs the core held again, so re-grasp. If a leg failed to
-                # start and the jaws still clamp the cube aloft, set it down first
-                # (the resync sequence releases before its approach).
-                if self._holding(fields):
+                    # The grasp failed/slid, or the grip's finger could not aim at
+                    # this flip's axis (the roll gate parked the macro, grip intact):
+                    # the resync releases and re-approaches aimed at THIS move's axis.
                     return self._resync(state)
-                return self._enter(state, "approach", ids["approach_body"])
+                # Keep the grip: the lower leg cannot press the cube onto the table
+                # anyway (it ends holding it at the stall height), and the rotator
+                # turns the layer of the hanging cube.
+                return self._enter(state, "serving", ids["wait"])
             return self._reselect(state)
         if phase == "seq":
             return self._sequence(state, state.seq_steps, state.seq_then)
