@@ -616,8 +616,11 @@ class FaceTurnSkills(TwoSO101Base):
         values = (block(0, holder_oh), block(1, rotator_oh))
         obs = {}
         for role, fields in zip((Role.HOLDER, Role.ROTATOR), values, strict=True):
+            prefix = "holder_" if role is Role.HOLDER else "rotator_"
             for name, _size in own_block_key_layout(role):
-                obs[name] = fields[name]
+                # `fields` is keyed unprefixed; the flat obs carries the prefixed
+                # `own_block_key_layout` keys (the shared-vector contract).
+                obs[name] = fields[name.removeprefix(prefix)]
         return obs
 
     # --- reward and success -------------------------------------------------------------------
