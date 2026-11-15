@@ -323,12 +323,14 @@ class FaceTurnSkills(TwoSO101Base):
         self._any_layer_locked = bool(self._layer_locked.any())
 
     def _after_simulation_step(self):
-        # Clamp the locked envs' layer joints after every physics substep (the FaceTurn
-        # mechanism; per joint column now, GPU fetch/apply as there) -- but only where
-        # the angle actually deviates beyond the deadband: teleporting sub-degree
-        # jostles back every substep fights the solver (a micro-penetration per
-        # rewrite, expelled as a constant-velocity glide), and the joints' own
-        # friction holds the wiggle anyway.
+        # Correct the locked envs' layer joints after every physics substep (the
+        # FaceTurn mechanism generalized; per joint column, GPU fetch/apply as there)
+        # -- RATE-LIMITED: a deviating layer is pulled towards its latched angle by
+        # at most `lock_pull_step` per substep. A snap-back teleport re-introduces a
+        # micro-penetration every substep and the GPU solver's depenetration then
+        # EXPELS the cube (a constant-velocity glide across the table); a bounded
+        # step cannot inject that drive, and sub-`lock_write_tol` wiggle is left to
+        # the joints' own friction entirely.
         if not (self.skills_config.lock_layers_unless_held and self._any_layer_locked):
             return
         if self.gpu_sim_enabled:
@@ -338,11 +340,14 @@ class FaceTurnSkills(TwoSO101Base):
             px.gpu_fetch_articulation_qpos()
             px.gpu_fetch_articulation_qvel()
         locked = self._layer_locked
-        qpos = self.cube.get_qpos()
-        rewrite = locked & (
-            (qpos - self._layer_lock_angle).abs() >= self.skills_config.lock_write_tol_rad
+        cfg = self.skills_config
+        deviation = self.cube.get_qpos() - self._layer_lock_angle
+        correct = self._layer_lock_angle + deviation.clamp(
+            -cfg.lock_pull_step_rad, cfg.lock_pull_step_rad
         )
-        qpos = torch.where(rewrite, self._layer_lock_angle, qpos)
+        qpos = torch.where(
+            locked & (deviation.abs() >= cfg.lock_write_tol_rad), correct, self.cube.get_qpos()
+        )
         qvel = self.cube.get_qvel()
         qvel = torch.where(locked, torch.zeros_like(qvel), qvel)
         self.cube.set_qpos(qpos)

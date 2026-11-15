@@ -109,17 +109,22 @@ class FaceTurnSkillsConfig:
     core (the FaceTurn face-lock rule lifted to all six layers; a guarantee, not a
     reward)."""
 
-    lock_write_tol_deg: float = 2.0
-    """Deadband (deg) of the lock's per-substep qpos rewrite: a layer's angle is
-    teleported back to its latched value only when it deviates more than this.
-    Rewriting sub-degree jostles every substep fights the GPU solver -- each
-    teleport re-introduces a micro-penetration and the solver's depenetration
-    expels the cube at a constant velocity (observed: the cube gliding 30+ cm
-    across the table after the flip's set-down). The unheld slabs jitter around
-    +-1 deg from the table-contact shake (self-collisions are off), so the
-    deadband sits at 2 deg: above the jitter, below `angle_tol_deg`, and the
-    layers' own joint friction (20) absorbs the sub-deadband wiggle while a real
-    turn attempt still gets clamped."""
+    lock_write_tol_deg: float = 1.0
+    """Skip threshold (deg) of the lock's per-substep qpos correction: a locked
+    layer whose angle deviates less than this from its latched value is left
+    alone (the layers' own joint friction holds the sub-degree wiggle)."""
+
+    lock_pull_step_deg: float = 0.2
+    """Rate limit (deg per sim substep) of the lock's qpos correction: a deviating
+    layer is pulled back towards its latched angle by at most this much per
+    substep instead of being teleported. The snap-back rewrite fought the GPU
+    solver -- every teleport re-introduced a micro-penetration and the solver's
+    depenetration expelled the cube, observed as the cube gliding/coasting tens
+    of cm after the flip's set-down (the unheld slabs jitter +-1-2.5 deg from the
+    table-contact shake, so any snap threshold kept firing). A 0.2 deg step is at
+    the scale of the solver's own contact micro-bounces and cannot inject a
+    drive, while a real turn attempt (90 deg) is still undone within one
+    decision period."""
     angle_tol_deg: float = 4.0
     """Tolerance (deg) of a layer angle to its detent target for a plan move to count
     as executed (FaceTurn-v0 used 0.05 rad ~ 2.9 deg on the single face; a touch looser
@@ -156,7 +161,12 @@ class FaceTurnSkillsConfig:
             )
         if not 0 < self.angle_tol_deg < 45:
             raise ValueError(f"angle_tol_deg must be in (0, 45), got {self.angle_tol_deg}")
-        if not 0 <= self.lock_write_tol_deg < self.angle_tol_deg:
+        if not 0 < self.lock_pull_step_deg <= self.lock_write_tol_deg:
+            raise ValueError(
+                f"lock_pull_step_deg must be within (0, lock_write_tol_deg] = "
+                f"(0, {self.lock_write_tol_deg}], got {self.lock_pull_step_deg}"
+            )
+        if not self.lock_write_tol_deg < self.angle_tol_deg:
             raise ValueError(
                 f"lock_write_tol_deg must be within [0, angle_tol_deg) = "
                 f"[0, {self.angle_tol_deg}), got {self.lock_write_tol_deg}"
@@ -173,5 +183,10 @@ class FaceTurnSkillsConfig:
 
     @property
     def lock_write_tol_rad(self) -> float:
-        """`lock_write_tol_deg` in radians (the lock rewrite deadband)."""
+        """`lock_write_tol_deg` in radians (the lock correction skip threshold)."""
         return math.radians(self.lock_write_tol_deg)
+
+    @property
+    def lock_pull_step_rad(self) -> float:
+        """`lock_pull_step_deg` in radians (the per-substep correction rate limit)."""
+        return math.radians(self.lock_pull_step_deg)
