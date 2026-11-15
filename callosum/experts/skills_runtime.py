@@ -287,12 +287,12 @@ class RuntimeView:
     base_rot: list[np.ndarray]  # (n, 3, 3) arm base rotations (world)
     cube_pos: np.ndarray  # (n, 3)
     cube_quat: np.ndarray  # (n, 4) xyzw
-    cube_home: np.ndarray | None = None  # (n, 3) the episode's initial cube position
     layer_angle: np.ndarray  # (n,) rad, angle of the current plan move's layer
     turn_target: np.ndarray  # (n,) rad, the env's authoritative target of the current move
     layer_at_target: np.ndarray  # (n,) bool, that layer within tolerance of its target
     needed_flip: list = field(default_factory=list)  # per env: Flip | None
     t: int = 0  # simulation substeps since the env was created
+    cube_home: np.ndarray | None = None  # (n, 3) the episode's initial cube position
 
 
 class Hold(Primitive):
