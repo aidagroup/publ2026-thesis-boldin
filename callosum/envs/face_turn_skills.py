@@ -105,7 +105,16 @@ class _EnvInjection(InjectionSource):
         return None
 
 
-@register_env("FaceTurnSkills-v0", max_episode_steps=70)
+@register_env(
+    "FaceTurnSkills-v0",
+    # The BASE env counts sim SUBSTEPS (our step() runs `decision_period` of them per
+    # decision), so the base-level limit must be expressed in substeps: 70 decisions
+    # x 10 substeps. Decision-level truncation is emitted by the env itself
+    # (`max_episode_decisions`), and a `gym.make(max_episode_steps=N)` override wraps
+    # at the decision level (the wrapper counts our steps, i.e. decisions).
+    max_episode_steps=FaceTurnSkillsConfig().max_episode_decisions
+    * FaceTurnSkillsConfig().decision_period,
+)
 class FaceTurnSkills(TwoSO101Base):
     """The skill-level cube assembly; see the module doc and `callosum.envs._skills_obs`.
 
