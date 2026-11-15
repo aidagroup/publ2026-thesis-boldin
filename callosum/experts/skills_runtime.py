@@ -887,7 +887,7 @@ class SkillsRuntime:
             # Bias 1 cm towards the rotator's base: its vertical-finger reach
             # ends a couple of cm short of a centred cube, and the holder's arm
             # sags slightly -x under the hanging cube's weight while serving.
-            goal[:, :2] += 0.01 * -self._horizontal_unit(1, envs)
+            goal[:, :2] += 0.01 * -self._horizontal_unit(1, envs)[:, :2]
             goal[:, 2] = tcp[:, 2] - HOLDER_GRASP_Z  # keep the live height, no lift/drop
             tcp = goal + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger
         return self._plan_path_world(0, envs, tcp, finger, open_axis)
