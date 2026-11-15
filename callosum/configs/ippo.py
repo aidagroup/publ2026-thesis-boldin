@@ -16,6 +16,7 @@ from pathlib import Path
 from callosum.configs._cli import build_dataclass_parser
 from callosum.envs._partner_obs import PARTNER_OBS_MODES, validate_partner_obs
 from callosum.envs._sim_compat import is_cpu_backend
+from callosum.envs._skills import PARTNER_VISIBILITY_MODES, validate_partner_visibility
 
 SIM_BACKENDS = ("gpu", "cpu", "physx_cuda", "physx_cpu")
 
@@ -50,6 +51,17 @@ class IPPOConfig:
     = own and partner's, "none" = own only. The env always emits both poses; the visibility rule
     is applied by the trainer's input builder, not by the env."""
     control_mode: str | None = "pd_joint_delta_pos"
+    partner_mode: str = "none"
+    """Skills-env partner visibility (`none`/`oracle`/`predicted`/`predicted-direct`).
+
+    Ignored for the joint-level envs (the Gaussian branch keeps `partner_obs`)."""
+    plan_length: int = 1
+    """Skills env: random plan length per episode (E1 = 1 move, E2 = 2-3). Ignored
+    for the joint-level envs."""
+    """Skill-level partner-information mode (`callosum.training._skills_agent_obs`): which
+    partner block is appended to the per-agent inputs of the discrete (FaceTurnSkills) envs --
+    "none" / "oracle" / "predicted" / "predicted-direct". Only read when the env's action space
+    is discrete; the joint-level envs keep using `partner_obs` instead."""
     reward_mode: str = "normalized_dense"
     """Both agents learn from this one shared reward (per-agent rewards are a later concern).
     "normalized_dense" is what ManiSkill's PPO baseline uses; the reward scale is the env's
@@ -127,6 +139,7 @@ class IPPOConfig:
 
     def __post_init__(self) -> None:
         validate_partner_obs(self.partner_obs)
+        validate_partner_visibility(self.partner_mode)
         if self.sim_backend not in SIM_BACKENDS:
             raise ValueError(f"sim_backend must be one of {SIM_BACKENDS}, got {self.sim_backend!r}")
         for name in ("num_envs", "num_steps", "num_eval_envs", "eval_freq", "checkpoint_freq"):
@@ -258,7 +271,11 @@ def build_parser() -> argparse.ArgumentParser:
     return build_dataclass_parser(
         IPPOConfig,
         "Train two independent PPO policies (IPPO) on a callosum two-arm env.",
-        choices={"partner_obs": PARTNER_OBS_MODES, "sim_backend": SIM_BACKENDS},
+        choices={
+            "partner_obs": PARTNER_OBS_MODES,
+            "partner_mode": PARTNER_VISIBILITY_MODES,
+            "sim_backend": SIM_BACKENDS,
+        },
     )
 
 

@@ -43,6 +43,17 @@ rollout/GAE/update structure, `ManiSkillVectorEnv` with partial resets and `reco
 
 Envs are always created with `obs_mode="state", render_backend="none"`: the lab server only has a
 software Vulkan device, and the default render device cannot be created there.
+
+Skill-level envs (task 3.1, `add-skill-level-cube-assembly`): when the env's dict action space
+holds `Discrete` leaves (e.g. `FaceTurnSkills-v0`), the trainer swaps the Gaussian actor-critics
+for `_categorical.CategoricalPolicy` heads (one per role's primitive registry) and builds the
+per-agent inputs with `_skills_agent_obs.SkillsObsBuilder`: own block plus the `--partner-mode`
+partner block (`none` / `oracle` / `predicted` / `predicted-direct`), exactly as the
+`_skills_obs` contract fixes the widths. One trainer step is one synchronous decision (the
+`decision_period` stepping lives inside the env), so the discount already applies per decision.
+The BC/DAPG fine-tuning flags are rejected in this mode: the primitives provide the motor
+skills, so the skill lines need no BC (design decision 6). The joint-level (Gaussian) branch is
+unchanged.
 """
 
 import dataclasses
@@ -71,8 +82,10 @@ from callosum.configs.ippo import (
     parse_args,
     resolve_episode_length,
 )
+from callosum.envs import _skills_obs
 from callosum.envs._sim_compat import prepare_sim_backend
 from callosum.training._agent_obs import AgentObsBuilder
+from callosum.training._categorical import CategoricalPolicy
 from callosum.training._checkpoint import (
     TrainingState,
     check_warm_start_compat,
@@ -96,8 +109,15 @@ from callosum.training._metrics import (
 )
 from callosum.training._nonfinite import NonFiniteTracker, guard_step
 from callosum.training._ppo_core import ActorCritic, compute_gae, ppo_update
+from callosum.training._skills_agent_obs import SkillsObsBuilder
 
 AGENT_NAMES = ("agent_a", "agent_b")
+
+SKILLS_ENV_PREFIX = "FaceTurnSkills"
+"""env-id prefix of the skill-level envs. Only used to skip the joint-level gym.make kwargs
+(`control_mode`, `partner_obs`): the skills env's primitives are scripted and its partner
+visibility is applied by the trainer's input builder, not by the env. Whether a run is discrete
+is decided by the action space (`_action_info`), not by this prefix."""
 
 
 def make_envs(cfg: IPPOConfig, num_envs: int, ignore_terminations: bool) -> ManiSkillVectorEnv:
@@ -110,10 +130,15 @@ def make_envs(cfg: IPPOConfig, num_envs: int, ignore_terminations: bool) -> Mani
     # vector envs in one process as in the ManiSkill baseline) is unverified until the server run.
     prepare_sim_backend(cfg.sim_backend)
     kwargs = {}
-    if cfg.control_mode is not None:
+    skills_env = cfg.env_id.startswith(SKILLS_ENV_PREFIX)
+    if cfg.control_mode is not None and not skills_env:
         kwargs["control_mode"] = cfg.control_mode
     if cfg.max_episode_steps is not None:
         kwargs["max_episode_steps"] = cfg.max_episode_steps
+    # TODO(cloud verify): the FaceTurnSkills gym.make kwargs (no control_mode/partner_obs; is
+    # reward_mode accepted as-is?).
+    joint_only = {} if skills_env else {"partner_obs": cfg.partner_obs}
+    skills_only = {"plan_length": cfg.plan_length} if skills_env else {}
     env = gym.make(
         cfg.env_id,
         num_envs=num_envs,
@@ -122,9 +147,10 @@ def make_envs(cfg: IPPOConfig, num_envs: int, ignore_terminations: bool) -> Mani
         sim_backend=cfg.sim_backend,
         render_backend="none",
         render_mode=None,
-        partner_obs=cfg.partner_obs,
         # No per-episode geometry randomisation here, so never rebuild the scene on reset.
         reconfiguration_freq=0,
+        **joint_only,
+        **skills_only,
         **kwargs,
     )
     return ManiSkillVectorEnv(
@@ -132,10 +158,28 @@ def make_envs(cfg: IPPOConfig, num_envs: int, ignore_terminations: bool) -> Mani
     )
 
 
-def make_obs_builder(envs: ManiSkillVectorEnv, flat_obs: torch.Tensor, cfg: IPPOConfig):
-    """The per-agent observation builder, verified against the env's structured observation."""
+def make_obs_builder(
+    envs: ManiSkillVectorEnv, flat_obs: torch.Tensor, cfg: IPPOConfig, discrete: bool = False
+):
+    """The per-agent observation builder, verified against the env's structured observation.
+
+    Discrete (skills) envs use `SkillsObsBuilder` with `cfg.partner_mode`; the joint-level envs
+    keep `AgentObsBuilder` with `cfg.partner_obs`.
+    """
     structured = envs.unwrapped.get_obs(unflattened=True)
-    return AgentObsBuilder.from_env_obs(structured, flat_obs, cfg.partner_obs, agent_uids_of(envs))
+    uids = agent_uids_of(envs)
+    if discrete:
+        return SkillsObsBuilder.from_env_obs(structured, flat_obs, cfg.partner_mode, uids)
+    return AgentObsBuilder.from_env_obs(structured, flat_obs, cfg.partner_obs, uids)
+
+
+def _build_agent_obs(
+    builder: AgentObsBuilder | SkillsObsBuilder, flat_obs: torch.Tensor, infos: dict | None
+) -> list[torch.Tensor]:
+    """Per-agent policy inputs; the skills builder also reads the step's info (oracle block)."""
+    if isinstance(builder, SkillsObsBuilder):
+        return builder(flat_obs, infos)
+    return builder(flat_obs)
 
 
 def agent_uids_of(envs: ManiSkillVectorEnv) -> tuple[str, str]:
@@ -166,32 +210,43 @@ class EvalResult(NamedTuple):
 
 @torch.no_grad()
 def evaluate(
-    agents: list[ActorCritic],
-    builder: AgentObsBuilder,
+    agents: list[ActorCritic | CategoricalPolicy],
+    builder: AgentObsBuilder | SkillsObsBuilder,
     eval_envs: ManiSkillVectorEnv,
     action_bounds: list[tuple[torch.Tensor, torch.Tensor]],
     num_steps: int,
     tracker: NonFiniteTracker | None = None,
     seed: int | None = None,
+    discrete: bool = False,
 ) -> EvalResult:
     """Run `num_steps` deterministic steps in the eval envs; metric means over finished episodes.
 
     An env whose observation or reward goes non-finite is reset (so the policy never sees NaN)
-    and excluded from the statistics for the rest of the evaluation. `seed` seeds the reset of the
-    eval envs (`None`: continue the envs' own random stream).
+    and excluded from the statistics for the rest of the evaluation. `seed` seeds the reset of
+    the eval envs (`None`: continue the envs' own random stream). `discrete` selects the
+    categorical policies' argmax actions (no Box bounds to clamp to).
     """
     uids = builder.agent_uids
     tracker = tracker or NonFiniteTracker()
-    obs, _ = eval_envs.reset(seed=seed)
+    obs, infos = eval_envs.reset(seed=seed)
     stats = EpisodeStats()
     diag = DiagStats(eval_envs.num_envs, eval_envs.device)
     dead: torch.Tensor | None = None  # envs dropped from the statistics
     for step in range(num_steps):
-        inputs = builder(obs)
-        actions = {
-            uid: torch.clamp(agent.get_action(x, deterministic=True), low, high)
-            for uid, agent, x, (low, high) in zip(uids, agents, inputs, action_bounds, strict=True)
-        }
+        inputs = _build_agent_obs(builder, obs, infos)
+        if discrete:
+            # TODO(cloud verify): Discrete action ids for the vector env step (dtype/device).
+            actions = {
+                uid: agent.get_action(x, deterministic=True)
+                for uid, agent, x in zip(uids, agents, inputs, strict=True)
+            }
+        else:
+            actions = {
+                uid: torch.clamp(agent.get_action(x, deterministic=True), low, high)
+                for uid, agent, x, (low, high) in zip(
+                    uids, agents, inputs, action_bounds, strict=True
+                )
+            }
         obs, reward, _, _, infos = eval_envs.step(actions)
         guard = guard_step(
             eval_envs,
@@ -257,22 +312,28 @@ def run(cfg: IPPOConfig) -> Path:
 
 def _action_info(
     envs: ManiSkillVectorEnv,
-) -> tuple[tuple[str, str], list[tuple[torch.Tensor, torch.Tensor]], list[int]]:
-    """`(agent uids, per-agent action bounds on the env's device, per-agent action widths)`."""
+) -> tuple[tuple[str, str], list[tuple[torch.Tensor, torch.Tensor]], list[int], bool]:
+    """`(agent uids, per-agent action bounds, per-agent action widths, discrete?)`.
+
+    Discrete auto-detection: a dict action space whose leaves are ALL `Discrete` (the
+    skill-level envs, e.g. FaceTurnSkills-v0) puts the trainer into its categorical mode. The
+    per-agent "width" is then the size of the role's primitive registry (the number of choices;
+    the stored action itself is one index). Discrete action spaces carry no bounds. Mixed
+    discrete/continuous spaces are rejected, as are non-Box non-Discrete leaves.
+    """
     device = envs.device
     uids = agent_uids_of(envs)
-    for uid in uids:
-        space = envs.single_action_space[uid]
-        assert isinstance(space, gym.spaces.Box), "only continuous actions are supported"
+    spaces = [envs.single_action_space[uid] for uid in uids]
+    if all(isinstance(space, gym.spaces.Discrete) for space in spaces):
+        return uids, [], [int(space.n) for space in spaces], True
+    for space in spaces:
+        assert isinstance(space, gym.spaces.Box), "only continuous or discrete actions are supported"
     action_bounds = [
-        (
-            torch.as_tensor(envs.single_action_space[uid].low, device=device),
-            torch.as_tensor(envs.single_action_space[uid].high, device=device),
-        )
-        for uid in uids
+        (torch.as_tensor(space.low, device=device), torch.as_tensor(space.high, device=device))
+        for space in spaces
     ]
-    action_dims = [int(envs.single_action_space[uid].shape[0]) for uid in uids]
-    return uids, action_bounds, action_dims
+    action_dims = [int(space.shape[0]) for space in spaces]
+    return uids, action_bounds, action_dims, False
 
 
 def run_eval_only(cfg: IPPOConfig) -> Path:
@@ -288,18 +349,31 @@ def run_eval_only(cfg: IPPOConfig) -> Path:
     eval_envs = make_envs(cfg, cfg.num_eval_envs, ignore_terminations=True)
     try:
         device = eval_envs.device
-        _, action_bounds, action_dims = _action_info(eval_envs)
+        _, action_bounds, action_dims, discrete = _action_info(eval_envs)
         env_episode_steps = int(gym_utils.find_max_episode_steps_value(eval_envs._env))
         num_eval_steps = resolve_episode_length(cfg, env_episode_steps)
         obs, _ = eval_envs.reset(seed=cfg.seed + 1)
-        builder = make_obs_builder(eval_envs, obs, cfg)
-        agents = [ActorCritic(d, a).to(device) for d, a in zip(builder.obs_dims, action_dims)]
+        builder = make_obs_builder(eval_envs, obs, cfg, discrete)
+        agent_cls = CategoricalPolicy if discrete else ActorCritic
+        agents = [agent_cls(d, a).to(device) for d, a in zip(builder.obs_dims, action_dims)]
         payload = load_checkpoint(cfg.checkpoint, map_location=device)
-        check_warm_start_compat(payload, builder.obs_dims, builder.fields, cfg.partner_obs)
+        check_warm_start_compat(
+            payload, builder.obs_dims, builder.fields, None if discrete else cfg.partner_obs
+        )
+        if discrete:
+            saved_mode = payload.get("config", {}).get("partner_mode")
+            if saved_mode is not None and saved_mode != cfg.partner_mode:
+                raise ValueError(
+                    f"checkpoint was made with partner_mode={saved_mode!r}, this run uses "
+                    f"{cfg.partner_mode!r}"
+                )
         load_agent_weights(payload, agents)
+        partner = (
+            f"partner_mode {cfg.partner_mode}" if discrete else f"partner_obs {cfg.partner_obs}"
+        )
         print(
             f"eval only: {cfg.checkpoint} | env {cfg.env_id} | sim {cfg.sim_backend} on {device} "
-            f"| partner_obs {cfg.partner_obs} | {cfg.eval_repeats} x {cfg.num_eval_envs} episodes "
+            f"| {partner} | {cfg.eval_repeats} x {cfg.num_eval_envs} episodes "
             f"of {num_eval_steps} steps"
         )
         tracker = NonFiniteTracker()
@@ -310,7 +384,14 @@ def run_eval_only(cfg: IPPOConfig) -> Path:
         nonfinite = 0
         for k in range(cfg.eval_repeats):
             result = evaluate(
-                agents, builder, eval_envs, action_bounds, num_eval_steps, tracker, cfg.seed + 1 + k
+                agents,
+                builder,
+                eval_envs,
+                action_bounds,
+                num_eval_steps,
+                tracker,
+                cfg.seed + 1 + k,
+                discrete=discrete,
             )
             for key, value in result.metrics.items():
                 sums[key] = sums.get(key, 0.0) + value * result.episodes
@@ -367,7 +448,19 @@ def _train(
     resume_payload: dict | None = None,
 ) -> Path:
     device = envs.device
-    uids, action_bounds, action_dims = _action_info(envs)
+    uids, action_bounds, action_dims, discrete = _action_info(envs)
+    if discrete and cfg.checkpoint is not None:
+        raise ValueError(
+            "--checkpoint (BC warm start) is not supported for skill-level (discrete) envs: the "
+            "primitives provide the motor skills, so the skill lines need no BC (design decision "
+            "6 of add-skill-level-cube-assembly)"
+        )
+    if discrete and (cfg.demos is not None or cfg.bc_coef > 0):
+        raise ValueError(
+            "--demos/--bc-coef (DAPG fine-tuning) are not supported for skill-level (discrete) "
+            "envs: the primitives provide the motor skills, so the skill lines need no BC "
+            "(design decision 6 of add-skill-level-cube-assembly)"
+        )
 
     env_episode_steps = int(gym_utils.find_max_episode_steps_value(envs._env))
     num_eval_steps = resolve_episode_length(cfg, env_episode_steps)
@@ -377,16 +470,17 @@ def _train(
     # (a fresh run: `seed` / `seed + 1`) and are not a replay of the start of the run.
     resumed_iteration = 0 if resume_payload is None else int(resume_payload["iteration"])
     train_seed, eval_seed = env_reset_seeds(cfg, resumed_iteration)
-    obs, _ = envs.reset(seed=train_seed)
-    builder = make_obs_builder(envs, obs, cfg)
+    obs, infos = envs.reset(seed=train_seed)
+    builder = make_obs_builder(envs, obs, cfg, discrete)
     eval_obs, _ = eval_envs.reset(seed=eval_seed)
-    eval_builder = make_obs_builder(eval_envs, eval_obs, cfg)
+    eval_builder = make_obs_builder(eval_envs, eval_obs, cfg, discrete)
     assert eval_builder.fields == builder.fields, "train and eval observations differ"
 
     # TODO(review): observations are fed raw, without normalisation (as in the ManiSkill baseline).
     # qvel and the unbounded poses are on different scales; add a running normaliser if learning
     # stalls on the server.
-    agents = [ActorCritic(d, a).to(device) for d, a in zip(builder.obs_dims, action_dims)]
+    agent_cls = CategoricalPolicy if discrete else ActorCritic
+    agents = [agent_cls(d, a).to(device) for d, a in zip(builder.obs_dims, action_dims)]
     optimizers = [torch.optim.Adam(a.parameters(), lr=cfg.learning_rate, eps=1e-5) for a in agents]
     resumed: TrainingState | None = None
     if resume_payload is not None:
@@ -462,7 +556,7 @@ def _train(
 
     print(
         f"run {run_dir} | env {cfg.env_id} | sim {cfg.sim_backend} on {device} | "
-        f"partner_obs {cfg.partner_obs}"
+        + (f"partner_mode {cfg.partner_mode}" if discrete else f"partner_obs {cfg.partner_obs}")
     )
     print(
         f"envs {cfg.num_envs} x steps {cfg.num_steps} = batch {cfg.batch_size} "
@@ -489,7 +583,14 @@ def _train(
     # Rollout storage, per agent where it differs.
     steps, n = cfg.num_steps, cfg.num_envs
     obs_buf = [torch.zeros((steps, n, d), device=device) for d in builder.obs_dims]
-    act_buf = [torch.zeros((steps, n, a), device=device) for a in action_dims]
+    act_buf = [
+        torch.zeros(
+            (steps, n, 1 if discrete else a),
+            device=device,
+            dtype=torch.long if discrete else torch.float32,
+        )
+        for a in action_dims
+    ]
     logprob_buf = [torch.zeros((steps, n), device=device) for _ in agents]
     value_buf = [torch.zeros((steps, n), device=device) for _ in agents]
     rewards = torch.zeros((steps, n), device=device)  # shared by both agents
@@ -507,7 +608,9 @@ def _train(
 
     def run_eval(iteration: int, global_step: int) -> None:
         eval_start = time.time()
-        result = evaluate(agents, eval_builder, eval_envs, action_bounds, num_eval_steps, tracker)
+        result = evaluate(
+            agents, eval_builder, eval_envs, action_bounds, num_eval_steps, tracker, discrete=discrete
+        )
         metrics, episodes = result.metrics, result.episodes
         logger.log_many(metrics, global_step, prefix="eval/")
         logger.log("eval/episodes", episodes, global_step)
@@ -552,7 +655,7 @@ def _train(
     base_seconds = 0.0  # wall time of the earlier processes of a resumed run
     first_iteration = 1
     start_time = time.time()
-    agent_obs = builder(obs)
+    agent_obs = _build_agent_obs(builder, obs, infos)
     next_done = torch.zeros(n, device=device)
     diag = DiagStats(n, device)  # its per-episode "ever" flags span the iterations
     if resumed is None:
@@ -589,11 +692,16 @@ def _train(
                 for i, agent in enumerate(agents):
                     obs_buf[i][step] = agent_obs[i]
                     action, logprob, _, value = agent.get_action_and_value(agent_obs[i])
-                    act_buf[i][step] = action
+                    act_buf[i][step] = action.reshape(n, -1)
                     logprob_buf[i][step] = logprob
                     value_buf[i][step] = value.flatten()
-                    low, high = action_bounds[i]
-                    actions[uids[i]] = torch.clamp(action, low, high)
+                    if discrete:
+                        # TODO(cloud verify): Discrete action ids for the vector env step
+                        # (dtype/device). No clipping: every id is a valid primitive choice.
+                        actions[uids[i]] = action
+                    else:
+                        low, high = action_bounds[i]
+                        actions[uids[i]] = torch.clamp(action, low, high)
 
             obs, reward, terminations, truncations, infos = envs.step(actions)
             # Envs whose GPU state blew up (non-finite obs/reward) are reset on their own, made
@@ -612,7 +720,7 @@ def _train(
                 obs, reward, poisoned = guard.obs, guard.reward, guard.poisoned
                 iteration_nonfinite += guard.count
                 tracker.record("train", guard, f"iteration {iteration}, rollout step {step}")
-            agent_obs = builder(obs)
+            agent_obs = _build_agent_obs(builder, obs, infos)
             next_done = torch.logical_or(terminations, truncations).float()
             if poisoned is not None:
                 next_done = torch.where(poisoned, torch.ones_like(next_done), next_done)
@@ -631,7 +739,29 @@ def _train(
                     done_mask = done_mask & ~poisoned
                 if done_mask.any():
                     with torch.no_grad():
-                        final_obs = builder(infos["final_observation"][done_mask])
+                        # The oracle partner block must describe the FINAL (pre-reset)
+                        # state of the done episodes. `final_observation` is pre-reset,
+                        # but the top-level step infos of auto-reset envs already carry
+                        # the NEW episode's values -- so the oracle keys are read from
+                        # `final_info` (per-env dicts, pre-reset), never from the
+                        # masked step infos.
+                        final_rows = infos["final_info"][done_mask.detach().cpu().numpy()]
+                        oracle_infos = {
+                            key: torch.as_tensor(
+                                [row[key] for row in final_rows],
+                                dtype=torch.long,
+                                device=infos["final_observation"].device,
+                            )
+                            for key in (
+                                _skills_obs.INFO_PRIMITIVE_HOLDER,
+                                _skills_obs.INFO_PRIMITIVE_ROTATOR,
+                            )
+                        }
+                        final_obs = _build_agent_obs(
+                            builder,
+                            infos["final_observation"][done_mask],
+                            oracle_infos,
+                        )
                         for i, agent in enumerate(agents):
                             final_values[i][step, done_mask] = agent.get_value(final_obs[i]).view(
                                 -1
@@ -655,7 +785,7 @@ def _train(
                 )
             batch = {
                 "obs": obs_buf[i].reshape(-1, builder.obs_dims[i]),
-                "actions": act_buf[i].reshape(-1, action_dims[i]),
+                "actions": act_buf[i].reshape(-1, act_buf[i].shape[-1]),
                 "logprobs": logprob_buf[i].reshape(-1),
                 "advantages": advantages.reshape(-1),
                 "returns": returns.reshape(-1),
@@ -676,11 +806,12 @@ def _train(
                     f"{AGENT_NAMES[i]}: non-finite loss at iteration {iteration}: {metrics}"
                 )
             logger.log_many(metrics, global_step, prefix=f"losses/{AGENT_NAMES[i]}/")
-            logger.log(
-                f"policy/{AGENT_NAMES[i]}/action_std",
-                agent.actor_logstd.exp().mean().item(),
-                global_step,
-            )
+            if not discrete:
+                logger.log(
+                    f"policy/{AGENT_NAMES[i]}/action_std",
+                    agent.actor_logstd.exp().mean().item(),
+                    global_step,
+                )
         update_time = time.time() - update_start
 
         # --- Logging, evaluation, checkpoints ---------------------------------------------
