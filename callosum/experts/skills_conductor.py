@@ -216,11 +216,9 @@ class SkillsConductor:
                     # this flip's axis (the roll gate parked the macro, grip intact):
                     # the resync releases and re-approaches aimed at THIS move's axis.
                     return self._resync(state)
-                # The macro released the cube (its drop lands 2-4 cm off
-                # centre): re-approach and re-grasp it there -- the table now
-                # carries the weight, the grasp macro drags it back home, and
-                # the rotator then works on the re-centred table cube.
-                return self._enter(state, "approach", ids["approach_body"])
+                # Keep the grip: the lower leg ends holding the cube at the stall
+                # height, and the rotator turns the layer of the hanging cube.
+                return self._enter(state, "serving", ids["wait"])
             return self._reselect(state)
         if phase == "seq":
             return self._sequence(state, state.seq_steps, state.seq_then)

@@ -213,17 +213,6 @@ def test_runtime_actions_shape_and_grip_passthrough() -> None:
         np.testing.assert_allclose(arm_action[:, 5], 1.0)  # gripper open (+1)
 
 
-def test_holder_grasp_is_a_close_then_home_drag_macro() -> None:
-    """The holder's grasp ends by dragging the clamped cube back to the home XY
-    along the table: the flip's release-drop lands it 2-4 cm off centre, past
-    the rotator's vertical-finger zone."""
-    from callosum.experts.skills_runtime import Sequence
-
-    macro = SkillsRuntime(1)._holder_primitive("grasp")
-    assert isinstance(macro, Sequence)
-    assert [child.name for child in macro.children] == ["grasp close", "grasp home"]
-
-
 def test_flip_macro_holds_the_cube_through_the_flip() -> None:
     """The flip keeps the grip through lift/roll/lower (the loaded wrist cannot
     press the cube onto the table), re-centres it, then RELEASES it onto the
@@ -239,7 +228,6 @@ def test_flip_macro_holds_the_cube_through_the_flip() -> None:
             "flip lift",
             "flip roll",
             "flip lower",
-            "flip release",
         ]
 
 
@@ -444,7 +432,7 @@ def test_conductor_holder_recovers_a_slipped_flip() -> None:
     assert conductor.act("holder", done, info) == HOLDER_ID["approach_body"]
 
 
-def test_conductor_holder_regrasps_after_the_flip_release() -> None:
+def test_conductor_holder_keeps_the_grip_after_the_flip() -> None:
     conductor = SkillsConductor(settle_decisions=1)
     half = math.sqrt(0.5)
     quat_f_up = (half, 0.0, 0.0, half)  # rotation about +x: F up
@@ -457,13 +445,12 @@ def test_conductor_holder_regrasps_after_the_flip_release() -> None:
         HOLDER_ID["flip90"],
     ):
         assert conductor.act("holder", done, info) == expected
-    # The flip landed and the macro released the cube: re-approach and re-grasp
-    # (the grasp macro then drags it back home).
-    riding = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0, gripper=1.0)
-    assert conductor.act("holder", riding, info) == HOLDER_ID["approach_body"]
-    assert conductor.act("holder", riding, info) == HOLDER_ID["grasp"]
-    assert conductor.act("holder", riding, info) == HOLDER_ID["wait"]  # serving holds
-    # Plan finished: let go and retreat -- the cube is already on the table.
+    # The flip landed with the grip intact: serving holds the hanging cube for
+    # the rotator's turn.
+    flipped = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0)
+    assert conductor.act("holder", flipped, info) == HOLDER_ID["wait"]
+    assert conductor.act("holder", flipped, info) == HOLDER_ID["wait"]
+    # Plan finished: let go -- the cube drops the short distance to the table.
     finished = _obs(Role.HOLDER, face=None, quat=quat_f_up, progress=1.0)
     assert conductor.act("holder", finished, info) == HOLDER_ID["release"]
 

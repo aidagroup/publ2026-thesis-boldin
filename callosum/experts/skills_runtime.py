@@ -88,13 +88,14 @@ IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
 _ROTATOR_IK_MARGIN = 0.002
-_ROTATOR_HOVER = 0.05
+_ROTATOR_HOVER = 0.07
 """The rotator's pre-descent hover height above the layer rim. Approached with a
 loose finger-angle tolerance (the strict pose is pitch-infeasible up there);
 the drop from the hover to the rim is purely vertical. 5 cm, not 3.5: the
-physical fingertips extend past the modelled TCP, and at the lower hover the
-sweep's open jaws rode the cube's top (gR dipping from 0.037 to 0.026) and
-dragged the hanging cube 5 cm aside."""
+physical fingertips extend past the modelled TCP by 2-3 cm; lower hovers had
+the sweep's open jaws ride the cube's top (gR dipping to 0.021) and drag the
+hanging cube aside, tangling the arms. 7 cm puts the fingertips ~4 cm above
+a hanging cube's top."""
 """The rotator's IK keeps joints this far inside their limits instead of the
 config's 0.05: its wrist-pitch is the binding constraint of the rim grasp and
 the layer's weight is trivial, so the delta-sag-near-limits risk the margin
@@ -629,25 +630,7 @@ class SkillsRuntime:
         if name == "approach_body":
             return TrackPath(n, name, lambda envs: self._plan_approach(0, envs), settle=SETTLE_STEPS)
         if name == "grasp":
-            # A two-leg macro: close the jaws, then DRAG the clamped cube back to
-            # the home XY -- the flip's release-drop kicks the cube 2-4 cm along
-            # the jaw's incline, past the rotator's reach, and the rotator's
-            # vertical-finger zone ends a couple of cm off centre. The drag runs
-            # at the table-supported grasp height: the table carries the weight,
-            # the arm only overcomes sliding friction.
-            return Sequence(
-                n,
-                name,
-                [
-                    lambda: Grip(n, "grasp close", GRIPPER_CLOSED, CLOSE_STEPS),
-                    lambda: TrackPath(
-                        n,
-                        "grasp home",
-                        lambda envs_: self._plan_home_drag(envs_),
-                        settle=SETTLE_STEPS,
-                    ),
-                ],
-            )
+            return Grip(n, name, GRIPPER_CLOSED, CLOSE_STEPS)
         if name == "release":
             return Grip(n, name, GRIPPER_OPEN, CLOSE_STEPS)
         if name == "lift":
@@ -697,7 +680,6 @@ class SkillsRuntime:
                         lambda envs: self._plan_vertical(0, envs, -FLIP_LIFT),
                         settle=SETTLE_STEPS,
                     ),
-                    lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
                 ],
             )
         raise ValueError(f"unknown holder primitive {name!r}")
@@ -709,25 +691,7 @@ class SkillsRuntime:
         if name == "approach_face":
             return TrackPath(n, name, lambda envs: self._plan_approach(1, envs), settle=SETTLE_STEPS)
         if name == "grasp":
-            # A two-leg macro: close the jaws, then DRAG the clamped cube back to
-            # the home XY -- the flip's release-drop kicks the cube 2-4 cm along
-            # the jaw's incline, past the rotator's reach, and the rotator's
-            # vertical-finger zone ends a couple of cm off centre. The drag runs
-            # at the table-supported grasp height: the table carries the weight,
-            # the arm only overcomes sliding friction.
-            return Sequence(
-                n,
-                name,
-                [
-                    lambda: Grip(n, "grasp close", GRIPPER_CLOSED, CLOSE_STEPS),
-                    lambda: TrackPath(
-                        n,
-                        "grasp home",
-                        lambda envs_: self._plan_home_drag(envs_),
-                        settle=SETTLE_STEPS,
-                    ),
-                ],
-            )
+            return Grip(n, name, GRIPPER_CLOSED, CLOSE_STEPS)
         if name in ("turn90", "turn180"):
             quarter = 1 if name == "turn90" else 2
             return TrackPath(
@@ -920,21 +884,6 @@ class SkillsRuntime:
             )
         tcp = position + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger_dir
         return tcp, grasp_finger, open_axis
-
-    def _plan_home_drag(self, envs: np.ndarray):
-        """The `grasp home` leg: drag the clamped cube to the home XY along the
-        table. The target TCP places the CUBE at home (the cube sits at
-        `cube_pos = tcp - GRASP_Z*UP + GRASP_OFFSET*finger`), keeps the live
-        height, and aims 1 cm towards the rotator's base -- its vertical-finger
-        zone ends a couple of cm short of a centred cube."""
-        view = self._require_view()
-        q = self.cmd.q[0][envs]
-        tcp, finger, open_axis = self._tool_world(0, q, envs)
-        goal = view.cube_home[envs].copy()
-        goal[:, :2] += 0.01 * -self._horizontal_unit(1, envs)[:, :2]
-        goal[:, 2] = view.cube_pos[envs][:, 2]
-        tcp = goal + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger
-        return self._plan_path_world(0, envs, tcp, finger, open_axis)
 
     def _rotator_grasp_pose(self, envs: np.ndarray):
         """`(tcp, finger_dir, open_axis)` of the rotator pinching the up layer top-down."""
