@@ -849,10 +849,19 @@ class SkillsRuntime:
 
     def _plan_home_drag(self, envs: np.ndarray):
         """The flip macro's `flip home` leg: drag the hanging cube straight to the
-        home grasp pose. The grip carries the cube (no table friction, no lift
-        sag -- the arm only swings it laterally), re-centring it for the
-        rotator, whose vertical-finger reach ends a couple of cm off centre."""
-        tcp, finger, open_axis = self._holder_grasp_pose(envs, home=True)
+        home XY. The grip carries the cube (no table friction, no lift sag -- the
+        arm only swings it laterally), re-centring it for the rotator, whose
+        vertical-finger reach ends a couple of cm off centre.
+
+        PURE TRANSLATION: the goal keeps the live (rolled) tool orientation --
+        aiming at the natural grasp axes instead would un-roll the wrist WITH
+        the cube in the jaws and undo the flip (observed: up L -> D, the cube
+        tumbling out of the grip)."""
+        view = self._require_view()
+        q = self.cmd.q[0][envs]
+        tcp, finger, open_axis = self._tool_world(0, q, envs)
+        tcp = tcp.copy()
+        tcp[:, :2] = view.cube_home[envs][:, :2] if view.cube_home is not None else tcp[:, :2]
         return self._plan_path_world(0, envs, tcp, finger, open_axis)
 
     def _rotator_grasp_pose(self, envs: np.ndarray):
