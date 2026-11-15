@@ -68,12 +68,14 @@ grasp pose unreachable for this base layout), but it tilts the lower jaw like a
 10 deg incline: during the flip's set-down ride the cube slides 2.5+ cm down it,
 past the success position tolerance. The macro therefore LEVELS the tine (a
 small pitch-up at constant TCP) right after the release, before the unroll."""
-ROTATOR_TILT = np.deg2rad(2)  # rotator fingers this far off vertical, towards the cube
-"""The tilt must thread a needle: at 4+ deg the finger lean demands more wrist
-pitch than the joint has, and the IK's angle error at the rim-depth waypoints
-sits at ~8.7 deg -- past the 8 deg tolerance (the position still solves to
-0.1 mm; only the lean fails) -- while 0 deg makes even the backoff pose
-unreachable. 2 deg plus the rotator's near-zero IK margin threads it."""
+ROTATOR_TILT = np.deg2rad(6)  # rotator fingers this far off vertical, towards the cube
+"""The traced geometry at the workspace boundary: the wrist pitch pins at its
+limit and the posture's finger then leans ~12 deg inward no matter what, so
+the IK's angle error is roughly |12 deg - tilt| -- a goal lean BELOW ~4 deg
+fails the 8 deg tolerance (2 deg measured 10.6 deg of error, 4 deg measured
+8.7), and the position solves to 0.1 mm throughout. 6 deg (FaceTurn's
+value) sits on the achievable side (~6.3 deg of error); the rotator's
+near-zero IK margin supplies the pitch headroom the original stall lacked."""
 ROTATOR_GRASP_Z = 0.022  # TCP height above the cube centre: upper half of the rim
 # (the rim spans hs-t .. hs above the centre; 0.022 bites its top 6.5 mm, a
 # trade of pinch depth for wrist-pitch reach -- see ROTATOR_TILT)
