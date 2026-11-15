@@ -7,12 +7,14 @@ expected to reach success ~100% on E1/E2 -- the environment's sanity check and u
 baseline (skill-action-space spec: "Дирижёр — только валидация"). Playing its decision
 sequence back as a demo is forbidden; the demo must run trained policies.
 
-Realism constraints honoured (it may NOT peek at hidden state): it waits for the
-partner's grasp via the partner's CURRENT primitive id in `info` plus a timing margin,
-verifies its own outcomes through its own observation (the flip's orientation change,
-the turn's layer angle, the plan cursor advancing in `info`), and retries on failure --
-a grasp-failure injection or a mid-turn slip sends it back to a re-approach, never into
-a wall.
+Realism constraints honoured (it may NOT peek at hidden state): it tracks the
+partner's grasp through the partner's CURRENT primitive id in `info` (a grasp
+streak establishes a hold belief that survives the partner's `wait` between plan
+moves; releases, retreats, approaches and flips clear it), verifies its own
+outcomes through its own observation (the flip's orientation change, the turn's
+layer angle, its own gripper opening after a grasp, the plan cursor advancing in
+`info`) and retries on failure -- a grasp-failure injection or a mid-turn slip
+sends it back to a re-approach, never into a wall.
 
 Pure stdlib + numpy (no mani_skill/torch): unit-testable on macOS with mock
 observations (`tests/test_face_turn_skills_logic.py`). One instance serves ONE env;
@@ -52,7 +54,12 @@ _STATE_TIMEOUT = 30
 re-approach) -- the injected failures are recovered through this escape hatch."""
 _ANGLE_TOL_DEG = 6.0  # verification window around the move target (config tol + margin)
 _FLIP_RETRIES = 8  # flip attempts before holding anyway (the episode budget caps work)
+_GRASP_RETRIES = 8  # grasp attempts (a failed one reads as open jaws) before giving up
 _SEQ_HOLD = 2  # decisions each step of a release/retreat sequence is held
+_NOT_HOLDING_OPENING = 0.9
+"""`own_gripper_opening` above this means the jaws hold nothing: fully open is 1.0
+and clamped on a slab the opening settles around 0.8. The holder reads its own
+jaws to notice an injected grasp failure (the doomed close leaves them open)."""
 
 
 def _to_float(value) -> float:
@@ -75,6 +82,8 @@ class _HandState:
         self.done_settle = 0  # consecutive decisions the own primitive reported done
         self.retries = 0
         self.streak = 0  # consecutive decisions the watched partner condition held
+        self.partner_hold = False  # believed state of the partner's grasp (rotator)
+        self.grasp_failures = 0  # grasp attempts that ended with open jaws
         self.step = 0  # position inside a multi-decision sequence phase
         self.seq_steps: list = []  # the pending sequence's primitive ids
         self.seq_then = "wait"  # the phase entered when the sequence completes
@@ -141,6 +150,10 @@ class SkillsConductor:
     def _up_face(self, fields: dict) -> str:
         return up_face_from_quat(fields["cube_orientation_quat"])
 
+    def _holding(self, fields: dict) -> bool:
+        """Whether the holder's own jaws read as clamping something (proprioception)."""
+        return float(fields["own_gripper_opening"][0]) <= _NOT_HOLDING_OPENING
+
     def _needed_flip(self, fields: dict) -> Flip | None:
         face = self._move_face(fields)
         if face is None:
@@ -171,6 +184,14 @@ class SkillsConductor:
                 return self._resync(state)
             return self._after_settle(state, "serving", ids["wait"])
         if phase == "serving":
+            if not self._holding(fields):
+                # The grasp never engaged (an injected failure leaves the jaws open)
+                # or was lost: re-approach and re-grasp instead of holding air.
+                if state.grasp_failures >= _GRASP_RETRIES:
+                    return ids["wait"]  # give up; the episode budget decides
+                state.grasp_failures += 1
+                return self._enter(state, "approach", ids["approach_body"])
+            state.grasp_failures = 0
             # Holding the core: flip the needed face up, or hold while the rotator turns.
             if needed is None:
                 return ids["wait"]
@@ -182,9 +203,15 @@ class SkillsConductor:
         if phase == "flipping":
             if state.done_settle >= self.settle_decisions:
                 # Verify through the OWN observation: did the move's face come up?
-                if self._up_face(fields) == self._move_face(fields):
-                    return self._enter(state, "serving", ids["wait"])
-                return self._resync(state)  # grasp failed or slipped: redo it
+                if self._up_face(fields) != self._move_face(fields):
+                    return self._resync(state)  # grasp failed or slipped: redo it
+                # The macro released the cube onto the table (its last legs): the
+                # turn needs the core held again, so re-grasp. If a leg failed to
+                # start and the jaws still clamp the cube aloft, set it down first
+                # (the resync sequence releases before its approach).
+                if self._holding(fields):
+                    return self._resync(state)
+                return self._enter(state, "approach", ids["approach_body"])
             return self._reselect(state)
         if phase == "seq":
             return self._sequence(state, state.seq_steps, state.seq_then)
@@ -195,10 +222,28 @@ class SkillsConductor:
     def _rotator_act(self, fields: dict, info: dict) -> int:
         state = self.rotator
         ids = ROTATOR_ID
-        if _to_int(info.get(INFO_PRIMITIVE_HOLDER, 0)) == HOLDER_ID["grasp"]:
+        partner = _to_int(info.get(INFO_PRIMITIVE_HOLDER, 0))
+        if partner == HOLDER_ID["grasp"]:
             state.streak += 1
         else:
             state.streak = 0
+        # Partner-hold belief, from the holder's primitive stream alone: a grasp
+        # held for the streak margin means the jaws closed on the core (and stay
+        # closed through the holder's `wait`), so the belief survives the holder
+        # idling between plan moves -- the streak alone would never re-arm after
+        # a flip or across moves. Anything that opens the jaws or parks them away
+        # (release/retreat/approach) or a flip macro (which ends in its own
+        # release leg) clears it.
+        if partner in (
+            HOLDER_ID["release"],
+            HOLDER_ID["retreat"],
+            HOLDER_ID["approach_body"],
+            HOLDER_ID["flip90"],
+            HOLDER_ID["flip180"],
+        ):
+            state.partner_hold = False
+        elif state.streak >= _GRASP_PARTNER_STREAK:
+            state.partner_hold = True
         face = self._move_face(fields)
         if state.phase == "done":
             return ids["wait"]
@@ -209,7 +254,9 @@ class SkillsConductor:
 
         phase = state.phase
         if phase in ("wait", "done"):
-            if self._up_face(fields) == face and state.streak >= _GRASP_PARTNER_STREAK:
+            if self._up_face(fields) == face and (
+                state.streak >= _GRASP_PARTNER_STREAK or state.partner_hold
+            ):
                 return self._enter(state, "approach", ids["approach_face"])
             return ids["wait"]
         if phase == "approach":

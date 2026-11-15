@@ -61,17 +61,21 @@ class FaceTurnSkillsConfig:
     """
 
     # --- decision timing -----------------------------------------------------------------
-    decision_period: int = 10
-    """Simulation substeps per decision (one env.step). ~10 steps ~ 0.5 s (design
-    decision 5). The episode limit is counted in decisions, not substeps."""
+    decision_period: int = 20
+    """Simulation substeps per decision (one env.step). ~20 steps ~ 1 s: the A40
+    probe measured a primitive leg at 150-300 substeps (the wrist carries the
+    cube's weight during a flip and sags to a fraction of the delta-limit speed),
+    so a 0.5 s decision cadence spent most of its budget inside one leg's travel;
+    1 s keeps several decisions per leg while a 150-decision episode still spans
+    the full plan. The episode limit is counted in decisions, not substeps."""
 
     max_episode_decisions: int = 150
     """Episode budget in decisions (one decision = `decision_period` sim substeps).
-    Measured on the A40 probe: one primitive leg (approach/lift/roll) costs ~150-300
-    substeps at the delta-limit speed, so a plan move WITHOUT a flip is ~35 decisions
-    and WITH a flip ~60; E1 (1 move, flip possible) needs ~700 substeps, E2 (2-3
-    moves) ~1200. NOTE: `gym.make(..., max_episode_steps=...)` only rewraps the outer
-    TimeLimit (decision-level); to change this internal budget pass
+    Measured on the A40 probe: with 1 s decisions a plan move WITHOUT a flip is
+    ~20-25 decisions and WITH a flip ~55-70 (lift, roll, set-down, re-grasp, turn);
+    E1 (1 move, flip possible) fits in ~70-80, E2 (2-3 moves) in ~120-140. NOTE:
+    `gym.make(..., max_episode_steps=...)` only rewraps the outer TimeLimit
+    (decision-level); to change this internal budget pass
     `skills_config=FaceTurnSkillsConfig(max_episode_decisions=...)`."""
 
     # --- plan input ----------------------------------------------------------------------

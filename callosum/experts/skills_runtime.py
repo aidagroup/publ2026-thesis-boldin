@@ -52,8 +52,10 @@ CLOSE_STEPS = 20  # a jaw close/open phase ends at the latest after this many su
 SETTLE_STEPS = 10  # settle after a movement phase (capped by ExpertControlConfig)
 PATH_STEPS = 8  # IK waypoints on each straight-line leg
 STEP_SECONDS = 0.05
-"""One control substep's duration (s): decision_period=10 steps ~ 0.5 s, the design's
-timing note. Used only to convert the randomization's start-delay seconds into substeps.
+"""One control substep's duration (s): decision_period=20 steps ~ 1 s, sized on the
+A40 probe so a 150-decision episode spans a multi-move plan (see
+`callosum.configs.face_turn_skills`). Used only to convert the randomization's
+start-delay seconds into substeps.
 TODO(review): read the real control-step dt on the first cloud probe instead."""
 
 # Strategy geometry, copied from `callosum.experts.face_turn_expert` (whose module pulls
@@ -595,6 +597,12 @@ class SkillsRuntime:
             return TrackPath(n, name, lambda envs: self._plan_retreat(0, envs), settle=SETTLE_STEPS)
         if name in ("flip90", "flip180"):
             quarter = 1 if name == "flip90" else 2
+            # The macro ends by SETTING THE CUBE DOWN: the loaded wrist-pitch cannot
+            # press a gripped cube the last centimetres onto the table (the joint
+            # sags into its limit under the hanging weight), so the lower leg brings
+            # the cube as far down as the arm manages and the release drops it the
+            # short remaining distance; the retreat then clears the gripper. The
+            # conductor re-grasps afterwards (a table-supported grasp has no sag).
             return Sequence(
                 n,
                 name,
@@ -616,6 +624,10 @@ class SkillsRuntime:
                         "flip lower",
                         lambda envs: self._plan_vertical(0, envs, -FLIP_LIFT),
                         settle=SETTLE_STEPS,
+                    ),
+                    lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
+                    lambda: TrackPath(
+                        n, "flip retreat", lambda envs: self._plan_retreat(0, envs), settle=SETTLE_STEPS
                     ),
                 ],
             )

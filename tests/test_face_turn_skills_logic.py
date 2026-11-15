@@ -41,7 +41,7 @@ N_HOLDER, N_ROTATOR = num_primitives(Role.HOLDER), num_primitives(Role.ROTATOR)
 
 def test_config_defaults_match_the_specs() -> None:
     cfg = FaceTurnSkillsConfig()
-    assert cfg.decision_period == 10
+    assert cfg.decision_period == 20
     assert 100 <= cfg.max_episode_decisions <= 200
     assert cfg.partner_mode == "none"
     assert cfg.plan_length == 1  # E1
@@ -209,6 +209,25 @@ def test_runtime_actions_shape_and_grip_passthrough() -> None:
         np.testing.assert_allclose(arm_action[:, 5], 1.0)  # gripper open (+1)
 
 
+def test_flip_macro_sets_the_cube_down_and_retreats() -> None:
+    """The flip ends by releasing the cube and retreating: the loaded wrist cannot
+    press a gripped cube onto the table, so the macro sets it down and the
+    conductor re-grasps with the table carrying the weight."""
+    from callosum.experts.skills_runtime import Sequence
+
+    runtime = SkillsRuntime(1)
+    for name in ("flip90", "flip180"):
+        macro = runtime._holder_primitive(name)
+        assert isinstance(macro, Sequence)
+        assert [child.name for child in macro.children] == [
+            "flip lift",
+            "flip roll",
+            "flip lower",
+            "flip release",
+            "flip retreat",
+        ]
+
+
 # --- useless-action classifier ---------------------------------------------------------------
 
 
@@ -347,6 +366,7 @@ def _obs(
     quat=(0.0, 0.0, 0.0, 1.0),
     progress: float = 0.0,
     angle_rad: float = 0.0,
+    gripper: float = 0.0,
 ) -> np.ndarray:
     n_own = num_primitives(role)
     vec = np.zeros(own_block_size(n_own))
@@ -357,6 +377,7 @@ def _obs(
         vec[slices["plan_moves_remaining"]] = 1.0
     vec[slices["cube_orientation_quat"]] = quat
     vec[slices["active_layer_angle"]] = angle_rad / math.pi
+    vec[slices["own_gripper_opening"]] = gripper
     vec[slices["own_primitive_progress"]] = progress
     vec[slices["own_primitive_onehot"]][0] = 1.0
     return vec
@@ -406,7 +427,7 @@ def test_conductor_holder_recovers_a_slipped_flip() -> None:
     assert conductor.act("holder", done, info) == HOLDER_ID["approach_body"]
 
 
-def test_conductor_holder_holds_then_releases_after_flip() -> None:
+def test_conductor_holder_regrasps_after_the_flip_macro() -> None:
     conductor = SkillsConductor(settle_decisions=1)
     half = math.sqrt(0.5)
     quat_f_up = (half, 0.0, 0.0, half)  # rotation about +x: F up
@@ -419,13 +440,55 @@ def test_conductor_holder_holds_then_releases_after_flip() -> None:
         HOLDER_ID["flip90"],
     ):
         assert conductor.act("holder", done, info) == expected
-    # The flip landed (F now up, verified through the OWN observation): hold.
-    flipped = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0)
-    assert conductor.act("holder", flipped, info) == HOLDER_ID["wait"]
-    assert conductor.act("holder", flipped, info) == HOLDER_ID["wait"]
+    # The flip landed (F now up) and the macro's release leg opened the jaws: the
+    # turn needs the core held again, so re-approach and re-grasp.
+    flipped_open = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0, gripper=1.0)
+    assert conductor.act("holder", flipped_open, info) == HOLDER_ID["approach_body"]
+    regrasp = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0)
+    assert conductor.act("holder", regrasp, info) == HOLDER_ID["grasp"]
+    assert conductor.act("holder", regrasp, info) == HOLDER_ID["wait"]  # serving holds
     # Plan finished: let go.
     finished = _obs(Role.HOLDER, face=None, quat=quat_f_up, progress=1.0)
     assert conductor.act("holder", finished, info) == HOLDER_ID["release"]
+
+
+def test_conductor_holder_sets_down_a_cube_left_held_aloft() -> None:
+    """A failed macro leg can park the sequence with the jaws still clamping the
+    cube in the air: the post-flip check must notice (own jaws read closed) and
+    release before approaching again."""
+    conductor = SkillsConductor(settle_decisions=1)
+    half = math.sqrt(0.5)
+    quat_f_up = (half, 0.0, 0.0, half)
+    done = _obs(Role.HOLDER, face="F", quat=(0.0, 0.0, 0.0, 1.0), progress=1.0)
+    info = _info()
+    for expected in (
+        HOLDER_ID["approach_body"],
+        HOLDER_ID["grasp"],
+        HOLDER_ID["wait"],
+        HOLDER_ID["flip90"],
+    ):
+        assert conductor.act("holder", done, info) == expected
+    flipped_holding = _obs(Role.HOLDER, face="F", quat=quat_f_up, progress=1.0)
+    assert conductor.act("holder", flipped_holding, info) == HOLDER_ID["release"]
+    assert conductor.act("holder", flipped_holding, info) == HOLDER_ID["release"]
+    assert conductor.act("holder", flipped_holding, info) == HOLDER_ID["retreat"]
+
+
+def test_conductor_holder_redoes_a_failed_grasp() -> None:
+    """An injected grasp failure leaves the jaws open: serving must notice through
+    the own gripper opening and re-approach instead of holding air."""
+    conductor = SkillsConductor(settle_decisions=1)
+    failed = _obs(Role.HOLDER, face="U", quat=(0.0, 0.0, 0.0, 1.0), progress=1.0, gripper=1.0)
+    info = _info()
+    for expected in (HOLDER_ID["approach_body"], HOLDER_ID["grasp"], HOLDER_ID["wait"]):
+        assert conductor.act("holder", failed, info) == expected
+    # U is already up (no flip needed) but the jaws hold nothing: re-approach.
+    assert conductor.act("holder", failed, info) == HOLDER_ID["approach_body"]
+    assert conductor.act("holder", failed, info) == HOLDER_ID["grasp"]
+    # The retry closed on the core (gripper reads clamped): serving holds.
+    holding = _obs(Role.HOLDER, face="U", quat=(0.0, 0.0, 0.0, 1.0), progress=1.0)
+    assert conductor.act("holder", holding, info) == HOLDER_ID["wait"]
+    assert conductor.act("holder", holding, info) == HOLDER_ID["wait"]
 
 
 def test_conductor_rotator_turns_and_recovers() -> None:
@@ -471,6 +534,47 @@ def test_conductor_rotator_waits_while_face_not_up() -> None:
     info = _info(holder=HOLDER_ID["grasp"])
     assert conductor.act("rotator", obs, info) == ROTATOR_ID["wait"]
     assert conductor.act("rotator", obs, info) == ROTATOR_ID["wait"]  # F not up yet
+
+
+def test_conductor_rotator_hold_belief_sets_and_clears() -> None:
+    """The partner-hold belief: set by a grasp streak, cleared by any holder
+    selection that opens the jaws or parks them (release/retreat/approach/flip)."""
+    conductor = SkillsConductor(settle_decisions=1)
+    upright = (0.0, 0.0, 0.0, 1.0)
+    obs = _obs(Role.ROTATOR, face="F", quat=upright)  # F not up yet
+    info = _info(holder=HOLDER_ID["grasp"])
+    assert conductor.act("rotator", obs, info) == ROTATOR_ID["wait"]  # streak builds
+    assert conductor.act("rotator", obs, info) == ROTATOR_ID["wait"]  # belief set, gate shut
+    half = math.sqrt(0.5)
+    f_up = _obs(Role.ROTATOR, face="F", quat=(half, 0.0, 0.0, half))
+    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["release"])) == ROTATOR_ID["wait"]
+    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["flip90"])) == ROTATOR_ID["wait"]
+    # A fresh grasp streak re-establishes the hold: approach.
+    assert conductor.act("rotator", f_up, info) == ROTATOR_ID["wait"]  # streak 1
+    assert conductor.act("rotator", f_up, info) == ROTATOR_ID["approach_face"]
+
+
+def test_conductor_rotator_trusts_a_standing_hold_between_moves() -> None:
+    """After a completed turn the holder idles in `wait` while still holding: the
+    next move on the same up face must be approachable without a fresh streak."""
+    conductor = SkillsConductor(settle_decisions=1)
+    half = math.sqrt(0.5)
+    quat_f_up = (half, 0.0, 0.0, half)
+    obs = _obs(Role.ROTATOR, face="F", quat=quat_f_up)
+    done = _obs(Role.ROTATOR, face="F", quat=quat_f_up, progress=1.0)
+    info = _info(holder=HOLDER_ID["grasp"], angle_deg=0.0)
+    assert conductor.act("rotator", obs, info) == ROTATOR_ID["wait"]
+    assert conductor.act("rotator", obs, info) == ROTATOR_ID["approach_face"]
+    assert conductor.act("rotator", done, info) == ROTATOR_ID["grasp"]
+    assert conductor.act("rotator", done, info) == ROTATOR_ID["turn90"]
+    ok = _info(holder=HOLDER_ID["grasp"], angle_deg=90.0)
+    assert conductor.act("rotator", done, ok) == ROTATOR_ID["release"]
+    assert conductor.act("rotator", done, ok) == ROTATOR_ID["release"]
+    assert conductor.act("rotator", done, ok) == ROTATOR_ID["retreat"]
+    assert conductor.act("rotator", done, ok) == ROTATOR_ID["retreat"]
+    assert conductor.act("rotator", done, ok) == ROTATOR_ID["retreat"]  # enters wait
+    idle = _info(holder=HOLDER_ID["wait"])  # the holder serves: still holding
+    assert conductor.act("rotator", done, idle) == ROTATOR_ID["approach_face"]
 
 
 def test_conductor_rejects_unknown_key() -> None:
