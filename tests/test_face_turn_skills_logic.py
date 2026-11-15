@@ -228,6 +228,7 @@ def test_flip_macro_holds_the_cube_through_the_flip() -> None:
             "flip lift",
             "flip roll",
             "flip lower",
+            "flip home",
         ]
 
 
@@ -563,9 +564,10 @@ def test_conductor_rotator_waits_while_face_not_up() -> None:
 
 
 def test_conductor_rotator_hold_belief_sets_and_clears() -> None:
-    """The partner-hold belief: set by a grasp streak, cleared by any holder
-    selection that opens the jaws or parks them away (release/retreat/approach)
-    -- a flip selection KEEPS it (the flip macro holds through by design)."""
+    """The partner-hold belief: set by a grasp streak, kept across the holder's
+    flips (the flip macro holds through by design), cleared by any selection
+    that opens the jaws or parks them away (release/retreat/approach). While a
+    flip RUNS, the rotator still waits -- the cube is a moving target."""
     conductor = SkillsConductor(settle_decisions=1)
     upright = (0.0, 0.0, 0.0, 1.0)
     obs = _obs(Role.ROTATOR, face="F", quat=upright)  # F not up yet
@@ -574,9 +576,10 @@ def test_conductor_rotator_hold_belief_sets_and_clears() -> None:
     assert conductor.act("rotator", obs, info) == ROTATOR_ID["wait"]  # belief set, gate shut
     half = math.sqrt(0.5)
     f_up = _obs(Role.ROTATOR, face="F", quat=(half, 0.0, 0.0, half))
-    # A flip selection does NOT clear the hold belief -- but the gate opens only
-    # with the face up; both hold here.
-    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["flip90"])) == ROTATOR_ID[
+    # A running flip blocks the approach even with the face up and the belief set.
+    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["flip90"])) == ROTATOR_ID["wait"]
+    # The holder settles into serving: approach.
+    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["wait"])) == ROTATOR_ID[
         "approach_face"
     ]
     # The holder releases: the belief clears, and re-opening needs a fresh streak.

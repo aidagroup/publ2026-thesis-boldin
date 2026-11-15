@@ -283,6 +283,7 @@ class RuntimeView:
     layer_at_target: np.ndarray  # (n,) bool, that layer within tolerance of its target
     needed_flip: list = field(default_factory=list)  # per env: Flip | None
     t: int = 0  # simulation substeps since the env was created
+    cube_home: np.ndarray | None = None  # (n, 3) the episode's initial cube position
 
 
 class Hold(Primitive):
@@ -641,7 +642,10 @@ class SkillsRuntime:
             # gripped at the stall height and the holder KEEPS the grip -- the
             # rotator turns the layer of the hanging cube (a higher rim is
             # easier to reach), and the cube only meets the table at the final
-            # release, once, with a flat bottom and no spin. (The previous
+            # release, once, with a flat bottom and no spin. The final `flip home`
+            # leg drags the hanging cube back over its home XY: the flip's roll
+            # arc leaves it 2-3 cm off centre, outside the rotator's
+            # vertical-finger reach. (The previous
             # set-down design -- release onto the lower jaw and tip the cube off
             # -- tumbled the cube past its target roughly half the time and
             # walked it out of the rotator's reach.)
@@ -665,6 +669,12 @@ class SkillsRuntime:
                         n,
                         "flip lower",
                         lambda envs: self._plan_vertical(0, envs, -FLIP_LIFT),
+                        settle=SETTLE_STEPS,
+                    ),
+                    lambda: TrackPath(
+                        n,
+                        "flip home",
+                        lambda envs_: self._plan_home_drag(envs_),
                         settle=SETTLE_STEPS,
                     ),
                 ],
@@ -821,12 +831,29 @@ class SkillsRuntime:
         open_axis = np.cross(_UP, finger_dir)
         return fwd, grasp_finger, finger_dir, open_axis
 
-    def _holder_grasp_pose(self, envs: np.ndarray):
-        """`(tcp, finger_dir, open_axis)` of the holder clamping the core's equator."""
+    def _holder_grasp_pose(self, envs: np.ndarray, *, home: bool = False):
+        """`(tcp, finger_dir, open_axis)` of the holder clamping the core's equator.
+
+        With `home=True` the target XY is the episode's initial cube position
+        instead of the live one; the Z stays live so the retarget never lifts or
+        drops the cube."""
         view = self._require_view()
         _, grasp_finger, finger_dir, open_axis = self._holder_directions(envs)
-        tcp = view.cube_pos[envs] + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger_dir
+        position = view.cube_pos[envs]
+        if home and view.cube_home is not None:
+            position = np.concatenate(
+                [view.cube_home[envs][:, :2], view.cube_pos[envs][:, 2:3]], axis=1
+            )
+        tcp = position + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger_dir
         return tcp, grasp_finger, open_axis
+
+    def _plan_home_drag(self, envs: np.ndarray):
+        """The flip macro's `flip home` leg: drag the hanging cube straight to the
+        home grasp pose. The grip carries the cube (no table friction, no lift
+        sag -- the arm only swings it laterally), re-centring it for the
+        rotator, whose vertical-finger reach ends a couple of cm off centre."""
+        tcp, finger, open_axis = self._holder_grasp_pose(envs, home=True)
+        return self._plan_path_world(0, envs, tcp, finger, open_axis)
 
     def _rotator_grasp_pose(self, envs: np.ndarray):
         """`(tcp, finger_dir, open_axis)` of the rotator pinching the up layer top-down."""

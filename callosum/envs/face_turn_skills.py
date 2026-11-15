@@ -478,6 +478,7 @@ class FaceTurnSkills(TwoSO101Base):
             base_rot=[b[:, :3, :3] for b in bases],
             cube_pos=self.cube.pose.p.cpu().numpy(),
             cube_quat=self.cube.pose.q.cpu().numpy(),
+            cube_home=self.body_init_pos.cpu().numpy(),
             layer_angle=angle.cpu().numpy(),
             turn_target=target.cpu().numpy(),
             layer_at_target=layer_at_target,

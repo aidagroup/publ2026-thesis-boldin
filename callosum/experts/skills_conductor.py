@@ -260,8 +260,11 @@ class SkillsConductor:
 
         phase = state.phase
         if phase in ("wait", "done"):
-            if self._up_face(fields) == face and (
-                state.streak >= _GRASP_PARTNER_STREAK or state.partner_hold
+            flipping = partner in (HOLDER_ID["flip90"], HOLDER_ID["flip180"])
+            if (
+                self._up_face(fields) == face
+                and not flipping  # the cube is mid-air in the holder's jaws: moving target
+                and (state.streak >= _GRASP_PARTNER_STREAK or state.partner_hold)
             ):
                 return self._enter(state, "approach", ids["approach_face"])
             return ids["wait"]
