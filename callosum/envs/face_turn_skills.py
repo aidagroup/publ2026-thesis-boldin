@@ -297,10 +297,20 @@ class FaceTurnSkills(TwoSO101Base):
 
     # --- layer lock (generalized face lock) -------------------------------------------------
 
+    def _holder_holds(self) -> torch.Tensor:
+        """The holder clamps the cube BODY: the core is fully enclosed by the six
+        layer slabs, so the jaws can only ever touch a slab -- and every layer is
+        rigidly locked to the core while it is not held (the lock's whole point), so
+        grasping ANY link of the articulation IS grasping the body."""
+        held = self.agent_a.is_grasping(self.core_link)
+        for link in self.cube.links:
+            held = held | self.agent_a.is_grasping(link)
+        return held
+
     def _before_control_step(self):
         if not self.skills_config.lock_layers_unless_held:
             return
-        held = self.agent_a.is_grasping(self.core_link)
+        held = self._holder_holds()
         want = ~held  # every layer locks while the core is not held
         qpos = self.cube.get_qpos()
         for col in range(6):
@@ -476,7 +486,7 @@ class FaceTurnSkills(TwoSO101Base):
         return ids
 
     def _decision_facts(self) -> DecisionFacts:
-        holder_grasp = self.agent_a.is_grasping(self.core_link).cpu().numpy()
+        holder_grasp = self._holder_holds().cpu().numpy()
         rotator_grasp = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         rotator_near = torch.zeros_like(rotator_grasp)
         holder_near = (
