@@ -729,12 +729,28 @@ class SkillsRuntime:
             np.einsum("nij,nj->ni", rot, axis),
         )
 
+    _IK_SEED_NUDGES: tuple[tuple[float, ...], ...] = (
+        (0.0, 0.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.7, 0.0, 0.0),
+        (0.0, 0.0, -0.7, 0.0, 0.0),
+        (0.0, 0.4, 0.3, 0.0, 0.0),
+        (0.0, -0.4, -0.3, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 0.0, 0.8),
+        (0.0, 0.0, 0.0, 0.0, -0.8),
+    )
+    """Deterministic seed perturbations for the multi-start IK: the local
+    least-squares solver misses feasible posture branches at the workspace
+    boundary (the rotator's wrist pitch pins at its limit in one elbow branch
+    while another realizes the pose), so each solve retries a handful of nudged
+    seeds; `ArmModel.solve` clips them into the margin-shrunk bounds itself."""
+
     def _solve_ik(self, arm: int, envs: np.ndarray, tcp, finger, open_axis, seeds):
         """Batched IK to world-frame goals; returns `(qs, ok)` for the entering envs.
 
-        Tries both jaw-opening signs (the jaws are symmetric) from the single seed and
-        keeps the joint-limit margin of the control config, like `Rig.ik` but per
-        entering env only (planning happens at decision boundaries, not per substep).
+        Tries both jaw-opening signs (the jaws are symmetric) from a handful of
+        nudged seeds (see `_IK_SEED_NUDGES`) and keeps the joint-limit margin of
+        the control config, like `Rig.ik` but per entering env only (planning
+        happens at decision boundaries, not per substep).
         TODO(review): unify with `Rig._solve_best` on the cloud probe (task 2.4 measures
         this path's cost; a batched/GPU IK replaces it if reset+decision planning is
         too slow for 256 envs).
@@ -744,27 +760,30 @@ class SkillsRuntime:
         rot, pos = view.base_rot[arm][envs], view.base_pos[arm][envs]
         out = np.zeros((len(envs), NUM_ARM_JOINTS))
         ok = np.zeros(len(envs), dtype=bool)
+        margin = (
+            min(self.control.joint_limit_margin, _ROTATOR_IK_MARGIN)
+            if arm == 1
+            else self.control.joint_limit_margin
+        )
         for i in range(len(envs)):
             to_base = rot[i].T
             goal_tcp = to_base @ (tcp[i] - pos[i])
             goal_finger = to_base @ finger[i]
             goal_open = to_base @ open_axis[i]
             found = False
-            margin = (
-                min(self.control.joint_limit_margin, _ROTATOR_IK_MARGIN)
-                if arm == 1
-                else self.control.joint_limit_margin
-            )
-            for sign in (1.0, -1.0):
-                q, pos_err, angle_err = model.solve(
-                    goal_tcp,
-                    goal_finger,
-                    sign * goal_open,
-                    seeds[i],
-                    margin,
-                )
-                if pos_err < IK_POSITION_TOL and angle_err < IK_ANGLE_TOL:
-                    out[i], found = q, True
+            for nudge in self._IK_SEED_NUDGES:
+                for sign in (1.0, -1.0):
+                    q, pos_err, angle_err = model.solve(
+                        goal_tcp,
+                        goal_finger,
+                        sign * goal_open,
+                        seeds[i] + np.asarray(nudge),
+                        margin,
+                    )
+                    if pos_err < IK_POSITION_TOL and angle_err < IK_ANGLE_TOL:
+                        out[i], found = q, True
+                        break
+                if found:
                     break
             if not found:
                 out[i] = seeds[i]
@@ -865,6 +884,10 @@ class SkillsRuntime:
         tcp, finger, open_axis = self._tool_world(0, q, envs)
         if view.cube_home is not None:
             goal = view.cube_home[envs].copy()
+            # Bias 1 cm towards the rotator's base: its vertical-finger reach
+            # ends a couple of cm short of a centred cube, and the holder's arm
+            # sags slightly -x under the hanging cube's weight while serving.
+            goal[:, :2] += 0.01 * -self._horizontal_unit(1, envs)
             goal[:, 2] = tcp[:, 2] - HOLDER_GRASP_Z  # keep the live height, no lift/drop
             tcp = goal + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger
         return self._plan_path_world(0, envs, tcp, finger, open_axis)
