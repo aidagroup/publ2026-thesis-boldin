@@ -629,7 +629,25 @@ class SkillsRuntime:
         if name == "approach_body":
             return TrackPath(n, name, lambda envs: self._plan_approach(0, envs), settle=SETTLE_STEPS)
         if name == "grasp":
-            return Grip(n, name, GRIPPER_CLOSED, CLOSE_STEPS)
+            # A two-leg macro: close the jaws, then DRAG the clamped cube back to
+            # the home XY -- the flip's release-drop kicks the cube 2-4 cm along
+            # the jaw's incline, past the rotator's reach, and the rotator's
+            # vertical-finger zone ends a couple of cm off centre. The drag runs
+            # at the table-supported grasp height: the table carries the weight,
+            # the arm only overcomes sliding friction.
+            return Sequence(
+                n,
+                name,
+                [
+                    lambda: Grip(n, "grasp close", GRIPPER_CLOSED, CLOSE_STEPS),
+                    lambda: TrackPath(
+                        n,
+                        "grasp home",
+                        lambda envs_: self._plan_home_drag(envs_),
+                        settle=SETTLE_STEPS,
+                    ),
+                ],
+            )
         if name == "release":
             return Grip(n, name, GRIPPER_OPEN, CLOSE_STEPS)
         if name == "lift":
@@ -679,12 +697,6 @@ class SkillsRuntime:
                         lambda envs: self._plan_vertical(0, envs, -FLIP_LIFT),
                         settle=SETTLE_STEPS,
                     ),
-                    lambda: TrackPath(
-                        n,
-                        "flip home",
-                        lambda envs_: self._plan_home_drag(envs_),
-                        settle=SETTLE_STEPS,
-                    ),
                     lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
                 ],
             )
@@ -697,7 +709,25 @@ class SkillsRuntime:
         if name == "approach_face":
             return TrackPath(n, name, lambda envs: self._plan_approach(1, envs), settle=SETTLE_STEPS)
         if name == "grasp":
-            return Grip(n, name, GRIPPER_CLOSED, CLOSE_STEPS)
+            # A two-leg macro: close the jaws, then DRAG the clamped cube back to
+            # the home XY -- the flip's release-drop kicks the cube 2-4 cm along
+            # the jaw's incline, past the rotator's reach, and the rotator's
+            # vertical-finger zone ends a couple of cm off centre. The drag runs
+            # at the table-supported grasp height: the table carries the weight,
+            # the arm only overcomes sliding friction.
+            return Sequence(
+                n,
+                name,
+                [
+                    lambda: Grip(n, "grasp close", GRIPPER_CLOSED, CLOSE_STEPS),
+                    lambda: TrackPath(
+                        n,
+                        "grasp home",
+                        lambda envs_: self._plan_home_drag(envs_),
+                        settle=SETTLE_STEPS,
+                    ),
+                ],
+            )
         if name in ("turn90", "turn180"):
             quarter = 1 if name == "turn90" else 2
             return TrackPath(
@@ -892,29 +922,18 @@ class SkillsRuntime:
         return tcp, grasp_finger, open_axis
 
     def _plan_home_drag(self, envs: np.ndarray):
-        """The flip macro's `flip home` leg: drag the hanging cube straight to the
-        home XY. The grip carries the cube (no table friction, no lift sag -- the
-        arm only swings it laterally), re-centring it for the rotator, whose
-        vertical-finger reach ends a couple of cm off centre.
-
-        PURE TRANSLATION with the live (rolled) tool orientation -- aiming at
-        the natural grasp axes instead would un-roll the wrist with the cube in
-        the jaws and undo the flip (observed: up L -> D, the cube tumbling out
-        of the grip). The target TCP places the CUBE (not the TCP) at home: the
-        cube hangs at `tcp - GRASP_Z*UP + GRASP_OFFSET*finger`, so parking the
-        TCP at home XY alone left the cube a grasp-offset (~2 cm) away along the
-        finger -- right where the rotator's reach ends."""
+        """The `grasp home` leg: drag the clamped cube to the home XY along the
+        table. The target TCP places the CUBE at home (the cube sits at
+        `cube_pos = tcp - GRASP_Z*UP + GRASP_OFFSET*finger`), keeps the live
+        height, and aims 1 cm towards the rotator's base -- its vertical-finger
+        zone ends a couple of cm short of a centred cube."""
         view = self._require_view()
         q = self.cmd.q[0][envs]
         tcp, finger, open_axis = self._tool_world(0, q, envs)
-        if view.cube_home is not None:
-            goal = view.cube_home[envs].copy()
-            # Bias 1 cm towards the rotator's base: its vertical-finger reach
-            # ends a couple of cm short of a centred cube, and the holder's arm
-            # sags slightly -x under the hanging cube's weight while serving.
-            goal[:, :2] += 0.01 * -self._horizontal_unit(1, envs)[:, :2]
-            goal[:, 2] = tcp[:, 2] - HOLDER_GRASP_Z  # keep the live height, no lift/drop
-            tcp = goal + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger
+        goal = view.cube_home[envs].copy()
+        goal[:, :2] += 0.01 * -self._horizontal_unit(1, envs)[:, :2]
+        goal[:, 2] = view.cube_pos[envs][:, 2]
+        tcp = goal + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger
         return self._plan_path_world(0, envs, tcp, finger, open_axis)
 
     def _rotator_grasp_pose(self, envs: np.ndarray):
