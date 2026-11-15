@@ -48,6 +48,7 @@ def test_config_defaults_match_the_specs() -> None:
     assert cfg.reward.success_bonus == 1.0
     assert 0 < cfg.reward.step_penalty < 0.1
     assert cfg.lock_layers_unless_held
+    assert 0 <= cfg.lock_write_tol_deg < cfg.angle_tol_deg
     assert cfg.angle_tol_rad == pytest.approx(math.radians(cfg.angle_tol_deg))
 
 
@@ -61,6 +62,7 @@ def test_config_defaults_match_the_specs() -> None:
         ({"slip_prob_range": (0.2, 0.1)}, "slip_prob_range"),
         ({"slip_prob_range": (-0.1, 0.2)}, "slip_prob_range"),
         ({"angle_tol_deg": 0.0}, "angle_tol_deg"),
+        ({"lock_write_tol_deg": 5.0}, "lock_write_tol_deg"),
         ({"body_pos_tol": 0.0}, "body_pos_tol"),
         ({"body_settle_qvel": -1.0}, "body_settle_qvel"),
         (lambda: {"reward": SkillsRewardConfig(success_bonus=-1.0)}, "success_bonus"),

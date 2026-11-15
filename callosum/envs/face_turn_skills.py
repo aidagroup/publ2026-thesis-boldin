@@ -324,7 +324,11 @@ class FaceTurnSkills(TwoSO101Base):
 
     def _after_simulation_step(self):
         # Clamp the locked envs' layer joints after every physics substep (the FaceTurn
-        # mechanism; per joint column now, GPU fetch/apply as there).
+        # mechanism; per joint column now, GPU fetch/apply as there) -- but only where
+        # the angle actually deviates beyond the deadband: teleporting sub-degree
+        # jostles back every substep fights the solver (a micro-penetration per
+        # rewrite, expelled as a constant-velocity glide), and the joints' own
+        # friction holds the wiggle anyway.
         if not (self.skills_config.lock_layers_unless_held and self._any_layer_locked):
             return
         if self.gpu_sim_enabled:
@@ -334,8 +338,13 @@ class FaceTurnSkills(TwoSO101Base):
             px.gpu_fetch_articulation_qpos()
             px.gpu_fetch_articulation_qvel()
         locked = self._layer_locked
-        qpos = torch.where(locked, self._layer_lock_angle, self.cube.get_qpos())
-        qvel = torch.where(locked, torch.zeros_like(qpos), self.cube.get_qvel())
+        qpos = self.cube.get_qpos()
+        rewrite = locked & (
+            (qpos - self._layer_lock_angle).abs() >= self.skills_config.lock_write_tol_rad
+        )
+        qpos = torch.where(rewrite, self._layer_lock_angle, qpos)
+        qvel = self.cube.get_qvel()
+        qvel = torch.where(locked, torch.zeros_like(qvel), qvel)
         self.cube.set_qpos(qpos)
         self.cube.set_qvel(qvel)
         if self.gpu_sim_enabled:
