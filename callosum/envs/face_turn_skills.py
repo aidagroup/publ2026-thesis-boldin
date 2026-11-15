@@ -165,7 +165,6 @@ class FaceTurnSkills(TwoSO101Base):
     # --- action space: the menu the policies see; the joints underneath --------------------
 
     @property
-    @property
     def action_space(self):
         """The advertised Dict-of-Discrete skill space; the parent's joint Box space
         while the substep machinery runs (it receives the runtime's delta actions)."""
