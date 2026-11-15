@@ -109,15 +109,17 @@ class FaceTurnSkillsConfig:
     core (the FaceTurn face-lock rule lifted to all six layers; a guarantee, not a
     reward)."""
 
-    lock_write_tol_deg: float = 1.0
+    lock_write_tol_deg: float = 2.0
     """Deadband (deg) of the lock's per-substep qpos rewrite: a layer's angle is
     teleported back to its latched value only when it deviates more than this.
     Rewriting sub-degree jostles every substep fights the GPU solver -- each
     teleport re-introduces a micro-penetration and the solver's depenetration
     expels the cube at a constant velocity (observed: the cube gliding 30+ cm
-    across the table after the flip's set-down). The layers' own joint friction
-    (20) absorbs the sub-deadband wiggle; a real turn attempt still gets clamped,
-    and the deadband stays well inside `angle_tol_deg`."""
+    across the table after the flip's set-down). The unheld slabs jitter around
+    +-1 deg from the table-contact shake (self-collisions are off), so the
+    deadband sits at 2 deg: above the jitter, below `angle_tol_deg`, and the
+    layers' own joint friction (20) absorbs the sub-deadband wiggle while a real
+    turn attempt still gets clamped."""
     angle_tol_deg: float = 4.0
     """Tolerance (deg) of a layer angle to its detent target for a plan move to count
     as executed (FaceTurn-v0 used 0.05 rad ~ 2.9 deg on the single face; a touch looser
