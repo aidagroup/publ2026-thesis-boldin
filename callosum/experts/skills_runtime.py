@@ -88,10 +88,13 @@ IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
 _ROTATOR_IK_MARGIN = 0.002
-_ROTATOR_HOVER = 0.035
+_ROTATOR_HOVER = 0.05
 """The rotator's pre-descent hover height above the layer rim. Approached with a
 loose finger-angle tolerance (the strict pose is pitch-infeasible up there);
-the drop from the hover to the rim is purely vertical."""
+the drop from the hover to the rim is purely vertical. 5 cm, not 3.5: the
+physical fingertips extend past the modelled TCP, and at the lower hover the
+sweep's open jaws rode the cube's top (gR dipping from 0.037 to 0.026) and
+dragged the hanging cube 5 cm aside."""
 """The rotator's IK keeps joints this far inside their limits instead of the
 config's 0.05: its wrist-pitch is the binding constraint of the rim grasp and
 the layer's weight is trivial, so the delta-sag-near-limits risk the margin
