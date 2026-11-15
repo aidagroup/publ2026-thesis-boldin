@@ -213,6 +213,20 @@ def test_runtime_actions_shape_and_grip_passthrough() -> None:
         np.testing.assert_allclose(arm_action[:, 5], 1.0)  # gripper open (+1)
 
 
+def test_holder_grasp_is_a_close_then_home_drag_macro() -> None:
+    """The holder's grasp ends by dragging the clamped cube back to the episode's
+    home position: a flip's set-down walks the cube 1-3 cm sideways and the
+    rotator cannot reach a displaced cube."""
+    from callosum.experts.skills_runtime import Sequence
+
+    macro = SkillsRuntime(1)._holder_primitive("grasp")
+    assert isinstance(macro, Sequence)
+    assert [child.name for child in macro.children] == ["grasp close", "grasp home"]
+    # The rotator's grasp stays a plain jaw close.
+    plain = SkillsRuntime(1)._rotator_primitive("grasp")
+    assert not isinstance(plain, Sequence)
+
+
 def test_flip_macro_sets_the_cube_down_and_retreats() -> None:
     """The flip ends by releasing the cube, un-rolling the wrist (the roll turns
     the jaw plane vertical, so the cube balances on the lower jaw like a tine --

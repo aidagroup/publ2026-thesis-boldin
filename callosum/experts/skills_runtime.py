@@ -287,6 +287,7 @@ class RuntimeView:
     base_rot: list[np.ndarray]  # (n, 3, 3) arm base rotations (world)
     cube_pos: np.ndarray  # (n, 3)
     cube_quat: np.ndarray  # (n, 4) xyzw
+    cube_home: np.ndarray | None = None  # (n, 3) the episode's initial cube position
     layer_angle: np.ndarray  # (n,) rad, angle of the current plan move's layer
     turn_target: np.ndarray  # (n,) rad, the env's authoritative target of the current move
     layer_at_target: np.ndarray  # (n,) bool, that layer within tolerance of its target
@@ -629,7 +630,26 @@ class SkillsRuntime:
         if name == "approach_body":
             return TrackPath(n, name, lambda envs: self._plan_approach(0, envs), settle=SETTLE_STEPS)
         if name == "grasp":
-            return Grip(n, name, GRIPPER_CLOSED, CLOSE_STEPS)
+            # A two-leg macro: close the jaws on the core, then DRAG the clamped
+            # cube back to the episode's home position. A flip's set-down walks
+            # the cube 1-3 cm sideways (the rolling-contact drag of the tine
+            # ride), and the rotator's wrist-pitch budget cannot reach a cube
+            # displaced from the centre -- the retarget happens at the grasp
+            # height with the table carrying the cube's weight, so the arm only
+            # overcomes sliding friction.
+            return Sequence(
+                n,
+                name,
+                [
+                    lambda: Grip(n, "grasp close", GRIPPER_CLOSED, CLOSE_STEPS),
+                    lambda: TrackPath(
+                        n,
+                        "grasp home",
+                        lambda envs_: self._plan_home_drag(envs_),
+                        settle=SETTLE_STEPS,
+                    ),
+                ],
+            )
         if name == "release":
             return Grip(n, name, GRIPPER_OPEN, CLOSE_STEPS)
         if name == "lift":
@@ -842,12 +862,28 @@ class SkillsRuntime:
         open_axis = np.cross(_UP, finger_dir)
         return fwd, grasp_finger, finger_dir, open_axis
 
-    def _holder_grasp_pose(self, envs: np.ndarray):
-        """`(tcp, finger_dir, open_axis)` of the holder clamping the core's equator."""
+    def _holder_grasp_pose(self, envs: np.ndarray, *, home: bool = False):
+        """`(tcp, finger_dir, open_axis)` of the holder clamping the core's equator.
+
+        With `home=True` the target XY is the episode's initial cube position
+        instead of the live one (the grasp macro's drag leg pulls the cube back
+        there; the Z stays live so the retarget never lifts)."""
         view = self._require_view()
         _, grasp_finger, finger_dir, open_axis = self._holder_directions(envs)
-        tcp = view.cube_pos[envs] + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger_dir
+        position = view.cube_pos[envs]
+        if home and view.cube_home is not None:
+            position = np.concatenate(
+                [view.cube_home[envs][:, :2], view.cube_pos[envs][:, 2:3]], axis=1
+            )
+        tcp = position + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger_dir
         return tcp, grasp_finger, open_axis
+
+    def _plan_home_drag(self, envs: np.ndarray):
+        """The grasp macro's `grasp home` leg: straight-line drag to the home
+        grasp pose (the jaws stay clamped; the commanded retarget is tracked at
+        the delta-limit speed, so the pull is smooth)."""
+        tcp, finger, open_axis = self._holder_grasp_pose(envs, home=True)
+        return self._plan_path_world(0, envs, tcp, finger, open_axis)
 
     def _rotator_grasp_pose(self, envs: np.ndarray):
         """`(tcp, finger_dir, open_axis)` of the rotator pinching the up layer top-down."""
