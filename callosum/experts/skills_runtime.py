@@ -685,6 +685,7 @@ class SkillsRuntime:
                         lambda envs_: self._plan_home_drag(envs_),
                         settle=SETTLE_STEPS,
                     ),
+                    lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
                 ],
             )
         raise ValueError(f"unknown holder primitive {name!r}")

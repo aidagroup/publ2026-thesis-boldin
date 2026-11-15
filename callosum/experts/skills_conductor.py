@@ -56,6 +56,11 @@ _ANGLE_TOL_DEG = 6.0  # verification window around the move target (config tol +
 _FLIP_RETRIES = 8  # flip attempts before holding anyway (the episode budget caps work)
 _GRASP_RETRIES = 8  # grasp attempts (a failed one reads as open jaws) before giving up
 _SEQ_HOLD = 2  # decisions each step of a release/retreat sequence is held
+_TINE_RIDE_Z = 0.038
+"""The cube released by the flip macro rides the holder's lower jaw ('the tine',
+the roll turns the jaw plane vertical) at z~0.046; the table rest is ~0.029.
+Below this height the cube has slid off the tine and the holder must re-grasp
+(the tine contact that keeps the layer lock open is gone with it)."""
 _NOT_HOLDING_OPENING = 0.9
 _HOLDING_OPENING_MIN = 0.1
 """A hand verifies its grasp through its own `own_gripper_opening`: fully open is
@@ -87,6 +92,7 @@ class _HandState:
         self.streak = 0  # consecutive decisions the watched partner condition held
         self.partner_hold = False  # believed state of the partner's grasp (rotator)
         self.grasp_failures = 0  # grasp attempts that ended with open jaws
+        self.via_flip = False  # serving entered after a verified flip (tine ride)
         self.step = 0  # position inside a multi-decision sequence phase
         self.seq_steps: list = []  # the pending sequence's primitive ids
         self.seq_then = "wait"  # the phase entered when the sequence completes
@@ -190,8 +196,21 @@ class SkillsConductor:
         if phase == "grasp":
             if self._timed_out(state):
                 return self._resync(state)
+            if state.done_settle >= self.settle_decisions:
+                state.via_flip = False  # a fresh clamp serves with the jaws read
             return self._after_settle(state, "serving", ids["wait"])
         if phase == "serving":
+            if state.via_flip:
+                # Serving the tine ride: the jaws are open BY DESIGN (the grip
+                # would fight the contact read). If the cube slid off the tine
+                # (its z sank to the table rest), the lock is gone -- re-grasp.
+                if float(fields["cube_position"][2]) < _TINE_RIDE_Z:
+                    if state.grasp_failures >= _GRASP_RETRIES:
+                        return ids["wait"]
+                    state.grasp_failures += 1
+                    state.via_flip = False
+                    return self._enter(state, "approach", ids["approach_body"])
+                return ids["wait"]
             if not self._holding(fields):
                 # The grasp never engaged (an injected failure leaves the jaws open)
                 # or was lost: re-approach and re-grasp instead of holding air.
@@ -216,9 +235,10 @@ class SkillsConductor:
                     # this flip's axis (the roll gate parked the macro, grip intact):
                     # the resync releases and re-approaches aimed at THIS move's axis.
                     return self._resync(state)
-                # Keep the grip: the lower leg cannot press the cube onto the table
-                # anyway (it ends holding it at the stall height), and the rotator
-                # turns the layer of the hanging cube.
+                # The macro's release leg parked the cube on the lower jaw (the
+                # tine ride): serving holds it THERE -- the contact keeps the
+                # layer lock open and the low rim is where the rotator can work.
+                state.via_flip = True
                 return self._enter(state, "serving", ids["wait"])
             return self._reselect(state)
         if phase == "seq":
@@ -260,10 +280,16 @@ class SkillsConductor:
 
         phase = state.phase
         if phase in ("wait", "done"):
-            flipping = partner in (HOLDER_ID["flip90"], HOLDER_ID["flip180"])
+            flipping = partner in (
+                HOLDER_ID["flip90"],
+                HOLDER_ID["flip180"],
+                HOLDER_ID["lift"],
+                HOLDER_ID["lower"],
+                HOLDER_ID["release"],
+            )
             if (
                 self._up_face(fields) == face
-                and not flipping  # the cube is mid-air in the holder's jaws: moving target
+                and not flipping  # the cube is in motion (flip macro or a release drop)
                 and (state.streak >= _GRASP_PARTNER_STREAK or state.partner_hold)
             ):
                 return self._enter(state, "approach", ids["approach_face"])
