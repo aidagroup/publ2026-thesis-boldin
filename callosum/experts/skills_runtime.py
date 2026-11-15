@@ -88,6 +88,10 @@ IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
 _ROTATOR_IK_MARGIN = 0.002
+_ROTATOR_HOVER = 0.035
+"""The rotator's pre-descent hover height above the layer rim. Approached with a
+loose finger-angle tolerance (the strict pose is pitch-infeasible up there);
+the drop from the hover to the rim is purely vertical."""
 """The rotator's IK keeps joints this far inside their limits instead of the
 config's 0.05: its wrist-pitch is the binding constraint of the rim grasp and
 the layer's weight is trivial, so the delta-sag-near-limits risk the margin
@@ -745,7 +749,16 @@ class SkillsRuntime:
     while another realizes the pose), so each solve retries a handful of nudged
     seeds; `ArmModel.solve` clips them into the margin-shrunk bounds itself."""
 
-    def _solve_ik(self, arm: int, envs: np.ndarray, tcp, finger, open_axis, seeds):
+    def _solve_ik(
+        self,
+        arm: int,
+        envs: np.ndarray,
+        tcp,
+        finger,
+        open_axis,
+        seeds,
+        angle_tol: float = IK_ANGLE_TOL,
+    ):
         """Batched IK to world-frame goals; returns `(qs, ok)` for the entering envs.
 
         Tries both jaw-opening signs (the jaws are symmetric) from a handful of
@@ -781,7 +794,7 @@ class SkillsRuntime:
                         seeds[i] + np.asarray(nudge),
                         margin,
                     )
-                    if pos_err < IK_POSITION_TOL and angle_err < IK_ANGLE_TOL:
+                    if pos_err < IK_POSITION_TOL and angle_err < angle_tol:
                         out[i], found = q, True
                         break
                 if found:
@@ -792,7 +805,14 @@ class SkillsRuntime:
         return out, ok
 
     def _plan_path_world(
-        self, arm: int, envs: np.ndarray, tcp, finger, open_axis, steps: int = PATH_STEPS
+        self,
+        arm: int,
+        envs: np.ndarray,
+        tcp,
+        finger,
+        open_axis,
+        steps: int = PATH_STEPS,
+        angle_tol: float = IK_ANGLE_TOL,
     ):
         """Joint waypoints moving the tool along a straight line to the goal pose."""
         q_start = self.cmd.q[arm][envs]
@@ -807,7 +827,7 @@ class SkillsRuntime:
             f_k /= np.maximum(np.linalg.norm(f_k, axis=1, keepdims=True), 1e-9)
             o_k = start_o + (np.asarray(open_axis) - start_o) * t
             o_k /= np.maximum(np.linalg.norm(o_k, axis=1, keepdims=True), 1e-9)
-            q_new, ok_k = self._solve_ik(arm, envs, tcp_k, f_k, o_k, q_prev)
+            q_new, ok_k = self._solve_ik(arm, envs, tcp_k, f_k, o_k, q_prev, angle_tol)
             paths[:, k - 1] = q_new
             ok &= ok_k
             q_prev = np.where(ok_k[:, None], q_new, q_prev)
@@ -903,26 +923,17 @@ class SkillsRuntime:
         return tcp, finger, open_axis
 
     def _plan_approach(self, arm: int, envs: np.ndarray):
-        """`approach_body` / `approach_face`: backoff leg then the descent to the grasp."""
+        """`approach_body` / `approach_face`: the sweep leg then the descent to the grasp."""
         if arm == 0:
             tcp, finger, open_axis = self._holder_grasp_pose(envs)
             backoff = tcp - HOLDER_BACKOFF * finger + HOLDER_LIFT * _UP
-        else:
-            tcp, finger, open_axis = self._rotator_grasp_pose(envs)
-            # LATERAL backoff, not straight up: a vertical-finger pose 4 cm above
-            # the rim is pitch-infeasible across the rotator's whole workspace
-            # (workspace-mapped on the A40 probe: the straight-up backoff fails
-            # everywhere, a 1.5 cm up + 3 cm toward-base backoff solves everywhere
-            # the grasp itself does). The descent then comes in diagonally from
-            # outside the cube, jaws open toward it.
-            backoff = tcp + 0.015 * _UP - 0.03 * self._horizontal_unit(1, envs)
-        pre, ok_pre = self._plan_path_world(arm, envs, backoff, finger, open_axis)
-        # The descent starts where the backoff leg ends (chained, like the expert's paths).
-        saved = self.cmd.q[arm][envs].copy()
-        self.cmd.q[arm][envs] = pre[:, -1]
-        grasp, ok_grasp = self._plan_path_world(arm, envs, tcp, finger, open_axis)
-        self.cmd.q[arm][envs] = saved
-        return np.concatenate([pre, grasp], axis=1), ok_pre & ok_grasp
+            pre, ok_pre = self._plan_path_world(arm, envs, backoff, finger, open_axis)
+            # The descent starts where the backoff leg ends (chained, like the expert's paths).
+            saved = self.cmd.q[arm][envs].copy()
+            self.cmd.q[arm][envs] = pre[:, -1]
+            grasp, ok_grasp = self._plan_path_world(arm, envs, tcp, finger, open_axis)
+            self.cmd.q[arm][envs] = saved
+            return np.concatenate([pre, grasp], axis=1), ok_pre & ok_grasp
 
     def _plan_vertical(self, arm: int, envs: np.ndarray, height: float):
         """`lift` / `lower` (and the flip macro's lift/lower legs): straight vertical."""
