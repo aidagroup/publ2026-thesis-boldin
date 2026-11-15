@@ -165,12 +165,20 @@ class FaceTurnSkills(TwoSO101Base):
     # --- action space: the menu the policies see; the joints underneath --------------------
 
     @property
+    @property
     def action_space(self):
         """The advertised Dict-of-Discrete skill space; the parent's joint Box space
         while the substep machinery runs (it receives the runtime's delta actions)."""
         if self._advertise_joint_actions:
-            return super().action_space
+            return self._base_action_space
         return self._skill_action_space
+
+    @action_space.setter
+    def action_space(self, value):
+        # The base constructor ASSIGNS the agent's joint Box space here before our
+        # machinery exists; keep it for the substep fallback (`_base_action_space`) --
+        # the advertised space is always derived, never this stored value directly.
+        self._base_action_space = value
 
     # --- scene ----------------------------------------------------------------------------
 
