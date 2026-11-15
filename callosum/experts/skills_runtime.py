@@ -86,7 +86,7 @@ LIFT_HEIGHT = 0.04  # the `lift` primitive's rise (a preparation hold, not a fli
 IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
-_ROTATOR_IK_MARGIN = 0.01
+_ROTATOR_IK_MARGIN = 0.005
 """The rotator's IK keeps joints this far inside their limits instead of the
 config's 0.05: its wrist-pitch is the binding constraint of the rim grasp and
 the layer's weight is trivial, so the delta-sag-near-limits risk the margin
@@ -853,15 +853,20 @@ class SkillsRuntime:
         arm only swings it laterally), re-centring it for the rotator, whose
         vertical-finger reach ends a couple of cm off centre.
 
-        PURE TRANSLATION: the goal keeps the live (rolled) tool orientation --
-        aiming at the natural grasp axes instead would un-roll the wrist WITH
-        the cube in the jaws and undo the flip (observed: up L -> D, the cube
-        tumbling out of the grip)."""
+        PURE TRANSLATION with the live (rolled) tool orientation -- aiming at
+        the natural grasp axes instead would un-roll the wrist with the cube in
+        the jaws and undo the flip (observed: up L -> D, the cube tumbling out
+        of the grip). The target TCP places the CUBE (not the TCP) at home: the
+        cube hangs at `tcp - GRASP_Z*UP + GRASP_OFFSET*finger`, so parking the
+        TCP at home XY alone left the cube a grasp-offset (~2 cm) away along the
+        finger -- right where the rotator's reach ends."""
         view = self._require_view()
         q = self.cmd.q[0][envs]
         tcp, finger, open_axis = self._tool_world(0, q, envs)
-        tcp = tcp.copy()
-        tcp[:, :2] = view.cube_home[envs][:, :2] if view.cube_home is not None else tcp[:, :2]
+        if view.cube_home is not None:
+            goal = view.cube_home[envs].copy()
+            goal[:, 2] = tcp[:, 2] - HOLDER_GRASP_Z  # keep the live height, no lift/drop
+            tcp = goal + HOLDER_GRASP_Z * _UP - HOLDER_GRASP_OFFSET * finger
         return self._plan_path_world(0, envs, tcp, finger, open_axis)
 
     def _rotator_grasp_pose(self, envs: np.ndarray):
