@@ -293,14 +293,20 @@ class Sequence(Primitive):
 
     def __init__(self, n: int, name: str, child_factories: list) -> None:
         super().__init__(n, name)
-        self.child_factories = child_factories
-        self.children: list[Primitive] = []
+        # Children are built ONCE: rebuilding them on a later start() would wipe the
+        # per-env state of envs that are mid-flight in a later stage (their paths
+        # would become None and the next step would crash). Planning from the live
+        # state happens inside each child's own `start(envs)` for the entering envs.
+        self.children: list[Primitive] = [factory() for factory in child_factories]
         self.stage = np.zeros(n, dtype=int)
 
     def start(self, ctx: Context, arm: int, envs: np.ndarray) -> np.ndarray:
-        self.children = [factory() for factory in self.child_factories]
         self.stage[envs] = 0
-        return self.children[0].start(ctx, arm, envs)
+        ok = np.asarray(self.children[0].start(ctx, arm, envs), dtype=bool)
+        # Park envs whose first leg could not plan past the last stage (done,
+        # holding) -- the runtime falls them back to `wait`.
+        self.stage[np.asarray(envs)[~ok]] = len(self.children)
+        return ok
 
     def step(self, ctx: Context, arm: int, envs: np.ndarray) -> np.ndarray:
         active = np.zeros(self.n, dtype=bool)
