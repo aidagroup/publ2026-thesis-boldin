@@ -68,13 +68,12 @@ grasp pose unreachable for this base layout), but it tilts the lower jaw like a
 10 deg incline: during the flip's set-down ride the cube slides 2.5+ cm down it,
 past the success position tolerance. The macro therefore LEVELS the tine (a
 small pitch-up at constant TCP) right after the release, before the unroll."""
-ROTATOR_TILT = np.deg2rad(4)  # rotator fingers this far off vertical, towards the cube
-"""The tilt must thread a needle: 6 deg (the FaceTurn expert's value) makes the
-rim-depth descent demand ~7 deg more wrist pitch than the joint has (the
-descent stalled 1.7 cm above the layer rim and only the fingertip tips caught
-it -- a tip pinch cannot transmit the turn torque), 0 deg makes even the
-backoff pose unreachable. 4 deg plus the rotator's tighter IK margin and the
-slightly shallower rim target covers the demand."""
+ROTATOR_TILT = np.deg2rad(2)  # rotator fingers this far off vertical, towards the cube
+"""The tilt must thread a needle: at 4+ deg the finger lean demands more wrist
+pitch than the joint has, and the IK's angle error at the rim-depth waypoints
+sits at ~8.7 deg -- past the 8 deg tolerance (the position still solves to
+0.1 mm; only the lean fails) -- while 0 deg makes even the backoff pose
+unreachable. 2 deg plus the rotator's near-zero IK margin threads it."""
 ROTATOR_GRASP_Z = 0.022  # TCP height above the cube centre: upper half of the rim
 # (the rim spans hs-t .. hs above the centre; 0.022 bites its top 6.5 mm, a
 # trade of pinch depth for wrist-pitch reach -- see ROTATOR_TILT)
@@ -86,7 +85,7 @@ LIFT_HEIGHT = 0.04  # the `lift` primitive's rise (a preparation hold, not a fli
 IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
-_ROTATOR_IK_MARGIN = 0.005
+_ROTATOR_IK_MARGIN = 0.002
 """The rotator's IK keeps joints this far inside their limits instead of the
 config's 0.05: its wrist-pitch is the binding constraint of the rim grasp and
 the layer's weight is trivial, so the delta-sag-near-limits risk the margin
