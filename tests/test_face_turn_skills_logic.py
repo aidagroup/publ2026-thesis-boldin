@@ -64,7 +64,7 @@ def test_config_defaults_match_the_specs() -> None:
         ({"angle_tol_deg": 0.0}, "angle_tol_deg"),
         ({"lock_write_tol_deg": 5.0}, "lock_write_tol_deg"),
         ({"lock_pull_step_deg": 0.0}, "lock_pull_step_deg"),
-        ({"lock_pull_step_deg": 2.0}, "lock_pull_step_deg"),
+        ({"lock_pull_step_deg": 4.0}, "lock_pull_step_deg"),
         ({"body_pos_tol": 0.0}, "body_pos_tol"),
         ({"body_settle_qvel": -1.0}, "body_settle_qvel"),
         (lambda: {"reward": SkillsRewardConfig(success_bonus=-1.0)}, "success_bonus"),
