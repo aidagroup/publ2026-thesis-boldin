@@ -65,12 +65,13 @@ class FaceTurnSkillsConfig:
     """Simulation substeps per decision (one env.step). ~10 steps ~ 0.5 s (design
     decision 5). The episode limit is counted in decisions, not substeps."""
 
-    max_episode_decisions: int = 70
-    """Episode budget in decisions. The spec's orientation is 60-80 (the scripted
-    conductor needs ~30 decisions per plan move incl. flips and re-grasps); 70 is the
-    registered default and the `time_fraction` observation denominator. NOTE:
-    `gym.make(..., max_episode_steps=...)` only rewraps the outer TimeLimit -- to
-    change this internal budget pass
+    max_episode_decisions: int = 150
+    """Episode budget in decisions (one decision = `decision_period` sim substeps).
+    Measured on the A40 probe: one primitive leg (approach/lift/roll) costs ~150-300
+    substeps at the delta-limit speed, so a plan move WITHOUT a flip is ~35 decisions
+    and WITH a flip ~60; E1 (1 move, flip possible) needs ~700 substeps, E2 (2-3
+    moves) ~1200. NOTE: `gym.make(..., max_episode_steps=...)` only rewraps the outer
+    TimeLimit (decision-level); to change this internal budget pass
     `skills_config=FaceTurnSkillsConfig(max_episode_decisions=...)`."""
 
     # --- plan input ----------------------------------------------------------------------
