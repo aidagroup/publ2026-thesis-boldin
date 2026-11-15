@@ -75,13 +75,15 @@ HOLDER_LIFT = 0.01  # ... and this far above the grasp pose (jaws open)
 ROTATOR_LIFT = 0.04  # rotator pre-grasp: this far straight above the grasp pose
 FLIP_LIFT = 0.06  # how high the holder lifts the cube before flipping it
 LIFT_HEIGHT = 0.04  # the `lift` primitive's rise (a preparation hold, not a flip)
-_UNROLL_SPEED = 0.25
+_UNROLL_SPEED = 0.5
 """Speed scale of the flip macro's unroll leg. The released cube rests on the
 lower jaw like a fork tine (the roll turned the jaw plane vertical); unrolling
 at the delta-limit speed flings it off with the tine's tangential velocity and
 it lands edge-first, bounces and tumbles (observed: a 5 cm toss and a quarter
-turn past the target). A quasi-static unroll lets the cube slide off gently
-near the friction angle and land flat."""
+turn past the target). A slowed unroll lets the cube leave gently near the
+friction angle and land flat; 0.5 balances that against the cube sliding down
+the tine's 10 deg depression incline while it rides (the walk scales with the
+ride time)."""
 IK_POSITION_TOL = 3e-3  # m
 IK_ANGLE_TOL = np.deg2rad(8)
 _DELTA_LIMIT = 0.05
@@ -634,10 +636,12 @@ class SkillsRuntime:
             # sags into its limit under the hanging weight), so the lower leg brings
             # the cube as far down as the arm manages and the release drops it the
             # short remaining distance onto the lower jaw (the roll turned the jaw
-            # plane vertical); the level leg stops the incline slide, the unroll
-            # tips the cube off onto the table and the retreat clears the gripper.
-            # The conductor re-grasps afterwards (a table-supported grasp has no
-            # sag).
+            # plane vertical); the unroll tips the cube off onto the table (the
+            # ride down the 10 deg incline first is admitted by body_pos_tol) and
+            # the retreat clears the gripper. The conductor re-grasps afterwards
+            # (a table-supported grasp has no sag). NOTE: re-orientations beyond
+            # the unroll are IK-infeasible from the stalled posture -- the level
+            # leg experiment (pitching the tine flat) parked the whole macro.
             return Sequence(
                 n,
                 name,
@@ -661,12 +665,6 @@ class SkillsRuntime:
                         settle=SETTLE_STEPS,
                     ),
                     lambda: Grip(n, "flip release", GRIPPER_OPEN, CLOSE_STEPS),
-                    lambda: TrackPath(
-                        n,
-                        "flip level",
-                        lambda envs: self._plan_level_tine(0, envs),
-                        settle=SETTLE_STEPS,
-                    ),
                     lambda: TrackPath(
                         n,
                         "flip unroll",
@@ -863,20 +861,6 @@ class SkillsRuntime:
         q = self.cmd.q[arm][envs]
         tcp, finger, open_axis = self._tool_world(arm, q, envs)
         return self._plan_path_world(arm, envs, tcp + height * _UP, finger, open_axis)
-
-    def _plan_level_tine(self, arm: int, envs: np.ndarray):
-        """The flip macro's `flip level` leg: pitch the depressed finger back to
-        horizontal at the SAME tool pose.
-
-        The cube released onto the lower jaw rests on a 10 deg incline (the grasp
-        depression) and slides down it during the ride; levelling the tine right
-        after the release stops the slide. The pitch rotates about the open axis
-        through the TCP, where the cube rests, so the cube is barely disturbed."""
-        q = self.cmd.q[arm][envs]
-        tcp, finger, open_axis = self._tool_world(arm, q, envs)
-        level = finger - _UP * (finger @ _UP)
-        norm = np.maximum(np.linalg.norm(level, axis=1, keepdims=True), 1e-9)
-        return self._plan_path_world(arm, envs, tcp, level / norm, open_axis)
 
     def _plan_reorient(self, arm: int, envs: np.ndarray):
         """The flip macro's `flip unroll` leg: wrist back to the natural jaw

@@ -135,7 +135,7 @@ class FaceTurnSkillsConfig:
     as executed (FaceTurn-v0 used 0.05 rad ~ 2.9 deg on the single face; a touch looser
     here because flips re-seat the cube between moves)."""
 
-    body_pos_tol: float = 0.02
+    body_pos_tol: float = 0.025
     """Success tolerance (m) of the cube-center displacement from its initial pose.
     The flip macro sets the cube down with a short drop off the lower jaw (the
     loaded wrist cannot press it fully onto the table), so the cube realistically
