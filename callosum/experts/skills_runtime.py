@@ -909,7 +909,13 @@ class SkillsRuntime:
             backoff = tcp - HOLDER_BACKOFF * finger + HOLDER_LIFT * _UP
         else:
             tcp, finger, open_axis = self._rotator_grasp_pose(envs)
-            backoff = tcp + ROTATOR_LIFT * _UP
+            # LATERAL backoff, not straight up: a vertical-finger pose 4 cm above
+            # the rim is pitch-infeasible across the rotator's whole workspace
+            # (workspace-mapped on the A40 probe: the straight-up backoff fails
+            # everywhere, a 1.5 cm up + 3 cm toward-base backoff solves everywhere
+            # the grasp itself does). The descent then comes in diagonally from
+            # outside the cube, jaws open toward it.
+            backoff = tcp + 0.015 * _UP - 0.03 * self._horizontal_unit(1, envs)
         pre, ok_pre = self._plan_path_world(arm, envs, backoff, finger, open_axis)
         # The descent starts where the backoff leg ends (chained, like the expert's paths).
         saved = self.cmd.q[arm][envs].copy()
@@ -925,14 +931,16 @@ class SkillsRuntime:
         return self._plan_path_world(arm, envs, tcp + height * _UP, finger, open_axis)
 
     def _plan_retreat(self, arm: int, envs: np.ndarray):
-        """`retreat`: back along the approach and up (holder), or straight up (rotator)."""
+        """`retreat`: back along the approach and up (holder), or up-and-away
+        (rotator -- lateral like its approach backoff: straight-up poses above
+        the rim are pitch-infeasible for it)."""
         q = self.cmd.q[arm][envs]
         tcp, finger, open_axis = self._tool_world(arm, q, envs)
         if arm == 0:
             _, grasp_finger, finger_dir, open_axis = self._holder_directions(envs)
             goal = tcp - HOLDER_BACKOFF * finger_dir + HOLDER_LIFT * _UP
             return self._plan_path_world(arm, envs, goal, grasp_finger, open_axis)
-        goal = tcp + ROTATOR_LIFT * _UP
+        goal = tcp + 0.015 * _UP - 0.03 * self._horizontal_unit(1, envs)
         return self._plan_path_world(arm, envs, goal, finger, open_axis)
 
     def _plan_wrist_roll(self, arm: int, envs: np.ndarray, quarter_turns: int):
