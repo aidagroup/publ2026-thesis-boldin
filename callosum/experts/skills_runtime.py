@@ -68,7 +68,12 @@ grasp pose unreachable for this base layout), but it tilts the lower jaw like a
 10 deg incline: during the flip's set-down ride the cube slides 2.5+ cm down it,
 past the success position tolerance. The macro therefore LEVELS the tine (a
 small pitch-up at constant TCP) right after the release, before the unroll."""
-ROTATOR_TILT = np.deg2rad(6)  # rotator fingers this far off vertical, towards the cube
+ROTATOR_TILT = np.deg2rad(0)  # rotator fingers point straight down
+"""Vertical fingers: the 6 deg inward tilt of the FaceTurn expert consumed the
+rotator's wrist-pitch joint -- the rim-depth descent needs ~7 deg more pitch
+than the (margin-shrunk) joint limit has, so the descent stalled 1.7 cm above
+the layer rim and only the fingertip tips caught it (a tip pinch cannot
+transmit the turn torque; the rim slips out, gR -> 0, angle unmoved)."""
 ROTATOR_GRASP_Z = 0.018  # TCP height above the cube centre: mid of the up layer (hs - t/2)
 HOLDER_BACKOFF = 0.03  # pre-grasp: this far back along the approach direction ...
 HOLDER_LIFT = 0.01  # ... and this far above the grasp pose (jaws open)
