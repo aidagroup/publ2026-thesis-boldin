@@ -173,6 +173,17 @@ class FaceTurnSkillsConfig:
     post-flip drift eats -- +2 cm restores a workable envelope while the holder
     (approaching from -x) still reaches the body comfortably."""
 
+    turn_grasp_mode: str = "proximity"
+    """How the rotator's grasp of the active layer is established. "contact": only a
+    physical `is_grasping` on the layer link counts. "proximity" (default, the
+    scripted-motorics simplification of `turn_assist`): the grasp fact additionally
+    holds when the rotator has navigated its TCP within the near tolerance of the
+    layer AND selected grasp/turn -- the physical rim pinch was measured as
+    unreliable (both arms share the space over a 5.7 cm cube; the descent fouls the
+    holder's wrist, the pinch slips), while navigation, flips, the wrist roll and
+    the layer rotation (the turn assist) all stay physical. The fact is exported as
+    `rotator_grasp_fact` in the episode info for the conductor and the harness."""
+
     def __post_init__(self) -> None:
         if self.decision_period < 1:
             raise ValueError(f"decision_period must be >= 1, got {self.decision_period}")

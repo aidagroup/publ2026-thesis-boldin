@@ -104,6 +104,12 @@ INFO_SUCCESS = "success"
 INFO_TIME_TO_SUCCESS = "time_to_success_steps"
 """int per env: sim steps until success (0 / absent while not successful)."""
 
+INFO_ROTATOR_GRASP_FACT = "rotator_grasp_fact"
+"""bool per env: the env's authoritative rotator-grasp fact (contact OR, in the
+`turn_grasp_mode="proximity"` simplification, an established proximity pinch --
+see `FaceTurnSkillsConfig.turn_grasp_mode`). The conductor prefers this over the
+jaw-opening band; the evaluation harness may score grasp timing from it."""
+
 INFO_USELESS_HOLDER = "useless_action_holder"
 INFO_USELESS_ROTATOR = "useless_action_rotator"
 """bool per env per decision: the agent's choice was physically pointless at the

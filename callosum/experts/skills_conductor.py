@@ -32,6 +32,7 @@ from callosum.envs._skills import HOLDER_PRIMITIVES, ROTATOR_PRIMITIVES, Role, n
 from callosum.envs._skills_obs import (
     INFO_ACTIVE_LAYER_ANGLE_DEG,
     INFO_PRIMITIVE_HOLDER,
+    INFO_ROTATOR_GRASP_FACT,
     own_block_slices,
 )
 from callosum.experts.skills_runtime import (
@@ -153,12 +154,17 @@ class SkillsConductor:
     def _up_face(self, fields: dict) -> str:
         return up_face_from_quat(fields["cube_orientation_quat"])
 
-    def _holding(self, fields: dict) -> bool:
+    def _holding(self, fields: dict, info: dict | None = None) -> bool:
         """Whether this hand's own jaws read as clamping something (proprioception).
 
         Clamped on the slab the normalized opening settles around 0.8; an injected
         failure leaves the jaws open (1.0) and a grasp that missed its target closes
-        fully on air (0.0) -- only the in-between band counts as a hold."""
+        fully on air (0.0) -- only the in-between band counts as a hold. With the
+        proximity grasp fact present in `info` (the env's
+        `turn_grasp_mode="proximity"` simplification) THAT is authoritative: a
+        navigated proximity pinch counts as holding regardless of the band."""
+        if info is not None and INFO_ROTATOR_GRASP_FACT in info:
+            return bool(info[INFO_ROTATOR_GRASP_FACT])
         opening = float(fields["own_gripper_opening"][0])
         return _HOLDING_OPENING_MIN < opening <= _NOT_HOLDING_OPENING
 
@@ -277,7 +283,7 @@ class SkillsConductor:
             return self._after_settle(state, "grasp", ids["grasp"])
         if phase == "grasp":
             if state.done_settle >= self.settle_decisions:
-                if not self._holding(fields):
+                if not self._holding(fields, info):
                     # The jaws missed the layer (fully closed on air reads 0.0) or
                     # never closed (an injected failure reads fully open): retry.
                     return self._resync(state)

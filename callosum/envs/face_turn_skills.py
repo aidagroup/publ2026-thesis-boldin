@@ -61,6 +61,7 @@ from callosum.envs._skills_obs import (
     INFO_PLAN_INDEX,
     INFO_PRIMITIVE_HOLDER,
     INFO_PRIMITIVE_ROTATOR,
+    INFO_ROTATOR_GRASP_FACT,
     INFO_SUCCESS,
     INFO_TIME_TO_SUCCESS,
     INFO_USELESS_HOLDER,
@@ -322,6 +323,9 @@ class FaceTurnSkills(TwoSO101Base):
 
     _TURN_IDS = frozenset(
         p.index for p in ROTATOR_PRIMITIVES if p.name in ("turn90", "turn180")
+    )
+    _ROTATOR_GRASPISH_IDS = frozenset(
+        p.index for p in ROTATOR_PRIMITIVES if p.name in ("grasp", "turn90", "turn180")
     )
 
     def _turn_assist(self) -> None:
@@ -606,6 +610,13 @@ class FaceTurnSkills(TwoSO101Base):
         )
         if self.skills_config.plan_length > 0:
             face = self._face_tensor()
+            proximity = self.skills_config.turn_grasp_mode == "proximity"
+            selections_rot = (
+                self._runtime.selections()[1]
+                if proximity
+                else None
+            )
+            _GRASPISH = self._ROTATOR_GRASPISH_IDS
             for face_idx in torch.unique(face):
                 mask = face == face_idx
                 link = self._active_layer_link(int(face_idx))
@@ -613,6 +624,15 @@ class FaceTurnSkills(TwoSO101Base):
                 rotator_near |= mask & (
                     torch.linalg.norm(self.agent_b.tcp_pos - link.pose.p, dim=1) < _NEAR_TOL
                 )
+                if proximity:
+                    # The scripted-motorics proximity pinch (see
+                    # `turn_grasp_mode`): navigating near the layer with a
+                    # grasp/turn selected establishes the grasp fact; contact
+                    # above still qualifies on its own.
+                    pinching = np.isin(selections_rot, _GRASPISH)
+                    rotator_grasp |= mask & rotator_near & torch.as_tensor(
+                        pinching, device=self.device
+                    )
         up_is_move = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if self.skills_config.plan_length > 0:
             quat = self.cube.pose.q.cpu().numpy()
@@ -766,6 +786,7 @@ class FaceTurnSkills(TwoSO101Base):
 
     def evaluate(self):
         cfg = self.skills_config
+        facts_rotator_grasp = self._decision_facts().rotator_grasp
         done = self._plan_index >= cfg.plan_length
         pos_drift = torch.linalg.norm(self.cube.pose.p - self.body_init_pos, dim=1)
         layer_speed = self.cube.get_qvel().abs().max(dim=1).values
@@ -793,6 +814,9 @@ class FaceTurnSkills(TwoSO101Base):
             ),
             INFO_ACTIVE_LAYER_ANGLE_DEG: torch.rad2deg(self._active_layer_angle()),
             INFO_PLAN_INDEX: self._plan_index,
+            INFO_ROTATOR_GRASP_FACT: torch.as_tensor(
+                facts_rotator_grasp, device=self.device
+            ),
         }
 
     def compute_dense_reward(self, obs, action: torch.Tensor, info: dict):
