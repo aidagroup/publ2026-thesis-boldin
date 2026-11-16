@@ -41,7 +41,7 @@ N_HOLDER, N_ROTATOR = num_primitives(Role.HOLDER), num_primitives(Role.ROTATOR)
 
 def test_config_defaults_match_the_specs() -> None:
     cfg = FaceTurnSkillsConfig()
-    assert cfg.decision_period == 20
+    assert cfg.decision_period == 10
     assert 100 <= cfg.max_episode_decisions <= 200
     assert cfg.partner_mode == "none"
     assert cfg.plan_length == 1  # E1
