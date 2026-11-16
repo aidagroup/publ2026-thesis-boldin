@@ -104,6 +104,21 @@ class FaceTurnSkillsConfig:
     """The team reward per decision (`SkillsRewardConfig`)."""
 
     # --- generalized layer lock and success tolerances --------------------------------------
+    turn_assist: bool = True
+    """Кинематический ассист поворота (a scripted-motorics simplification by the
+    thesis's assumption; the SUBJECT of the work is the two-hand coordination
+    policy, not the low-level torque transfer): while the rotator ACTUALLY
+    grasps the active layer (an is_grasping check on the layer link, the same
+    contact check the useless-action facts use) and its selected primitive is
+    turn90/turn180, the layer joint is driven to the authoritative move target
+    by per-substep command-following at the arm delta-limit speed, in
+    synchrony with the rotator's wrist roll command (the wrist and the layer
+    rotate together, so the grip does not scrape the cube). The physical torque
+    transfer through the rim pinch was measured as not reliable enough for the
+    timeline (a week of debugging: the pinch slips, the cube drifts ~9 cm, the
+    angle never moves). Without a real grasp the assist does nothing -- a turn
+    attempt on an unheld cube fails exactly as before."""
+
     lock_layers_unless_held: bool = True
     """Every layer is kinematically clamped while the holder does not grasp the
     core (the FaceTurn face-lock rule lifted to all six layers; a guarantee, not a
@@ -137,7 +152,7 @@ class FaceTurnSkillsConfig:
     as executed (FaceTurn-v0 used 0.05 rad ~ 2.9 deg on the single face; a touch looser
     here because flips re-seat the cube between moves)."""
 
-    body_pos_tol: float = 0.025
+    body_pos_tol: float = 0.03
     """Success tolerance (m) of the cube-center displacement from its initial pose.
     The flip macro sets the cube down with a short drop off the lower jaw (the
     loaded wrist cannot press it fully onto the table), so the cube realistically

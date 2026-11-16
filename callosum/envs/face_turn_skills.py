@@ -51,6 +51,7 @@ from callosum.envs._face_lock import update_face_lock
 from callosum.envs._multi_face_cube import build_multi_face_cube
 from callosum.envs._plans import FACES
 from callosum.envs._skills import (
+    ROTATOR_PRIMITIVES,
     Role,
     num_primitives,
     sample_episode_randomization,
@@ -307,6 +308,62 @@ class FaceTurnSkills(TwoSO101Base):
         for link in self.cube.links:
             held = held | self.agent_a.is_grasping(link)
         return held
+
+    _TURN_IDS = frozenset(
+        p.index for p in ROTATOR_PRIMITIVES if p.name in ("turn90", "turn180")
+    )
+
+    def _turn_assist(self) -> None:
+        """Kinematic turn assist -- see `FaceTurnSkillsConfig.turn_assist` for the
+        rationale (scripted motorics by the thesis's assumption; the coordination
+        policy is the subject, the physical rim-pinch torque transfer was measured
+        as unreliable: the grip slips and the cube drifts ~9 cm without the face
+        ever turning). ACTIVE ONLY ON A REAL GRASP: per env, the rotator's
+        selected primitive must be turn90/turn180 AND `is_grasping` must hold on
+        the active layer link (the same contact check the useless-action facts
+        use) -- otherwise nothing happens and a turn on an unheld cube fails as
+        before. The layer joint then follows the authoritative move target at the
+        arm delta-limit speed, one commanded step per substep, in synchrony with
+        the rotator's wrist roll command (the wrist and the layer rotate
+        together, so the jaws do not scrape the rim).
+
+        TODO(review): GPU path follows the same fetch/apply pattern as the layer
+        lock (unverified on the dev machine, no GPU there).
+        """
+        if not (self.skills_config.turn_assist and self.skills_config.plan_length):
+            return
+        selections = self._runtime.selections()[1]
+        turning = np.isin(selections, tuple(self._TURN_IDS))
+        if not turning.any():
+            return
+        # A real grasp of the ACTIVE layer only (like the useless-action facts).
+        turning_t = torch.as_tensor(turning, device=self.device)
+        face = self._face_tensor()
+        grasping = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        for face_idx in torch.unique(face[turning_t]):
+            mask = turning_t & (face == face_idx)
+            grasping |= mask & self.agent_b.is_grasping(self._active_layer_link(int(face_idx)))
+        active = turning_t & grasping & (self._plan_index < self.skills_config.plan_length)
+        if not bool(active.any()):
+            return
+        angle = self._active_layer_angle()
+        delta = (self._move_target - angle).clamp(-ARM_DELTA_LIMIT, ARM_DELTA_LIMIT)
+        qpos = self.cube.get_qpos()
+        qvel = self.cube.get_qvel()
+        cols = torch.as_tensor([self.layer_col[f] for f in FACES], device=self.device)[face]
+        sel = active.nonzero(as_tuple=True)[0]
+        qpos[sel, cols[sel]] += delta[sel]
+        qvel[sel, cols[sel]] = 0.0
+        if self.gpu_sim_enabled:
+            px = self.scene.px
+            px.gpu_fetch_articulation_qpos()
+            px.gpu_fetch_articulation_qvel()
+        self.cube.set_qpos(qpos)
+        self.cube.set_qvel(qvel)
+        if self.gpu_sim_enabled:
+            px.gpu_apply_articulation_qpos()
+            px.gpu_apply_articulation_qvel()
+            px.gpu_update_articulation_kinematics()
 
     def _before_control_step(self):
         # Clamp every layer while the holder does not grasp the core (the FaceTurn
@@ -601,6 +658,7 @@ class FaceTurnSkills(TwoSO101Base):
                 fresh = latched & (self._latched_time < 0)
                 self._latched_success |= latched
                 self._latched_time[fresh] = _sub_info[INFO_TIME_TO_SUCCESS][fresh]
+            self._turn_assist()
             self._runtime.substep(self._view())
             self._advance_plan()
             self._last_selections = self._runtime.selections()
