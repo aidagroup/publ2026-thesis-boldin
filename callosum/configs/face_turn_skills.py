@@ -61,13 +61,13 @@ class FaceTurnSkillsConfig:
     """
 
     # --- decision timing -----------------------------------------------------------------
-    decision_period: int = 20
-    """Simulation substeps per decision (one env.step). ~20 steps ~ 1 s: the A40
-    probe measured a primitive leg at 150-300 substeps (the wrist carries the
-    cube's weight during a flip and sags to a fraction of the delta-limit speed),
-    so a 0.5 s decision cadence spent most of its budget inside one leg's travel;
-    1 s keeps several decisions per leg while a 150-decision episode still spans
-    the full plan. The episode limit is counted in decisions, not substeps."""
+    decision_period: int = 10
+    """Simulation substeps per decision (one env.step). ~10 steps ~ 0.5 s: the
+    primitive legs (150-300 substeps) keep several decisions per travel, AND the
+    conductor's partner-hold logic counts DECISIONS of consecutive `grasp`
+    selections -- at 20 the whole grasp closes within 2 decisions and the rotator's
+    hold-belief streak never arms (regression of 3a75d81, seen as the rotator
+    waiting through the whole episode). The episode limit is in decisions."""
 
     max_episode_decisions: int = 150
     """Episode budget in decisions (one decision = `decision_period` sim substeps).
