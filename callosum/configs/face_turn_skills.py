@@ -166,6 +166,13 @@ class FaceTurnSkillsConfig:
     evaluation (the layers carry the whole articulation's readable velocity state;
     TODO(review): replace with the root link's twist read on the GPU backend)."""
 
+    cube_home_x: float = 0.02
+    """Bias of the cube home (spawn AND the post-flip drag-home target) toward the
+    rotator (+x). The rim-grasp IK of the rotator solves only from cube x >= -0.04
+    (workspace-mapped on the pod); a centred home leaves ~2 cm of margin that the
+    post-flip drift eats -- +2 cm restores a workable envelope while the holder
+    (approaching from -x) still reaches the body comfortably."""
+
     def __post_init__(self) -> None:
         if self.decision_period < 1:
             raise ValueError(f"decision_period must be >= 1, got {self.decision_period}")

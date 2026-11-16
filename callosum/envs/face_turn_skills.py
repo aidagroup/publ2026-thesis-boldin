@@ -243,6 +243,17 @@ class FaceTurnSkills(TwoSO101Base):
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         # Places both arms and the cube root (upright, jittered) -- the parent's reset.
         super()._initialize_episode(env_idx, options)
+        # Bias the cube home toward the rotator (see FaceTurnSkillsConfig.cube_home_x):
+        # applied right after the parent's centred placement, BEFORE body_init_pos is
+        # latched below, so the spawn AND the post-flip drag-home target both carry it.
+        if self.skills_config.cube_home_x:
+            from mani_skill.utils.structs.pose import Pose
+
+            shifted = self.cube.pose.p[env_idx].clone()
+            shifted[:, 0] += self.skills_config.cube_home_x
+            self.cube.set_pose(
+                Pose.create_from_pq(p=shifted, q=self.cube.pose.q[env_idx])
+            )
         cfg = self.skills_config
         b = len(env_idx)
         n = self.num_envs
