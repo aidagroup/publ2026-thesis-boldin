@@ -1,19 +1,27 @@
-"""Config and CLI of the continuous-wrench IPPO trainer (PLAN.md step 2, `wrench_ppo`).
+"""Config and CLI of the continuous-wrench IPPO trainer (PLAN.md steps 2 and 3, `wrench_ppo`).
 
 The reduced model (`CubeWrench-v0`) is CPU-only MuJoCo, so its trainer is a small
 CPU-side IPPO: two independent Gaussian policies (holder, rotator) on one shared team
 reward, a Python-loop vectorisation of the single-instance env, clipped PPO updates,
 TensorBoard logs, greedy evaluation and `latest.pt` checkpoints with `--resume`.
 
+Step 3 adds the `predicted` ablation arm on top of the env's `none`/`oracle` partner
+visibility: with `use_bijepa=True` the env stays at `partner_mode="none"` (no privileged
+partner block) and each policy additionally receives the Bi-JEPA predicted partner latent
+`ẑ_j`, so its input width is `obs_size("none") + latent_dim` (26 + 32 = 58 by default)
+instead of 26/35. The Bi-JEPA module itself is trained by an auxiliary latent loss in
+`callosum.training.wrench_ppo`; its hyperparameters are flattened into this dataclass (one
+CLI flag each) because the shared argparse helper only supports scalar fields.
+
 This module is pure stdlib on purpose (same rule as `callosum.configs.wrench_cube` and
 `callosum.envs._wrench_logic`): the config must import and validate on macOS/CI, where the
 sandbox extra (mujoco) is absent, so every trainer flag is testable without the simulator.
 Torch is imported only by `callosum.training.wrench_ppo`.
 
-The field groups follow the plan's step-2 description: the run identity, the environment /
-rollout shape, the PPO hyperparameters, and the logging / evaluation / checkpointing
-cadence. The recommended ranges of the plan are 64-256 envs and 32-128 rollout control
-steps; the validation below only enforces the hard sanity conditions, so a small
+The field groups follow the plan's step-2/3 description: the run identity, the environment /
+rollout shape, the Bi-JEPA block, the PPO hyperparameters, and the logging / evaluation /
+checkpointing cadence. The recommended ranges of the plan are 64-256 envs and 32-128 rollout
+control steps; the validation below only enforces the hard sanity conditions, so a small
 `--num-envs 8` server smoke run stays possible.
 """
 
@@ -22,7 +30,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from callosum.configs._cli import build_dataclass_parser
+from callosum.configs.bijepa import BiJEPAConfig
 from callosum.envs._wrench_logic import PARTNER_MODES, obs_size, validate_partner_mode
+
+INPUT_MODES = ("none", "oracle", "predicted")
+"""Policy-input modes: the env's partner visibility (`none`, `oracle`) plus the Bi-JEPA
+`predicted` mode, which keeps the env at `partner_mode="none"` and appends the predicted
+partner latent to the agent's own observation."""
 
 
 @dataclass
@@ -53,14 +67,39 @@ class WrenchPPOConfig:
 
     # --- Environment / rollout ------------------------------------------------------------
     partner_mode: str = "none"
-    """Partner-visibility mode of the env: "none" (control) or "oracle" (upper bound); it
-    also fixes the policy input width (`obs_size(partner_mode)`: 26 or 35)."""
+    """Partner-visibility mode of the *env*: "none" (control) or "oracle" (upper bound); it
+    also fixes the env observation width (`obs_size(partner_mode)`: 26 or 35). The third
+    ablation arm, `predicted`, is not an env mode: it is `partner_mode="none"` plus
+    `use_bijepa=True` (see :attr:`input_mode`)."""
     num_envs: int = 128
     """Envs stepped in one Python loop per control step (the plan's training range is
     64-256; the vectorisation is a loop, see `callosum.training._vec_wrench`)."""
     rollout_steps: int = 64
     """Control steps per env per update (the plan's range is 32-128). One update therefore
     consumes `num_envs * rollout_steps` transitions."""
+
+    # --- Bi-JEPA (`predicted` input mode) ---------------------------------------------------
+    use_bijepa: bool = False
+    """Train the Bi-JEPA auxiliary objective and feed `ẑ_partner` to both policies
+    (`input_mode="predicted"`). Requires `partner_mode="none"`: the policy input becomes the
+    agent's own 26-d observation plus `latent_dim` latent values (58 by default), and the env
+    never receives the privileged partner block. `False` keeps the `none`/`oracle` baselines
+    and their checkpoints bit-for-bit unchanged."""
+    latent_dim: int = 32
+    """Width `d` of the Bi-JEPA latent, i.e. of the extra policy input under `predicted`."""
+    history_len: int = 1
+    """Length `K` of the own observation/latent history window feeding the partner predictor
+    (`1` = the current latent only; `K > 1` uses a rolling window, reset at episode ends)."""
+    aux_coef: float = 0.1
+    """Weight of the Bi-JEPA auxiliary loss added to the trainer's objective each update."""
+    ema_momentum: float = 0.99
+    """EMA momentum of the target encoder (`target <- m * target + (1 - m) * online`)."""
+    var_weight: float = 1.0
+    """VICReg-style variance-hinge coefficient on the online latents (anti-collapse)."""
+    cov_weight: float = 0.04
+    """VICReg-style covariance-penalty coefficient on the online latents (anti-collapse)."""
+    var_target: float = 1.0
+    """Target per-dim latent std of the variance hinge (a floor, not an inflation force)."""
 
     # --- PPO ------------------------------------------------------------------------------
     gamma: float = 0.99
@@ -148,6 +187,19 @@ class WrenchPPOConfig:
             )
         if not self.device:
             raise ValueError("device must be a non-empty torch device string")
+        # The `predicted` input is defined on top of the unprivileged `none` observation: the
+        # `oracle` env already exposes the partner block, so combining both would leak the
+        # ground truth through the env input and make the ablation uninterpretable.
+        if self.use_bijepa and self.partner_mode != "none":
+            raise ValueError(
+                "use_bijepa=True requires partner_mode='none' (the oracle env already "
+                f"exposes the partner block), got partner_mode={self.partner_mode!r}"
+            )
+        if self.aux_coef < 0:
+            raise ValueError(f"aux_coef must be >= 0, got {self.aux_coef}")
+        # Delegates the latent/history/EMA/regulariser validation to the Bi-JEPA config, so an
+        # invalid value is rejected here (before the trainer builds the module).
+        self.bijepa_config()
         # The batch layout: `ppo_update` normalises advantages per minibatch and needs the
         # rollout to split into equal minibatches (a one-sample minibatch has an undefined
         # advantage std).
@@ -180,10 +232,44 @@ class WrenchPPOConfig:
         return self.batch_size * self.total_updates
 
     @property
-    def obs_size(self) -> int:
-        """Width of one agent's flat observation under `partner_mode` (26 for none, 35 for
-        oracle)."""
+    def env_obs_size(self) -> int:
+        """Width of one agent's flat *env* observation under `partner_mode` (26 none, 35 oracle)."""
         return obs_size(self.partner_mode)
+
+    @property
+    def obs_size(self) -> int:
+        """Backward-compatible alias of :attr:`env_obs_size` (the env observation width).
+
+        The *policy* input width is :attr:`policy_input_size`, which is `obs_size + latent_dim`
+        under `predicted`; the env (and its checkpoints' `obs_size` key) keeps this value.
+        """
+        return self.env_obs_size
+
+    @property
+    def policy_input_size(self) -> int:
+        """Width of one policy's input: env observation plus the predicted latent if enabled."""
+        return self.env_obs_size + (self.latent_dim if self.use_bijepa else 0)
+
+    @property
+    def input_mode(self) -> str:
+        """The run's policy-input mode: `"predicted"` with Bi-JEPA, else the env partner mode."""
+        return "predicted" if self.use_bijepa else self.partner_mode
+
+    def bijepa_config(self) -> BiJEPAConfig:
+        """The Bi-JEPA hyperparameters this trainer instantiation builds.
+
+        Only the fields that matter for a PPO run are exposed on `WrenchPPOConfig`; the
+        encoder/predictor widths, activation, layer norm, sharing and target kind keep the
+        module's own defaults (`callosum.configs.bijepa.BiJEPAConfig`).
+        """
+        return BiJEPAConfig(
+            latent_dim=self.latent_dim,
+            history_len=self.history_len,
+            ema_momentum=self.ema_momentum,
+            var_weight=self.var_weight,
+            cov_weight=self.cov_weight,
+            var_target=self.var_target,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:

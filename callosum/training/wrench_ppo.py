@@ -1,11 +1,12 @@
-"""Continuous-wrench IPPO trainer for CubeWrench-v0 (PLAN.md step 2, `wrench_ppo`).
+"""Continuous-wrench IPPO trainer for CubeWrench-v0 (PLAN.md steps 2 and 3, `wrench_ppo`).
 
 Two independent PPO learners -- one Gaussian actor-critic per role (`holder`, `rotator`) --
 share one environment step and one **team** reward, so the coordination has to be learned
-from the decentralised observations alone (the `none` / `oracle` ablation of the plan).
-The env (`callosum.envs.wrench_cube.WrenchCubeEnv`) is single-instance MuJoCo on the CPU,
-so the vectorisation is a Python loop: `callosum.training._vec_wrench.VecWrenchCube`
-drives `num_envs` copies with auto-reset and the finished-episode statistics.
+from the decentralised observations alone (the `none` / `oracle` / `predicted` ablation of
+the plan). The env (`callosum.envs.wrench_cube.WrenchCubeEnv`) is single-instance MuJoCo on
+the CPU, so the vectorisation is a Python loop:
+`callosum.training._vec_wrench.VecWrenchCube` drives `num_envs` copies with auto-reset and
+the finished-episode statistics.
 
 Reused from `callosum.training._ppo_core` (the ManiSkill PPO baseline's blocks, shared with
 the arms IPPO trainer): `ActorCritic` (3 x 256 tanh MLPs, state-independent log-std),
@@ -14,6 +15,15 @@ wrench-specific contract around them:
 
 * the policy input is the env's flat observation, width `obs_size(partner_mode)` (26 for
   `none`, 35 for `oracle`), and the action is the normalized 6D wrench of the role;
+* under `predicted` (`use_bijepa=True`) the env stays at `partner_mode="none"` and the policy
+  input becomes `[own observation (26), ẑ_partner (latent_dim, 32)]` = 58: the agent predicts
+  its partner's latent from its OWN observation history (`LatentInputBuilder` ->
+  `BiJEPA.encode` + `BiJEPA.predict_partner`, no partner observation), so the policy is still
+  trained on a decentralised input. The Bi-JEPA encoder/predictor are trained by an auxiliary
+  latent MSE + VICReg terms (`compute_aux_loss`, EMA target, stop-gradient) with their own
+  Adam optimizer, `aux_coef * loss` per update, then `update_target()`; the trainer logs
+  `aux/*`, `latent/std`, `latent/effective_rank` and a held-out linear-probe quality of `ẑ_j`
+  (`callosum.training._bijepa_probe.ridge_probe`);
 * GAE bootstraps only on time-limit truncations: success and failure are true terminals,
   so the shared success bonus is not fed back through `V(final observation)`
   (`compute_advantages`);
@@ -22,18 +32,21 @@ wrench-specific contract around them:
   the value/advantage streams are per agent);
 * logs `train/return`, `train/success_rate`, `train/episode_len` over the episodes that
   finished in the rollout, greedy `eval/*` every `eval_every` updates, and writes full
-  `latest.pt` checkpoints (weights + Adam moments + config + counters + torch RNG) that
-  `--resume` restores.
+  `latest.pt` checkpoints (weights + Adam moments + config + counters + torch RNG + the
+  Bi-JEPA module and its optimizer under `predicted`) that `--resume` restores.
 
 The module deliberately imports torch but not mujoco at module level: the vec env is
-imported inside `run()`, so `tests/test_wrench_ppo.py` (config validation, GAE, policy
-shapes, one PPO step, checkpoint roundtrip) runs on macOS/CI without the `sandbox` extra.
+imported inside `run()`, so `tests/test_wrench_ppo.py` and `tests/test_wrench_ppo_bijepa.py`
+(policy shapes, aux loss/gradients, the probe, checkpoint roundtrip, a toy-vec training
+smoke) run on macOS/CI without the `sandbox` extra.
 
 Typical use (RunPod GPU pod, MuJoCo on the CPU; CPU simulation also works on a laptop but
 the plan forbids training there):
 
     python -m callosum.training.wrench_ppo --partner-mode oracle --seed 0 \
         --exp-name wrench_oracle_s0 --total-updates 300
+    python -m callosum.training.wrench_ppo --partner-mode none --use-bijepa --seed 0 \
+        --exp-name wrench_pred_s0 --total-updates 300
 
 `--resume runs/<exp>` continues a killed run from its `latest.pt` (the saved config wins,
 so the hyperparameters cannot drift between restarts). SIGTERM saves a checkpoint after the
@@ -53,9 +66,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch import nn
 
-from callosum.configs.wrench_ppo import WrenchPPOConfig, parse_args
+from callosum.agents.bijepa import BiJEPA, latent_stats
+from callosum.configs.wrench_ppo import INPUT_MODES, WrenchPPOConfig, parse_args
 from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
+from callosum.training._bijepa_probe import ridge_probe
 from callosum.training._metrics import MetricLogger
 from callosum.training._ppo_core import ActorCritic, compute_gae, ppo_update
 
@@ -69,23 +85,140 @@ _WRENCH_SIZE = 6
 # --- policies -----------------------------------------------------------------------------
 
 
-def make_policies(partner_mode: str, device: torch.device | str = "cpu") -> list[ActorCritic]:
+def make_policies(
+    partner_mode: str, device: torch.device | str = "cpu", *, latent_dim: int = 0
+) -> list[ActorCritic]:
     """One independent Gaussian actor-critic per role, in `AGENT_KEYS` order.
 
-    The input width is `callosum.envs._wrench_logic.obs_size(partner_mode)` -- the env's
-    flat observation for that mode (26 for `none`, 35 for `oracle`) -- and the output is
-    the role's normalized 6D wrench. Sharing no parameters is what makes the pair an
-    IPPO-style decentralised team rather than a single joint policy.
+    The input width is `callosum.envs._wrench_logic.obs_size(partner_mode) + latent_dim`: the
+    env's flat observation for that mode (26 for `none`, 35 for `oracle`) plus the predicted
+    partner latent appended under `predicted` (`latent_dim=cfg.latent_dim`, so 26 + 32 = 58).
+    The output is the role's normalized 6D wrench. Sharing no parameters is what makes the
+    pair an IPPO-style decentralised team rather than a single joint policy.
 
     Args:
-        partner_mode: Env partner-visibility mode fixing the observation width.
+        partner_mode: Env partner-visibility mode fixing the env observation width.
         device: Torch device of both policies.
+        latent_dim: Width of the appended Bi-JEPA predicted latent (`0` for the `none` /
+            `oracle` baselines).
 
     Returns:
         `[holder_policy, rotator_policy]`.
     """
-    input_size = obs_size(partner_mode)
+    input_size = obs_size(partner_mode) + latent_dim
     return [ActorCritic(input_size, _WRENCH_SIZE).to(device) for _ in AGENT_KEYS]
+
+
+def make_bijepa(cfg: WrenchPPOConfig, device: torch.device | str = "cpu") -> BiJEPA | None:
+    """Build the Bi-JEPA module of a `predicted` run (`None` for the `none`/`oracle` modes).
+
+    Both roles observe the same env width under `none`, so the module gets the same
+    `obs_dim` twice; its per-agent encoders/predictors stay separate
+    (`cfg.bijepa_config()` keeps `BiJEPAConfig`'s defaults: separate encoders, EMA targets,
+    VICReg-style variance/covariance terms).
+    """
+    if not cfg.use_bijepa:
+        return None
+    return BiJEPA(cfg.bijepa_config(), cfg.env_obs_size, cfg.env_obs_size).to(device)
+
+
+def make_bijepa_optimizer(
+    cfg: WrenchPPOConfig, bijepa: BiJEPA | None
+) -> torch.optim.Optimizer | None:
+    """Adam over the online encoders/predictors of `bijepa` (`None` without Bi-JEPA).
+
+    The EMA target encoders have `requires_grad=False` and are not passed to the optimizer;
+    `BiJEPA.trainable_parameters()` already excludes them.
+    """
+    if bijepa is None:
+        return None
+    return torch.optim.Adam(bijepa.trainable_parameters(), lr=cfg.learning_rate, eps=1e-5)
+
+
+class LatentInputBuilder:
+    """Builds the `predicted` policy input `[own env observation, ẑ_partner]`.
+
+    The partner latent is predicted from the agent's OWN observation history only
+    (`BiJEPA.encode` of the own window -> `BiJEPA.predict_partner`), never from the partner's
+    observation -- so the policy cannot see the ground-truth partner block of the `oracle`
+    mode even when the environment knows it. The policy's own part is the last row of the
+    history, i.e. the current env observation.
+
+    Every method runs under `torch.no_grad()`: the produced latent is a fixed feature of the
+    observation for the PPO update (like the env observation itself), and the encoder /
+    predictor are trained by the separate Bi-JEPA auxiliary loss (`aux_update`).
+
+    The history is a `(num_envs, history_len, obs_dim)` rolling window per role. An episode
+    boundary (the done flag of the step that just ended) resets the affected envs' windows to
+    repetitions of the fresh observation, so a predictor with `history_len > 1` never mixes
+    latents of two episodes.
+    """
+
+    def __init__(self, bijepa: BiJEPA, device: torch.device | str = "cpu") -> None:
+        """Wrap a trained-in-training Bi-JEPA module; `history_len`/`latent_dim` come from it."""
+        self.bijepa = bijepa
+        self.device = torch.device(device)
+        self.history_len = bijepa.cfg.history_len
+        self.obs_dim = bijepa.obs_dims[0]
+        self.latent_dim = bijepa.cfg.latent_dim
+        self.history: dict[str, torch.Tensor] = {}
+
+    @property
+    def input_size(self) -> int:
+        """Width of one built policy input (`obs_dim + latent_dim`, 58 by default)."""
+        return self.obs_dim + self.latent_dim
+
+    @torch.no_grad()
+    def reset(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Start a new rollout: every history window is `history_len` copies of `obs`."""
+        self.history = {
+            name: obs[name].unsqueeze(1).repeat(1, self.history_len, 1) for name in AGENT_KEYS
+        }
+        return self._augment(self.history)
+
+    @torch.no_grad()
+    def step(self, obs: dict[str, torch.Tensor], done: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Advance the history by `obs` (resetting the `done` envs) and return new inputs.
+
+        Args:
+            obs: The next observation per role, `(num_envs, obs_dim)`; for `done` envs it is
+                the fresh first observation of the auto-reset episode.
+            done: `(num_envs,)` 0/1 flags of the step that just finished.
+        """
+        self.history = self._rolled(obs, done)
+        return self._augment(self.history)
+
+    @torch.no_grad()
+    def history_inputs(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Inputs as if `obs` came next, WITHOUT committing it to the history.
+
+        Used for the GAE truncation bootstrap: `result.final_obs` is the true last observation
+        of the episode, so its value must be computed from the history window ending at it.
+        """
+        return self._augment(self._rolled(obs, None))
+
+    def _rolled(
+        self, obs: dict[str, torch.Tensor], done: torch.Tensor | None
+    ) -> dict[str, torch.Tensor]:
+        """Shift every history window by one observation (episode-resetting `done` envs)."""
+        rolled: dict[str, torch.Tensor] = {}
+        for name in AGENT_KEYS:
+            window = torch.cat([self.history[name][:, 1:, :], obs[name].unsqueeze(1)], dim=1)
+            if done is not None:
+                mask = done.bool().view(-1, 1, 1)
+                fresh = obs[name].unsqueeze(1).expand(-1, self.history_len, -1)
+                window = torch.where(mask, fresh, window)
+            rolled[name] = window
+        return rolled
+
+    def _augment(self, history: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """`[last own observation, predicted partner latent]` for every role."""
+        inputs: dict[str, torch.Tensor] = {}
+        for index, name in enumerate(AGENT_KEYS):
+            z_hist = self.bijepa.encode(history[name], index)
+            z_hat = self.bijepa.predict_partner(z_hist, index)
+            inputs[name] = torch.cat([history[name][:, -1, :], z_hat], dim=-1)
+        return inputs
 
 
 # --- GAE / PPO ----------------------------------------------------------------------------
@@ -179,12 +312,17 @@ def evaluate_greedy(
     *,
     device: torch.device | str = "cpu",
     seed: int = 0,
+    bijepa: BiJEPA | None = None,
 ) -> EvalSummary:
     """Run the deterministic policies in `vec` until `episodes` episodes finish.
 
     The actions are the distribution means (clipped to the `[-1, 1]` wrench box) -- the
     greedy evaluation the plan asks for -- and the env is the same `CubeWrench-v0` with the
     same randomisation as training, so the number is comparable with `train/*`.
+
+    With `bijepa` (the `predicted` input mode) the policies are fed the exact same
+    `[own observation, ẑ_partner]` construction as in training (`LatentInputBuilder` from
+    the agent's own observation history, no ground-truth partner data).
 
     Args:
         policies: `[holder_policy, rotator_policy]`.
@@ -194,11 +332,14 @@ def evaluate_greedy(
         episodes: Number of finished episodes to collect.
         device: Torch device of the policies.
         seed: Base episode seed of the evaluation.
+        bijepa: The `predicted` run's Bi-JEPA module, or `None` for `none`/`oracle`.
 
     Returns:
         The aggregated `EvalSummary`.
     """
     obs = _to_torch(vec.reset(seed=seed), device)
+    builder = LatentInputBuilder(bijepa, device) if bijepa is not None else None
+    inputs = builder.reset(obs) if builder is not None else obs
     max_steps = (episodes // int(vec.num_envs) + 2) * int(vec.config.max_control_steps)
     successes: list[bool] = []
     returns: list[float] = []
@@ -213,10 +354,16 @@ def evaluate_greedy(
             )
         actions = {}
         for name, policy in zip(AGENT_KEYS, policies):
-            action = policy.get_action(obs[name], deterministic=True)
+            action = policy.get_action(inputs[name], deterministic=True)
             actions[name] = torch.clamp(action, -1.0, 1.0).cpu().numpy()
         result = vec.step(actions)
         obs = _to_torch(result.obs, device)
+        if builder is not None:
+            done = torch.as_tensor(result.terminated, device=device, dtype=torch.bool)
+            done = done | torch.as_tensor(result.truncated, device=device, dtype=torch.bool)
+            inputs = builder.step(obs, done.float())
+        else:
+            inputs = obs
         successes.extend(result.finished_successes)
         returns.extend(result.finished_returns)
         lengths.extend(result.finished_lengths)
@@ -243,6 +390,154 @@ class EvalSummary:
     mean_length: float
 
 
+# --- Bi-JEPA auxiliary loss (`predicted`) -------------------------------------------------
+
+
+def compute_aux_loss(
+    bijepa: BiJEPA,
+    cfg: WrenchPPOConfig,
+    obs_hist_a: torch.Tensor,
+    obs_hist_b: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Weighted Bi-JEPA auxiliary loss over one rollout batch, both directions.
+
+    "Bi" is `BiJEPA.forward_both`: the holder predicts the rotator's latent and the rotator
+    predicts the holder's, each from its own observation history; the target is the partner's
+    latent through its EMA target encoder (stop-gradient), so no gradient reaches the partner
+    observation or the target encoders.
+
+    Args:
+        bijepa: The online Bi-JEPA module.
+        cfg: The run config (only `aux_coef` is read here).
+        obs_hist_a: Holder own-observation history `(B, K, obs_dim)` of the rollout.
+        obs_hist_b: Rotator own-observation history `(B, K, obs_dim)` of the rollout.
+
+    Returns:
+        A flat tensor dict: `loss` = `aux_coef * (mse + var + cov)` (the tensor to
+        `backward()`), `mse` / `var` / `cov` = the mean scalar terms, `mse_a` / `mse_b` = the
+        per-direction latents MSE, and the per-direction online self latents, predictions and
+        stop-grad targets (`z_self_*`, `z_pred_*`, `z_target_*`) for the logger/probe.
+    """
+    out = bijepa.forward_both(obs_hist_a, obs_hist_b)
+    a, b = out["a"], out["b"]
+    return {
+        "loss": cfg.aux_coef * out["loss"],
+        "mse": 0.5 * (a["loss_pred"] + b["loss_pred"]),
+        "var": 0.5 * (a["loss_var"] + b["loss_var"]),
+        "cov": 0.5 * (a["loss_cov"] + b["loss_cov"]),
+        "mse_a": a["loss_pred"],
+        "mse_b": b["loss_pred"],
+        "z_self_a": a["z_self"],
+        "z_self_b": b["z_self"],
+        "z_pred_a": a["z_partner_pred"],
+        "z_pred_b": b["z_partner_pred"],
+        "z_target_a": a["z_partner_target"],
+        "z_target_b": b["z_partner_target"],
+    }
+
+
+@torch.no_grad()
+def probe_predictions(
+    terms: dict[str, torch.Tensor],
+    obs_hist_a: torch.Tensor,
+    obs_hist_b: torch.Tensor,
+) -> dict[str, float]:
+    """Held-out linear-probe quality of the predicted partner latents (`aux/probe/*` scalars).
+
+    Two probes per direction (`_bijepa_probe.ridge_probe`, train/test split inside):
+
+    * `wrench_*`: `ẑ_j` -> the partner's current commanded 6D wrench (the first six fields of
+      the partner's own observation) -- the interpretable "does the prediction carry the
+      partner's action" number for the report;
+    * `latent_*`: `ẑ_j` -> the partner's stop-grad target latent -- the auxiliary objective
+      itself, in the same units as the training curves.
+
+    Args:
+        terms: Output of :func:`compute_aux_loss` (detached use only).
+        obs_hist_a: Holder own-observation history `(B, K, obs_dim)`.
+        obs_hist_b: Rotator own-observation history `(B, K, obs_dim)`.
+
+    Returns:
+        Mean over the two directions of `mse`, `r2` and `baseline_mse` per probe family.
+        The rows of one rollout are temporally correlated, so the held-out split is not a
+        fully independent test: treat `r2` as an optimistic but consistently comparable
+        quality signal, not as an unbiased generalisation estimate.
+    """
+    wrench = {"a": obs_hist_b[:, -1, :_WRENCH_SIZE], "b": obs_hist_a[:, -1, :_WRENCH_SIZE]}
+    wrench_rows = [
+        ridge_probe(terms[f"z_pred_{direction}"], wrench[direction]) for direction in ("a", "b")
+    ]
+    latent_rows = [
+        ridge_probe(terms[f"z_pred_{direction}"], terms[f"z_target_{direction}"])
+        for direction in ("a", "b")
+    ]
+    metrics: dict[str, float] = {}
+    for prefix, rows in (("wrench", wrench_rows), ("latent", latent_rows)):
+        for key in ("mse", "r2", "baseline_mse"):
+            metrics[f"aux/probe/{prefix}_{key}"] = float(np.mean([row[key] for row in rows]))
+    return metrics
+
+
+def aux_update(
+    bijepa: BiJEPA,
+    optimizer: torch.optim.Optimizer,
+    cfg: WrenchPPOConfig,
+    obs_hist_a: torch.Tensor,
+    obs_hist_b: torch.Tensor,
+) -> dict[str, float]:
+    """One Bi-JEPA auxiliary optimiser step + EMA target update; returns logged scalars.
+
+    The policy optimizers never see these parameters: the encoders/predictors are trained only
+    by this loss, and the produced `ẑ_j` is a fixed policy input (see `LatentInputBuilder`).
+
+    Args:
+        bijepa: The online Bi-JEPA module.
+        optimizer: Its Adam (built from `bijepa.trainable_parameters()`).
+        cfg: The run config (`aux_coef`, `max_grad_norm`).
+        obs_hist_a: Holder own-observation history `(B, K, obs_dim)` of the rollout.
+        obs_hist_b: Rotator own-observation history `(B, K, obs_dim)` of the rollout.
+
+    Returns:
+        TensorBoard-ready floats: `aux/loss`, `aux/mse`, `aux/var`, `aux/cov`, the
+        per-direction `aux/mse_a`/`aux/mse_b`, `latent/std`, `latent/std_min`,
+        `latent/effective_rank` and the probe block (`aux/probe/*`).
+
+    Raises:
+        FloatingPointError: if a loss/metric is not finite (same guard as the PPO step).
+    """
+    terms = compute_aux_loss(bijepa, cfg, obs_hist_a, obs_hist_b)
+    optimizer.zero_grad(set_to_none=True)
+    terms["loss"].backward()
+    nn.utils.clip_grad_norm_(bijepa.trainable_parameters(), cfg.max_grad_norm)
+    optimizer.step()
+    bijepa.update_target()
+
+    metrics = {
+        "aux/loss": float(terms["loss"].detach()),
+        "aux/mse": float(terms["mse"].detach()),
+        "aux/var": float(terms["var"].detach()),
+        "aux/cov": float(terms["cov"].detach()),
+        "aux/mse_a": float(terms["mse_a"].detach()),
+        "aux/mse_b": float(terms["mse_b"].detach()),
+    }
+    bad = [tag for tag, value in metrics.items() if not np.isfinite(value)]
+    if bad:
+        raise FloatingPointError(f"non-finite Bi-JEPA loss at this update: {bad} ({metrics})")
+    with torch.no_grad():
+        z_self = torch.cat(
+            [
+                terms["z_self_a"].reshape(-1, bijepa.cfg.latent_dim),
+                terms["z_self_b"].reshape(-1, bijepa.cfg.latent_dim),
+            ]
+        )
+    stats = latent_stats(z_self)
+    metrics["latent/std"] = stats["std_mean"]
+    metrics["latent/std_min"] = stats["std_min"]
+    metrics["latent/effective_rank"] = stats["eff_rank"]
+    metrics.update(probe_predictions(terms, obs_hist_a, obs_hist_b))
+    return metrics
+
+
 # --- checkpoints --------------------------------------------------------------------------
 
 
@@ -254,13 +549,19 @@ def save_checkpoint(
     update: int,
     global_step: int,
     eval_metrics: dict[str, float] | None = None,
+    *,
+    bijepa: BiJEPA | None = None,
+    bijepa_optimizer: torch.optim.Optimizer | None = None,
 ) -> None:
     """Write the full training state to `path` atomically.
 
     The payload holds both policies' weights, both Adam states, the config (so `--resume`
     cannot run with drifted hyperparameters), the update / environment-step counters and the
-    torch RNG state. A kill mid-write cannot corrupt the file: it is written to
-    `<path>.tmp` and renamed.
+    torch RNG state. A `predicted` run additionally stores the Bi-JEPA module (encoders,
+    predictors and the EMA target encoders) and its optimizer under `bijepa` /
+    `bijepa_optimizer`, plus the policy input metadata (`input_mode`, `policy_input_size`,
+    `latent_dim`) the evaluator needs. A kill mid-write cannot corrupt the file: it is written
+    to `<path>.tmp` and renamed.
 
     Args:
         path: Destination file (normally `<run dir>/latest.pt`).
@@ -270,6 +571,8 @@ def save_checkpoint(
         update: Number of completed updates (1-based).
         global_step: Environment steps consumed so far.
         eval_metrics: The latest greedy evaluation, for the checkpoint's `eval` block.
+        bijepa: The run's Bi-JEPA module (only for `use_bijepa=True` runs).
+        bijepa_optimizer: Its Adam optimizer, restored by `--resume`.
     """
     payload = {
         "format": CHECKPOINT_FORMAT,
@@ -280,11 +583,19 @@ def save_checkpoint(
         "config": dataclasses.asdict(cfg),
         "obs_size": cfg.obs_size,
         "partner_mode": cfg.partner_mode,
+        "input_mode": cfg.input_mode,
+        "policy_input_size": cfg.policy_input_size,
+        "use_bijepa": cfg.use_bijepa,
+        "latent_dim": cfg.latent_dim,
         "update": int(update),
         "global_step": int(global_step),
         "eval": {key: float(value) for key, value in (eval_metrics or {}).items()},
         "rng": {"torch": torch.get_rng_state()},
     }
+    if bijepa is not None:
+        payload["bijepa"] = bijepa.state_dict()
+    if bijepa_optimizer is not None:
+        payload["bijepa_optimizer"] = bijepa_optimizer.state_dict()
     path = Path(path)
     tmp = path.with_name(path.name + ".tmp")
     torch.save(payload, tmp)
@@ -311,6 +622,142 @@ def load_optimizers(payload: dict, optimizers: list[torch.optim.Optimizer]) -> N
         optimizer.load_state_dict(payload["optimizers"][name])
 
 
+def load_bijepa_weights(payload: dict, bijepa: BiJEPA) -> None:
+    """Load a `predicted` checkpoint's Bi-JEPA module (online + EMA target encoders)."""
+    if payload.get("bijepa") is None:
+        raise ValueError(
+            "checkpoint has no Bi-JEPA weights; it was not trained with use_bijepa=True"
+        )
+    bijepa.load_state_dict(payload["bijepa"])
+
+
+def load_bijepa_optimizer(payload: dict, optimizer: torch.optim.Optimizer) -> None:
+    """Load the Bi-JEPA optimizer state of a `predicted` checkpoint."""
+    if payload.get("bijepa_optimizer") is None:
+        raise ValueError("checkpoint has no Bi-JEPA optimizer state")
+    optimizer.load_state_dict(payload["bijepa_optimizer"])
+
+
+# --- checkpoint / input-mode compatibility -------------------------------------------------
+
+
+def env_partner_mode(input_mode: str) -> str:
+    """The env's partner-visibility mode a policy input mode runs on.
+
+    `predicted` is a *policy input* mode: the env itself stays unprivileged
+    (`partner_mode="none"`), so the agent cannot see the partner block it is asked to predict.
+    `none` and `oracle` are env modes and map onto themselves.
+
+    Raises:
+        ValueError: if `input_mode` is not one of `callosum.configs.wrench_ppo.INPUT_MODES`.
+    """
+    if input_mode not in INPUT_MODES:
+        raise ValueError(f"input_mode must be one of {INPUT_MODES}, got {input_mode!r}")
+    return "none" if input_mode == "predicted" else input_mode
+
+
+def checkpoint_latent_dim(payload: dict) -> int:
+    """The Bi-JEPA latent width recorded in a checkpoint (config fallback: 32)."""
+    if payload.get("latent_dim") is not None:
+        return int(payload["latent_dim"])
+    config = payload.get("config") or {}
+    if config.get("latent_dim") is not None:
+        return int(config["latent_dim"])
+    return 32
+
+
+def check_checkpoint_compat(payload: dict, input_mode: str) -> tuple[str, int]:
+    """Validate a checkpoint against a requested policy input mode.
+
+    The evaluator calls this before building anything, so a wrong `--input-mode` fails with a
+    readable error instead of a shape mismatch deep in the policy forward pass. Old
+    (`format 1`, pre-Bi-JEPA) checkpoints are accepted: they record `partner_mode` and
+    `obs_size` but no `input_mode`, and their policy width is the env observation width.
+
+    Args:
+        payload: A `load_checkpoint` payload.
+        input_mode: One of `INPUT_MODES`.
+
+    Returns:
+        `(env partner mode, latent width)` -- the env mode to construct and the extra policy
+        input width (`0` outside `predicted`).
+
+    Raises:
+        ValueError: on any mismatch between the checkpoint and the requested mode.
+    """
+    env_mode = env_partner_mode(input_mode)
+    saved_input = payload.get("input_mode")
+    if saved_input is not None and saved_input != input_mode:
+        raise ValueError(
+            f"checkpoint was made with input_mode={saved_input!r}, this run uses "
+            f"{input_mode!r}: the policy input differs"
+        )
+    saved_partner = payload.get("partner_mode")
+    if saved_partner is not None and saved_partner != env_mode:
+        raise ValueError(
+            f"checkpoint was made with partner_mode={saved_partner!r}, input_mode "
+            f"{input_mode!r} needs partner_mode={env_mode!r}"
+        )
+    expected_obs = obs_size(env_mode)
+    saved_obs = payload.get("obs_size")
+    if saved_obs is not None and int(saved_obs) != expected_obs:
+        raise ValueError(
+            f"checkpoint policies take observations of width {saved_obs} but partner_mode "
+            f"{env_mode!r} observations are {expected_obs} wide"
+        )
+    has_bijepa = payload.get("bijepa") is not None
+    if input_mode == "predicted":
+        if not has_bijepa:
+            raise ValueError(
+                "checkpoint has no Bi-JEPA weights: it was not trained with use_bijepa=True; "
+                "evaluate it with --input-mode none/oracle"
+            )
+        latent_dim = checkpoint_latent_dim(payload)
+    else:
+        if has_bijepa:
+            raise ValueError(
+                "checkpoint contains Bi-JEPA weights: evaluate it with --input-mode predicted"
+            )
+        latent_dim = 0
+    expected_input = expected_obs + latent_dim
+    saved_input_size = payload.get("policy_input_size")
+    if saved_input_size is not None and int(saved_input_size) != expected_input:
+        raise ValueError(
+            f"checkpoint policies take inputs of width {saved_input_size} but input_mode "
+            f"{input_mode!r} gives {expected_input} ({expected_obs} env obs + "
+            f"{latent_dim} latent)"
+        )
+    return env_mode, latent_dim
+
+
+def config_from_payload(payload: dict) -> WrenchPPOConfig:
+    """The run config saved in a checkpoint payload.
+
+    New (`use_bijepa` etc.) fields fall back to their dataclass defaults when an older
+    checkpoint's config dict predates them, which keeps the `none`/`oracle` checkpoints of the
+    step-2 trainer loadable.
+    """
+    field_names = {field.name for field in dataclasses.fields(WrenchPPOConfig)}
+    values = {key: value for key, value in payload["config"].items() if key in field_names}
+    return WrenchPPOConfig(**values)
+
+
+def _check_resumed_state(payload: dict, cfg: WrenchPPOConfig) -> None:
+    """Refuse to resume a checkpoint into an incompatible input mode / policy width."""
+    saved_use_bijepa = bool(payload.get("use_bijepa", False))
+    if saved_use_bijepa != cfg.use_bijepa:
+        raise ValueError(
+            f"checkpoint use_bijepa={saved_use_bijepa} but the run config has "
+            f"use_bijepa={cfg.use_bijepa}: the policy input width differs "
+            f"({payload.get('policy_input_size')} vs {cfg.policy_input_size})"
+        )
+    saved_input = payload.get("input_mode")
+    if saved_input is not None and saved_input != cfg.input_mode:
+        raise ValueError(
+            f"checkpoint input_mode={saved_input!r} but the run config uses {cfg.input_mode!r}"
+        )
+
+
 # --- training -----------------------------------------------------------------------------
 
 
@@ -318,6 +765,10 @@ def run(cfg: WrenchPPOConfig) -> Path:
     """Train (or continue with `cfg.resume`) and return the run directory."""
     from callosum.training._vec_wrench import VecWrenchCube
 
+    # The policies are tiny MLPs; on a many-core server the default thread pool
+    # oversubscribes and makes the env loop 30x slower (measured on 96-core RunPod).
+    # One thread per training process; run seeds as separate processes.
+    torch.set_num_threads(int(os.environ.get("WRENCH_TORCH_THREADS", "1")))
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     resumed: dict | None = None
@@ -337,7 +788,7 @@ def run(cfg: WrenchPPOConfig) -> Path:
             flush=True,
         )
     else:
-        run_name = cfg.exp_name or f"wrench_{cfg.partner_mode}_s{cfg.seed}_{int(time.time())}"
+        run_name = cfg.exp_name or f"wrench_{cfg.input_mode}_s{cfg.seed}_{int(time.time())}"
         run_dir = Path(cfg.runs_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -368,10 +819,10 @@ def _resolve_resume(resume: str) -> tuple[Path, dict]:
 
 def _config_from_payload(payload: dict, run_dir: Path) -> WrenchPPOConfig:
     """The run config saved in a checkpoint, located in `run_dir` for `--resume`."""
-    field_names = {field.name for field in dataclasses.fields(WrenchPPOConfig)}
-    values = {key: value for key, value in payload["config"].items() if key in field_names}
-    values.update(exp_name=run_dir.name, runs_dir=str(run_dir.parent), resume=str(run_dir))
-    return WrenchPPOConfig(**values)
+    cfg = config_from_payload(payload)
+    return dataclasses.replace(
+        cfg, exp_name=run_dir.name, runs_dir=str(run_dir.parent), resume=str(run_dir)
+    )
 
 
 def train(
@@ -385,7 +836,9 @@ def train(
 
     `train_vec` / `eval_vec` are `callosum.training._vec_wrench.VecWrenchCube` objects; they
     are typed loosely here so the training function itself does not import the simulator
-    (only `run()` does).
+    (only `run()` does). Under `predicted` every rollout step also builds the policy input
+    `[own observation, ẑ_partner]` from the own-observation history, and every update takes
+    one Bi-JEPA auxiliary step; the checkpoints then carry the module and its optimizer too.
 
     Args:
         cfg: The run config.
@@ -400,15 +853,22 @@ def train(
     from torch.utils.tensorboard import SummaryWriter
 
     device = torch.device(cfg.device)
-    policies = make_policies(cfg.partner_mode, device)
+    latent_dim = cfg.latent_dim if cfg.use_bijepa else 0
+    policies = make_policies(cfg.partner_mode, device, latent_dim=latent_dim)
     optimizers = [
         torch.optim.Adam(policy.parameters(), lr=cfg.learning_rate, eps=1e-5) for policy in policies
     ]
+    bijepa = make_bijepa(cfg, device)
+    bijepa_optimizer = make_bijepa_optimizer(cfg, bijepa)
     start_update = 0
     eval_metrics: dict[str, float] = {}
     if resumed is not None:
+        _check_resumed_state(resumed, cfg)
         load_weights(resumed, policies)
         load_optimizers(resumed, optimizers)
+        if bijepa is not None and bijepa_optimizer is not None:
+            load_bijepa_weights(resumed, bijepa)
+            load_bijepa_optimizer(resumed, bijepa_optimizer)
         start_update = int(resumed["update"])
         eval_metrics = {key: float(value) for key, value in (resumed.get("eval") or {}).items()}
 
@@ -421,6 +881,9 @@ def train(
             minibatch_size=cfg.minibatch_size,
             total_steps=cfg.total_steps,
             obs_size=cfg.obs_size,
+            env_obs_size=cfg.env_obs_size,
+            policy_input_size=cfg.policy_input_size,
+            input_mode=cfg.input_mode,
         )
         (run_dir / "config.json").write_text(json.dumps(config_dict, indent=2))
     else:
@@ -432,10 +895,19 @@ def train(
     logger = MetricLogger(writer)
 
     print(
-        f"run {run_dir} | CubeWrench-v0 | partner_mode {cfg.partner_mode} | device {device} | "
-        f"obs {cfg.obs_size} -> act {_WRENCH_SIZE}",
+        f"run {run_dir} | CubeWrench-v0 | input_mode {cfg.input_mode} (env partner_mode "
+        f"{cfg.partner_mode}) | device {device} | obs {cfg.env_obs_size} + latent {latent_dim} "
+        f"= policy input {cfg.policy_input_size} -> act {_WRENCH_SIZE}",
         flush=True,
     )
+    if bijepa is not None:
+        print(
+            f"Bi-JEPA: latent_dim {cfg.latent_dim} | history_len {cfg.history_len} | "
+            f"aux_coef {cfg.aux_coef} | ema_momentum {cfg.ema_momentum} | "
+            f"var_weight {cfg.var_weight} | cov_weight {cfg.cov_weight} | "
+            f"predictor {cfg.bijepa_config().history_aggregator}",
+            flush=True,
+        )
     print(
         f"envs {cfg.num_envs} x steps {cfg.rollout_steps} = batch {cfg.batch_size} "
         f"(minibatch {cfg.minibatch_size}, {cfg.update_epochs} epochs) | "
@@ -447,7 +919,7 @@ def train(
 
     steps = cfg.rollout_steps
     num_envs = cfg.num_envs
-    obs_dim = cfg.obs_size
+    obs_dim = cfg.policy_input_size
     obs_buf = [torch.zeros((steps, num_envs, obs_dim), device=device) for _ in policies]
     act_buf = [torch.zeros((steps, num_envs, _WRENCH_SIZE), device=device) for _ in policies]
     logprob_buf = [torch.zeros((steps, num_envs), device=device) for _ in policies]
@@ -455,6 +927,17 @@ def train(
     rewards = torch.zeros((steps, num_envs), device=device)
     dones = torch.zeros((steps, num_envs), device=device)
     truncated_buf = torch.zeros((steps, num_envs), device=device)
+    # Own-observation history of each role, `(rollout_steps, num_envs, history_len, obs_dim)`;
+    # the aux loss reconstructs the predictor windows (with the episode resets of the rollout).
+    obs_hist_buf = (
+        [
+            torch.zeros((steps, num_envs, cfg.history_len, cfg.env_obs_size), device=device)
+            for _ in AGENT_KEYS
+        ]
+        if bijepa is not None
+        else None
+    )
+    builder = LatentInputBuilder(bijepa, device) if bijepa is not None else None
 
     stop_requested = False
 
@@ -468,8 +951,12 @@ def train(
     # The env state cannot be saved, so a resumed run re-seeds its resets from the resumed
     # update: the initial states are not a replay of the original start (as in the IPPO
     # trainer).
+    # The Bi-JEPA history window is part of the (unsaved) episode state too, so a resumed run
+    # seeds it from its reset observation; as with the env itself, the first rollout after a
+    # resume is not a replay of the original start.
     reset_seed = cfg.seed + 1_000_003 * start_update
     obs_t = _to_torch(train_vec.reset(seed=reset_seed), device)
+    inputs_t = builder.reset(obs_t) if builder is not None else obs_t
     next_done = torch.zeros(num_envs, device=device)
     start_time = time.time()
     start_global_step = global_step
@@ -490,8 +977,10 @@ def train(
             env_actions: dict[str, np.ndarray] = {}
             with torch.no_grad():
                 for index, (name, policy) in enumerate(zip(AGENT_KEYS, policies)):
-                    obs_buf[index][step] = obs_t[name]
-                    action, logprob, _, value = policy.get_action_and_value(obs_t[name])
+                    obs_buf[index][step] = inputs_t[name]
+                    if obs_hist_buf is not None and builder is not None:
+                        obs_hist_buf[index][step] = builder.history[name]
+                    action, logprob, _, value = policy.get_action_and_value(inputs_t[name])
                     act_buf[index][step] = action
                     logprob_buf[index][step] = logprob
                     value_buf[index][step] = value.flatten()
@@ -507,14 +996,22 @@ def train(
             if bool(truncated.any()):
                 # Truncations are the only episodes that bootstrap: their true last
                 # observation is `result.final_obs` (the auto-reset already replaced it in
-                # `result.obs`).
+                # `result.obs`). Under `predicted` its policy input rolls the own-observation
+                # history one more step with that final observation.
                 final_obs_t = _to_torch(result.final_obs, device)
                 with torch.no_grad():
+                    final_inputs = (
+                        builder.history_inputs(final_obs_t) if builder is not None else final_obs_t
+                    )
                     for index, (name, policy) in enumerate(zip(AGENT_KEYS, policies)):
                         final_values[index][step, truncated] = policy.get_value(
-                            final_obs_t[name][truncated]
+                            final_inputs[name][truncated]
                         ).view(-1)
             next_done = (terminated | truncated).float()
+            if builder is not None:
+                inputs_t = builder.step(obs_t, next_done)
+            else:
+                inputs_t = obs_t
             finished_returns.extend(result.finished_returns)
             finished_lengths.extend(result.finished_lengths)
             finished_successes.extend(result.finished_successes)
@@ -524,7 +1021,7 @@ def train(
         losses: list[dict[str, float]] = []
         for index, (name, policy) in enumerate(zip(AGENT_KEYS, policies)):
             with torch.no_grad():
-                next_value = policy.get_value(obs_t[name]).reshape(1, -1)
+                next_value = policy.get_value(inputs_t[name]).reshape(1, -1)
                 advantages, returns = compute_advantages(
                     rewards=rewards,
                     values=value_buf[index],
@@ -554,6 +1051,15 @@ def train(
             )
             losses.append(metrics)
 
+        # --- Bi-JEPA auxiliary update (`predicted`) ------------------------------------
+        aux_metrics: dict[str, float] = {}
+        if bijepa is not None and bijepa_optimizer is not None and obs_hist_buf is not None:
+            hist_a = obs_hist_buf[0].reshape(-1, cfg.history_len, cfg.env_obs_size)
+            hist_b = obs_hist_buf[1].reshape(-1, cfg.history_len, cfg.env_obs_size)
+            aux_metrics = aux_update(bijepa, bijepa_optimizer, cfg, hist_a, hist_b)
+            for tag, value in aux_metrics.items():
+                logger.log(tag, value, global_step)
+
         # --- Logging, evaluation, checkpoint -------------------------------------------
         if finished_returns:
             logger.log("train/return", float(np.mean(finished_returns)), global_step)
@@ -570,6 +1076,7 @@ def train(
                 cfg.eval_episodes,
                 device=device,
                 seed=cfg.seed + 1_000_003 * update,
+                bijepa=bijepa,
             )
             eval_metrics = {
                 "success_rate": summary.success_rate,
@@ -594,6 +1101,8 @@ def train(
                 update,
                 global_step,
                 eval_metrics,
+                bijepa=bijepa,
+                bijepa_optimizer=bijepa_optimizer,
             )
             print(f"saved {run_dir / 'latest.pt'} (update {update})", flush=True)
 
@@ -605,11 +1114,17 @@ def train(
             )
         else:
             shown = "no finished episode yet"
+        aux_shown = ""
+        if aux_metrics:
+            aux_shown = (
+                f" | aux {aux_metrics['aux/loss']:.3f} mse {aux_metrics['aux/mse']:.3f} "
+                f"probe_r2 {aux_metrics['aux/probe/wrench_r2']:.2f}"
+            )
         print(
             f"update {update}/{cfg.total_updates} | step {global_step} | {sps:.0f} sps | "
             f"{len(finished_returns)} eps | {shown} | "
-            f"policy_loss {losses[0]['policy_loss']:.3f}/{losses[1]['policy_loss']:.3f} "
-            f"| {time.time() - update_start:.1f}s",
+            f"policy_loss {losses[0]['policy_loss']:.3f}/{losses[1]['policy_loss']:.3f}"
+            f"{aux_shown} | {time.time() - update_start:.1f}s",
             flush=True,
         )
         writer.flush()

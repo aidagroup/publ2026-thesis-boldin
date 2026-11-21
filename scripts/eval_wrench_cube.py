@@ -1,9 +1,23 @@
-"""Evaluate a trained `wrench_ppo` checkpoint on CubeWrench-v0 (PLAN.md step 2).
+"""Evaluate a trained `wrench_ppo` checkpoint on CubeWrench-v0 (PLAN.md steps 2 and 3).
 
-Loads a `latest.pt` checkpoint of `callosum.training.wrench_ppo` (weights + config), runs
-the two deterministic (greedy) policies for `--episodes` episodes of the reduced
-wrench-level cube and writes the metrics the plan's ablation table needs: success rate,
-final layer angle, core position / rotation drift, steps to success and the failure count.
+Loads a `latest.pt` checkpoint of `callosum.training.wrench_ppo` (weights + config) and runs
+the two deterministic (greedy) policies for `--episodes` episodes of the reduced wrench-level
+cube, writing the metrics the plan's ablation table needs: success rate, final layer angle,
+core position / rotation drift, steps to success and the failure count.
+
+The ablation's three policy **input modes** are supported:
+
+* `none` -- the env observation only (`WrenchCubeEnv(partner_mode="none")`);
+* `oracle` -- the env's privileged partner block (`WrenchCubeEnv(partner_mode="oracle")`);
+* `predicted` -- Bi-JEPA: every step the agent's own 26-d observation history is encoded and
+  the partner predictor produces `ẑ_j`, appended to the own observation (26 + 32 = 58).
+  The env still runs with `partner_mode="none"` and the agent never sees the partner's
+  current observation -- the same path as in training.
+
+The input mode is taken from `--input-mode`, or inferred from the checkpoint when the flag is
+omitted (`--partner-mode` is kept as the old `none`/`oracle` spelling); a mismatch between the
+checkpoint and the requested mode fails before anything is built
+(`wrench_ppo.check_checkpoint_compat`), including the policy input width.
 
 Greedy: the actions are the policies' distribution means, clipped to the env's `[-1, 1]`
 wrench box. The episode seeds are `--seed + i`, so a run is reproducible, and the env's
@@ -17,7 +31,9 @@ Run it on the server (MuJoCo is CPU-only but the plan forbids training/sim on th
 outside the small smoke checks):
 
     python scripts/eval_wrench_cube.py --checkpoint runs/wrench_oracle_s0/latest.pt \\
-        --partner-mode oracle --episodes 128 --seed 0 --out results_wrench_oracle_s0.json
+        --input-mode oracle --episodes 128 --seed 0 --out results_wrench_oracle_s0.json
+    python scripts/eval_wrench_cube.py --checkpoint runs/wrench_pred_s0/latest.pt \\
+        --input-mode predicted --episodes 128 --seed 0 --out results_wrench_pred_s0.json
 """
 
 import argparse
@@ -29,10 +45,20 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from callosum.configs.wrench_ppo import INPUT_MODES
 from callosum.envs._wrench_logic import AGENT_KEYS, PARTNER_MODES, obs_size
 from callosum.envs.wrench_cube import WrenchCubeEnv
 from callosum.eval.metrics import EpisodeRecord, success_rate, time_to_success_stats
-from callosum.training.wrench_ppo import load_checkpoint, load_weights, make_policies
+from callosum.training.wrench_ppo import (
+    LatentInputBuilder,
+    check_checkpoint_compat,
+    config_from_payload,
+    load_bijepa_weights,
+    load_checkpoint,
+    load_weights,
+    make_bijepa,
+    make_policies,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -42,10 +68,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint", required=True, help="path to latest.pt")
     parser.add_argument(
+        "--input-mode",
+        choices=INPUT_MODES,
+        default=None,
+        help="policy input mode: none, oracle or predicted (default: the checkpoint's mode)",
+    )
+    parser.add_argument(
         "--partner-mode",
         choices=PARTNER_MODES,
-        required=True,
-        help="env observation mode; must be the one the checkpoint was trained with",
+        default=None,
+        help="deprecated alias of --input-mode none|oracle (kept for the step-2 commands)",
     )
     parser.add_argument("--episodes", type=int, default=64, help="episodes to run")
     parser.add_argument("--seed", type=int, default=0, help="base episode seed")
@@ -55,44 +87,76 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(f"--episodes must be >= 1, got {args.episodes}")
     if args.seed < 0:
         parser.error(f"--seed must be >= 0, got {args.seed}")
+    if (
+        args.input_mode is not None
+        and args.partner_mode is not None
+        and args.input_mode != args.partner_mode
+    ):
+        parser.error(
+            f"--input-mode {args.input_mode!r} and --partner-mode "
+            f"{args.partner_mode!r} disagree; pass only --input-mode"
+        )
     return args
 
 
-def check_checkpoint_compat(payload: dict, partner_mode: str) -> None:
-    """Raise if the checkpoint was trained on another observation layout than `partner_mode`."""
-    saved_mode = payload.get("partner_mode")
-    if saved_mode is not None and saved_mode != partner_mode:
+def resolve_input_mode(payload: dict, args: argparse.Namespace) -> str:
+    """The evaluation's policy input mode: explicit flag, else the checkpoint's saved mode."""
+    explicit = args.input_mode or args.partner_mode
+    saved = payload.get("input_mode")
+    if explicit is None:
+        if saved is not None:
+            return str(saved)
+        # Step-2 checkpoints predate `input_mode`: their partner mode *is* their input mode.
+        legacy = payload.get("partner_mode")
+        if legacy is not None:
+            return str(legacy)
         raise ValueError(
-            f"checkpoint was made with partner_mode={saved_mode!r}, this run uses "
-            f"{partner_mode!r} (the policy input width differs: "
-            f"{payload.get('obs_size')} vs {obs_size(partner_mode)})"
+            f"cannot infer the policy input mode of {args.checkpoint}; pass --input-mode "
+            f"(one of {INPUT_MODES})"
         )
-    expected = obs_size(partner_mode)
-    saved_size = payload.get("obs_size")
-    if saved_size is not None and int(saved_size) != expected:
+    if saved is not None and saved != explicit:
         raise ValueError(
-            f"checkpoint policies take inputs of width {saved_size} but {partner_mode!r} "
-            f"observations are {expected} wide"
+            f"checkpoint was made with input_mode={saved!r}, --input-mode is {explicit!r}"
         )
+    return explicit
+
+
+def _batch_obs(obs: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
+    """A single-env numpy observation as a `(1, obs_dim)` batch of float32 tensors."""
+    return {
+        key: torch.as_tensor(value, dtype=torch.float32).unsqueeze(0) for key, value in obs.items()
+    }
 
 
 def run_episode(
-    env: WrenchCubeEnv, policies: list[torch.nn.Module], seed: int
+    env: WrenchCubeEnv,
+    policies: list[torch.nn.Module],
+    seed: int,
+    builder: LatentInputBuilder | None = None,
 ) -> tuple[EpisodeRecord, dict]:
-    """Run one greedy episode; returns its record and the env's final info dict."""
+    """Run one greedy episode; returns its record and the env's final info dict.
+
+    Under `predicted` (`builder` is not `None`) the policy input is built from the agent's own
+    observation history exactly as in training: `[own observation, ẑ_partner]`, with the
+    partner never observed; otherwise the env observation itself is the policy input.
+    """
     obs, info = env.reset(seed=seed)
+    obs_batch = _batch_obs(obs)
+    policy_obs = builder.reset(obs_batch) if builder is not None else obs_batch
     steps = 0
     terminated = truncated = False
     while not (terminated or truncated):
         actions = {}
         for name, policy in zip(AGENT_KEYS, policies):
             with torch.no_grad():
-                action = policy.get_action(
-                    torch.as_tensor(obs[name]).unsqueeze(0), deterministic=True
-                )
+                action = policy.get_action(policy_obs[name], deterministic=True)
             actions[name] = torch.clamp(action, -1.0, 1.0).squeeze(0).numpy()
         obs, _reward, terminated, truncated, info = env.step(actions)
         steps += 1
+        if terminated or truncated:
+            break
+        obs_batch = _batch_obs(obs)
+        policy_obs = builder.step(obs_batch, torch.zeros(1)) if builder is not None else obs_batch
     succeeded = bool(info["success"])
     record = EpisodeRecord(
         success=succeeded,
@@ -125,21 +189,36 @@ def main(argv: list[str] | None = None) -> int:
     """Evaluate the checkpoint, print the summary and write the JSON report."""
     args = parse_args(argv)
     payload = load_checkpoint(args.checkpoint)
-    check_checkpoint_compat(payload, args.partner_mode)
-    policies = make_policies(args.partner_mode, "cpu")
+    input_mode = resolve_input_mode(payload, args)
+    env_mode, latent_dim = check_checkpoint_compat(payload, input_mode)
+    cfg = config_from_payload(payload)
+    if input_mode == "predicted" and (not cfg.use_bijepa or cfg.latent_dim != latent_dim):
+        raise ValueError(
+            "checkpoint is inconsistent: it stores Bi-JEPA weights (latent_dim="
+            f"{latent_dim}) but its saved config has use_bijepa={cfg.use_bijepa} and "
+            f"latent_dim={cfg.latent_dim}"
+        )
+    policies = make_policies(env_mode, "cpu", latent_dim=latent_dim)
     load_weights(payload, policies)
+    builder: LatentInputBuilder | None = None
+    bijepa = make_bijepa(cfg, "cpu")
+    if bijepa is not None:
+        load_bijepa_weights(payload, bijepa)
+        bijepa.eval()
+        builder = LatentInputBuilder(bijepa, device="cpu")
 
     records: list[EpisodeRecord] = []
     infos: list[dict] = []
-    env = WrenchCubeEnv(partner_mode=args.partner_mode)
+    env = WrenchCubeEnv(partner_mode=env_mode)
     try:
         print(
-            f"eval {args.checkpoint} | partner_mode {args.partner_mode} | "
-            f"{args.episodes} episodes from seed {args.seed} | greedy policies",
+            f"eval {args.checkpoint} | input_mode {input_mode} (env partner_mode {env_mode}) | "
+            f"policy input {obs_size(env_mode) + latent_dim} | {args.episodes} episodes from "
+            f"seed {args.seed} | greedy policies",
             flush=True,
         )
         for episode in range(args.episodes):
-            record, info = run_episode(env, policies, args.seed + episode)
+            record, info = run_episode(env, policies, args.seed + episode, builder)
             records.append(record)
             infos.append(info)
     finally:
@@ -148,7 +227,10 @@ def main(argv: list[str] | None = None) -> int:
     summary = summarize(records, infos)
     report = {
         "checkpoint": str(Path(args.checkpoint)),
-        "partner_mode": args.partner_mode,
+        "input_mode": input_mode,
+        "partner_mode": env_mode,
+        "policy_input_size": obs_size(env_mode) + latent_dim,
+        "latent_dim": latent_dim,
         "seed": args.seed,
         "format": payload.get("format"),
         "checkpoint_update": payload.get("update"),
