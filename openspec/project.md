@@ -72,7 +72,7 @@
 | Серверный fine-tune `ft_full_s1`, friction probe | — | отменены (2026-11-14) |
 | BenchMARL (шаг 2.2) | — | отложен (необязательный) |
 | Skill-level среда + IPPO над примитивами (шаг 2.3) | ветка `step/2.3-skill-level-marl` | реализована (среда, conductor, eval, категориальная голова); **заморожена 2026-11-21** — весенний мост |
-| Reduced-модель CubeWrench-v0 (MuJoCo, 2 агента, 6D-wrench) | ветка `step/2.4-wrench-cube` | **в работе (2026-11-21)**: среда MVP + oracle-контроллер → тренер IPPO → Bi-JEPA `predicted`; гейты в `PLAN.md` |
+| Reduced-модель CubeWrench-v0 (MuJoCo, 2 агента, 6D-wrench) | ветка `step/2.4-wrench-cube` | **в работе (2026-11-21)**: G1 пройден (oracle 0.988, rotator-only 0.000); тренер IPPO + Bi-JEPA `predicted` + демо-рендер готовы; идёт обучение grid (oracle/none/predicted, 3 сида) и гейт G2 |
 | Модуль Bi-JEPA (шаг 3.1) | ветка `step/3.1-bijepa-module` | готов (24 теста, чистый torch), не влит |
 | Интеграция Bi-JEPA в политику (3.2) и ablation-харнесс (3.3) | — | не начаты (весна, отдельные изменения) |
 | Server storage: persistent layout, `update_server.sh` | ветка `step/2.1-ippo-so101` (наследуется текущей `step/2.3-skill-level-marl`) | **верифицирован 2026-11-15** (RunPod A40: setup+update+smoke+probe 15/16); в `main` не влиты — влив возможен |
