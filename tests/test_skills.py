@@ -148,18 +148,20 @@ def test_sampler_differs_across_seeds_and_stays_in_ranges() -> None:
     samples = [sample_episode_randomization(config, seed) for seed in range(20)]
     assert len(set(samples)) == len(samples)
     for sample in samples:
-        assert config.episode_speed_range[0] <= sample.episode_speed <= (
-            config.episode_speed_range[1]
+        assert (
+            config.episode_speed_range[0] <= sample.episode_speed <= (config.episode_speed_range[1])
         )
         for arm in (0, 1):
-            assert config.arm_speed_range[0] <= sample.arm_speed[arm] <= (
-                config.arm_speed_range[1]
+            assert config.arm_speed_range[0] <= sample.arm_speed[arm] <= (config.arm_speed_range[1])
+            assert (
+                config.grasp_failure_prob_range[0]
+                <= sample.grasp_failure_prob[arm]
+                <= (config.grasp_failure_prob_range[1])
             )
-            assert config.grasp_failure_prob_range[0] <= sample.grasp_failure_prob[arm] <= (
-                config.grasp_failure_prob_range[1]
-            )
-            assert config.start_delay_range[0] <= sample.start_delay[arm] <= (
-                config.start_delay_range[1]
+            assert (
+                config.start_delay_range[0]
+                <= sample.start_delay[arm]
+                <= (config.start_delay_range[1])
             )
 
 

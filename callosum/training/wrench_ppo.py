@@ -88,6 +88,8 @@ import torch
 from torch import nn
 
 from callosum.common.bijepa import BiJEPA, latent_stats
+from callosum.common.logging import MetricLogger
+from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
 from callosum.configs.wrench_ppo import (
     INPUT_MODES,
     WrenchPPOConfig,
@@ -97,8 +99,6 @@ from callosum.configs.wrench_ppo import (
 )
 from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
 from callosum.training._bijepa_probe import ridge_probe
-from callosum.common.logging import MetricLogger
-from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
 
 CHECKPOINT_FORMAT = 1
 """Format of the trainer's checkpoints: weights, optimizer states, config and counters."""

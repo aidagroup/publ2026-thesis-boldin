@@ -40,9 +40,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from callosum.common.metrics import EpisodeRecord, success_rate, time_to_success_stats
 from callosum.configs.wrench_ppo import BACKENDS, INPUT_MODES, TASKS
 from callosum.envs.coop import make_coop_env
-from callosum.eval.metrics import EpisodeRecord, success_rate, time_to_success_stats
 from callosum.training.wrench_ppo import (
     EVAL_SEED_OFFSET,
     LatentInputBuilder,

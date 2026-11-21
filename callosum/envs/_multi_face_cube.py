@@ -120,9 +120,7 @@ def build_multi_face_cube(
 
     builder = scene.create_articulation_builder()
     builder.set_scene_idxs(scene_idxs)
-    builder.initial_pose = (
-        sapien.Pose(p=[0, 0, hs]) if initial_pose is None else initial_pose
-    )
+    builder.initial_pose = sapien.Pose(p=[0, 0, hs]) if initial_pose is None else initial_pose
     # The six full-face slabs overlap at the edges/corners (see the module doc): without
     # disabling self-collisions the articulation starts in deep interpenetration.
     # TODO(review): verify the attribute name against ManiSkill 3.0.1's

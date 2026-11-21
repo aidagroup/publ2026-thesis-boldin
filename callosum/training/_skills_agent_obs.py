@@ -84,7 +84,9 @@ def _own_offsets() -> dict[Role, int]:
 
 def shared_vec_size() -> int:
     """Width of the env's shared flat vector: `[holder_own_block | rotator_own_block]`."""
-    return own_block_size(num_primitives(Role.HOLDER)) + own_block_size(num_primitives(Role.ROTATOR))
+    return own_block_size(num_primitives(Role.HOLDER)) + own_block_size(
+        num_primitives(Role.ROTATOR)
+    )
 
 
 def _partner_of(role: Role) -> Role:
@@ -210,11 +212,17 @@ class SkillsObsBuilder:
             offsets.append(offsets[-1] + width)
         self.total_dim = offsets[-1]
 
-        proprio: list[dict[str, slice | None]] = [{"qpos": None, "qvel": None} for _ in self.agent_uids]
+        proprio: list[dict[str, slice | None]] = [
+            {"qpos": None, "qvel": None} for _ in self.agent_uids
+        ]
         shared_indices: list[int] = []
         for i, (path, width) in enumerate(self.layout):
             if path[:1] == ("agent",):
-                if len(path) != 3 or path[1] not in self.agent_uids or path[2] not in ("qpos", "qvel"):
+                if (
+                    len(path) != 3
+                    or path[1] not in self.agent_uids
+                    or path[2] not in ("qpos", "qvel")
+                ):
                     raise ValueError(f"unexpected agent observation field {'/'.join(path)}")
                 expected = QPOS_DIM if path[2] == "qpos" else QVEL_DIM
                 if width != expected:

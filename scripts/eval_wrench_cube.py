@@ -27,7 +27,7 @@ stream) and only the FIRST episode of each world is recorded (success, failure o
 env's randomisation preset is read from the checkpoint's config, so a run is evaluated with
 the same environment variant it was trained on.
 
-The aggregation reuses `callosum.eval.metrics` (`EpisodeRecord`, `success_rate`,
+The aggregation reuses `callosum.common.metrics` (`EpisodeRecord`, `success_rate`,
 `time_to_success_stats`) -- one record per episode, with the decision count equal to the
 control-step count of this env.
 
@@ -49,10 +49,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from callosum.common.metrics import EpisodeRecord, success_rate, time_to_success_stats
 from callosum.configs.wrench_ppo import BACKENDS, INPUT_MODES
 from callosum.envs._wrench_logic import AGENT_KEYS, PARTNER_MODES, obs_size
 from callosum.envs.wrench_cube import WrenchCubeEnv
-from callosum.eval.metrics import EpisodeRecord, success_rate, time_to_success_stats
 from callosum.training.wrench_ppo import (
     EVAL_SEED_OFFSET,
     LatentInputBuilder,

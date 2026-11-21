@@ -1,7 +1,7 @@
 """[cloud] Evaluation harness of the skill-level cube assembly (openspec tasks 4.1-4.4).
 
 Runs trained FaceTurnSkills-v0 checkpoint pairs in the registered env and reports the
-coordination metrics of `callosum.eval.metrics`: success rate, time to success in
+coordination metrics of `callosum.common.metrics`: success rate, time to success in
 decisions (mean +- std over episodes), per-hand useless-action rate and partner-primitive
 prediction accuracy. `--cross-play` evaluates every ordered (holder, rotator) checkpoint
 pair -- the self-play diagonal against zero-shot cross-play, the thesis's main claim;
@@ -19,7 +19,7 @@ files directly; several at once and/or as glob patterns:
 Policies are loaded the way `callosum.training.ippo --eval-only` loads them: the actor
 weights come from the checkpoint payload's per-agent state dicts (agent_a = holder,
 agent_b = rotator), driven deterministically. The categorical policies are agent B's
-`callosum.training._categorical.CategoricalPolicy` and the per-agent inputs are cut by
+`callosum.common.categorical.CategoricalPolicy` and the per-agent inputs are cut by
 agent B's `callosum.training._skills_agent_obs.SkillsObsBuilder` (the documented eval
 contract). The env itself is agent A's `callosum.envs.face_turn_skills`, still being
 written in parallel: its module import and the `gym.make` kwargs below carry the remaining
@@ -46,6 +46,15 @@ import zlib
 from collections.abc import Sequence
 from pathlib import Path
 
+from callosum.common.metrics import (
+    CrossPlayMatrix,
+    EpisodeRecord,
+    crossplay_matrix,
+    recovery_summary,
+    success_rate,
+    summarize,
+    summary_dict,
+)
 from callosum.envs._skills import (
     PARTNER_VISIBILITY_MODES,
     RandomizationConfig,
@@ -58,15 +67,6 @@ from callosum.envs._skills_obs import (
     INFO_TIME_TO_SUCCESS,
     INFO_USELESS_HOLDER,
     INFO_USELESS_ROTATOR,
-)
-from callosum.eval.metrics import (
-    CrossPlayMatrix,
-    EpisodeRecord,
-    crossplay_matrix,
-    recovery_summary,
-    success_rate,
-    summarize,
-    summary_dict,
 )
 
 
@@ -182,17 +182,15 @@ def _np(x):
     return np.atleast_1d(arr)
 
 
-def _load_pair(
-    holder_path: Path, rotator_path: Path, device, obs_dims: Sequence[int]
-):
+def _load_pair(holder_path: Path, rotator_path: Path, device, obs_dims: Sequence[int]):
     """The `(holder, rotator)` categorical policies with actor weights from checkpoints.
 
     Loads the way `ippo --eval-only` does (per-agent state dicts of the payload,
     agent_a = holder, agent_b = rotator) and rejects checkpoints whose input widths do
     not match the obs builder's `obs_dims` (`check_warm_start_compat`).
     """
-    from callosum.training._categorical import CategoricalPolicy
-    from callosum.training._checkpoint import check_warm_start_compat, load_checkpoint
+    from callosum.common.categorical import CategoricalPolicy
+    from callosum.common.checkpoint import check_warm_start_compat, load_checkpoint
 
     holder = CategoricalPolicy(obs_dims[0], num_primitives(Role.HOLDER)).to(device)
     rotator = CategoricalPolicy(obs_dims[1], num_primitives(Role.ROTATOR)).to(device)
@@ -243,9 +241,7 @@ def evaluate_pair(
             args.partner_mode,
             (uid_holder, uid_rotator),
         )
-        holder, rotator = _load_pair(
-            holder_ckpt[1], rotator_ckpt[1], device, builder.obs_dims
-        )
+        holder, rotator = _load_pair(holder_ckpt[1], rotator_ckpt[1], device, builder.obs_dims)
         n = env.num_envs
         limit = args.max_decisions
         if limit is None:
@@ -291,9 +287,7 @@ def evaluate_pair(
                             time_to_success=int(decisions[e]) if ok else None,
                             decisions=int(decisions[e]),
                             sim_steps_to_success=(
-                                int(sim_steps_np[e])
-                                if ok and sim_steps_np is not None
-                                else None
+                                int(sim_steps_np[e]) if ok and sim_steps_np is not None else None
                             ),
                             useless_holder=int(useless_holder[e]),
                             useless_rotator=int(useless_rotator[e]),
@@ -395,7 +389,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--episodes", type=int, default=100, help="Episodes per pair. (default: %(default)s)"
     )
     parser.add_argument(
-        "--num-envs", type=int, default=16, help="Vectorised envs per pair run. (default: %(default)s)"
+        "--num-envs",
+        type=int,
+        default=16,
+        help="Vectorised envs per pair run. (default: %(default)s)",
     )
     parser.add_argument(
         "--partner-mode",
@@ -437,11 +434,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Per-hand grasp-failure probability range of the injected run "
         "(--recovery). (default: %(default)s)",
     )
-    parser.add_argument("--seed", type=int, default=0, help="Base eval seed. (default: %(default)s)")
     parser.add_argument(
-        "--sim-backend", default="gpu", help="ManiSkill sim backend ([cloud] gpu). (default: %(default)s)"
+        "--seed", type=int, default=0, help="Base eval seed. (default: %(default)s)"
     )
-    parser.add_argument("--out", default="results.json", help="JSON report path. (default: %(default)s)")
+    parser.add_argument(
+        "--sim-backend",
+        default="gpu",
+        help="ManiSkill sim backend ([cloud] gpu). (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--out", default="results.json", help="JSON report path. (default: %(default)s)"
+    )
     return parser.parse_args(argv)
 
 
@@ -477,7 +480,9 @@ def main(argv: list[str] | None = None) -> None:
         "pairs": {},
     }
     for holder, rotator in pairs:
-        records = evaluate_pair(holder, rotator, args, inject=False, writer=writer, tag=_tag(holder[0], rotator[0]))
+        records = evaluate_pair(
+            holder, rotator, args, inject=False, writer=writer, tag=_tag(holder[0], rotator[0])
+        )
         key = (holder[0], rotator[0])
         clean_records[key] = records
         pair_results[key] = success_rate(records)

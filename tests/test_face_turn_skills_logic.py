@@ -265,9 +265,7 @@ def test_holder_useless_rules() -> None:
     # grasp air far from the core, or re-grasp what is already held
     assert useless_actions(Role.HOLDER, [grasp], _facts(holder_near_core=np.zeros(1, bool)))
     assert useless_actions(Role.HOLDER, [grasp], _facts())
-    assert not useless_actions(
-        Role.HOLDER, [grasp], _facts(holder_grasp=np.zeros(1, bool))
-    )
+    assert not useless_actions(Role.HOLDER, [grasp], _facts(holder_grasp=np.zeros(1, bool)))
     # preparation is never classified
     for name in ("wait", "approach_body", "retreat", "lower"):
         assert not useless_actions(Role.HOLDER, [HOLDER_ID[name]], _facts())
@@ -286,9 +284,7 @@ def test_rotator_useless_rules() -> None:
     assert not useless_actions(Role.ROTATOR, [turn90], both)
     assert useless_actions(Role.ROTATOR, [release], _facts())  # releasing nothing
     assert not useless_actions(Role.ROTATOR, [release], both)
-    assert useless_actions(
-        Role.ROTATOR, [grasp], _facts(rotator_near_layer=np.zeros(1, bool))
-    )
+    assert useless_actions(Role.ROTATOR, [grasp], _facts(rotator_near_layer=np.zeros(1, bool)))
     assert useless_actions(Role.ROTATOR, [grasp], both)  # re-grasping what is held
     for name in ("wait", "approach_face", "retreat"):
         assert not useless_actions(Role.ROTATOR, [ROTATOR_ID[name]], _facts())
@@ -559,9 +555,10 @@ def test_conductor_rotator_hold_belief_sets_and_clears() -> None:
     # A running flip blocks the approach even with the face up and the belief set.
     assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["flip90"])) == ROTATOR_ID["wait"]
     # The holder settles into serving: approach.
-    assert conductor.act("rotator", f_up, _info(holder=HOLDER_ID["wait"])) == ROTATOR_ID[
-        "approach_face"
-    ]
+    assert (
+        conductor.act("rotator", f_up, _info(holder=HOLDER_ID["wait"]))
+        == ROTATOR_ID["approach_face"]
+    )
     # The holder releases: the belief clears, and re-opening needs a fresh streak.
     reset = SkillsConductor(settle_decisions=1)
     assert reset.act("rotator", obs, info) == ROTATOR_ID["wait"]

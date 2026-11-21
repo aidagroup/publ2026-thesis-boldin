@@ -19,8 +19,8 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.pose import Pose
 from transforms3d.euler import euler2quat
 
-from callosum.configs.layout import ArmLayout, base_xy_yaw
 from callosum.common.visibility import tcp_pose_fields, validate_partner_obs
+from callosum.configs.layout import ArmLayout, base_xy_yaw
 from callosum.robots.so101_parallel_gripper import SO101ParallelGripper
 
 # ~5.7 cm real Rubik's cube edge length.

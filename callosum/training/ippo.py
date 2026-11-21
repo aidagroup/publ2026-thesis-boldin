@@ -73,6 +73,24 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from torch.utils.tensorboard import SummaryWriter
 
 import callosum.envs.face_turn  # noqa: F401  (registers TwoSO101-v0 and FaceTurn-v0)
+from callosum.common.categorical import CategoricalPolicy
+from callosum.common.checkpoint import (
+    TrainingState,
+    check_warm_start_compat,
+    load_agent_weights,
+    load_checkpoint,
+    load_training_state,
+    save_checkpoint,
+)
+from callosum.common.diag import DiagStats
+from callosum.common.logging import (
+    EpisodeStats,
+    MetricLogger,
+    eval_diag_summary,
+    progress_line,
+)
+from callosum.common.nonfinite import NonFiniteTracker, guard_step
+from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
 from callosum.configs.ippo import (
     IPPOConfig,
     bc_coef_at,
@@ -85,30 +103,12 @@ from callosum.configs.ippo import (
 from callosum.envs import _skills_obs
 from callosum.envs._sim_compat import prepare_sim_backend
 from callosum.training._agent_obs import AgentObsBuilder
-from callosum.common.categorical import CategoricalPolicy
-from callosum.common.checkpoint import (
-    TrainingState,
-    check_warm_start_compat,
-    load_agent_weights,
-    load_checkpoint,
-    load_training_state,
-    save_checkpoint,
-)
 from callosum.training._demos import (
     agent_demo_tensors,
     check_layout_matches,
     episode_length_mismatch,
     load_demos,
 )
-from callosum.common.diag import DiagStats
-from callosum.common.logging import (
-    EpisodeStats,
-    MetricLogger,
-    eval_diag_summary,
-    progress_line,
-)
-from callosum.common.nonfinite import NonFiniteTracker, guard_step
-from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
 from callosum.training._skills_agent_obs import SkillsObsBuilder
 
 AGENT_NAMES = ("agent_a", "agent_b")
@@ -327,7 +327,9 @@ def _action_info(
     if all(isinstance(space, gym.spaces.Discrete) for space in spaces):
         return uids, [], [int(space.n) for space in spaces], True
     for space in spaces:
-        assert isinstance(space, gym.spaces.Box), "only continuous or discrete actions are supported"
+        assert isinstance(space, gym.spaces.Box), (
+            "only continuous or discrete actions are supported"
+        )
     action_bounds = [
         (torch.as_tensor(space.low, device=device), torch.as_tensor(space.high, device=device))
         for space in spaces
@@ -609,7 +611,13 @@ def _train(
     def run_eval(iteration: int, global_step: int) -> None:
         eval_start = time.time()
         result = evaluate(
-            agents, eval_builder, eval_envs, action_bounds, num_eval_steps, tracker, discrete=discrete
+            agents,
+            eval_builder,
+            eval_envs,
+            action_bounds,
+            num_eval_steps,
+            tracker,
+            discrete=discrete,
         )
         metrics, episodes = result.metrics, result.episodes
         logger.log_many(metrics, global_step, prefix="eval/")

@@ -6,7 +6,6 @@ import pytest
 
 torch = pytest.importorskip("torch")  # CI installs only the dev extra; run with `make dev`
 
-from callosum.configs.ippo import IPPOConfig
 from callosum.common.checkpoint import (
     load_agent_weights,
     load_checkpoint,
@@ -14,6 +13,7 @@ from callosum.common.checkpoint import (
     save_checkpoint,
 )
 from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
+from callosum.configs.ippo import IPPOConfig
 
 
 def test_gae_matches_discounted_return_without_values() -> None:

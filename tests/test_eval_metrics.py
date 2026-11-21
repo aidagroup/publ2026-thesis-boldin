@@ -10,7 +10,6 @@ import math
 
 import pytest
 
-from callosum.envs._skills import Role
 from callosum.common.metrics import (
     CrossPlayMatrix,
     EpisodeRecord,
@@ -23,6 +22,7 @@ from callosum.common.metrics import (
     time_to_success_stats,
     useless_rate,
 )
+from callosum.envs._skills import Role
 
 
 def rec(
@@ -64,9 +64,7 @@ def test_record_rejects_negative_and_ragged_predictions() -> None:
     with pytest.raises(ValueError, match="useless"):
         EpisodeRecord(success=False, time_to_success=None, decisions=1, useless_holder=-1)
     with pytest.raises(ValueError, match="equal length"):
-        EpisodeRecord(
-            success=False, time_to_success=None, decisions=1, predicted_partner=(0,)
-        )
+        EpisodeRecord(success=False, time_to_success=None, decisions=1, predicted_partner=(0,))
 
 
 # --- per-run aggregators -------------------------------------------------------------------
@@ -108,9 +106,10 @@ def test_useless_rate_pools_decisions_per_role() -> None:
     assert useless_rate(records, Role.HOLDER) == pytest.approx(2 / 40)
     assert useless_rate(records, Role.ROTATOR) == pytest.approx(6 / 40)
     assert useless_rate([], Role.HOLDER) == 0.0
-    assert useless_rate(
-        [EpisodeRecord(success=False, time_to_success=None, decisions=0)], Role.HOLDER
-    ) == 0.0
+    assert (
+        useless_rate([EpisodeRecord(success=False, time_to_success=None, decisions=0)], Role.HOLDER)
+        == 0.0
+    )
 
 
 def test_partner_prediction_accuracy_over_recorded_predictions() -> None:

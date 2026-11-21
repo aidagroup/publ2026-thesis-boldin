@@ -70,7 +70,7 @@ Joint-Embedding Predictive Architecture (LeCun, 2022) – предсказыва
 
 ## Реализация в reduced-модели (2026-11-21)
 
-Модуль `callosum/agents/bijepa.py` (ветка `step/3.1-bijepa-module`) интегрирован в тренер reduced-модели `callosum/training/wrench_ppo.py`:
+Модуль `callosum/common/bijepa.py` (ветка `step/3.1-bijepa-module`) интегрирован в тренер reduced-модели `callosum/training/wrench_ppo.py`:
 
 - вход политики в режиме `predicted`: своё наблюдение (26) ⊕ `ẑ_j` (32) = 58; в `none` — 26, в `oracle` — 35 (env-блок партнёра);
 - энкодер `E_i: o_i → z_i` (MLP 26→32), предиктор `P_i` по истории своих латентов (K=1 по умолчанию) → `ẑ_j`; цель `z_j = sg(E_j^target(o_j))` с EMA-target;

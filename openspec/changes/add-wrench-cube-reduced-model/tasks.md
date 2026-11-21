@@ -20,13 +20,13 @@
 
 - [x] 2.1 `callosum/training/wrench_ippo.py`: две гауссовы политики (`_ppo_core.ActorCritic`), GAE, клиппинг, TensorBoard, чекпоинты, resume
 - [x] 2.2 Векторизация MuJoCo (цикл по envs; при необходимости process pool), замер throughput
-- [x] 2.3 `scripts/eval_wrench_cube.py` поверх `callosum/eval/metrics.py`
+- [x] 2.3 `scripts/eval_wrench_cube.py` поверх `callosum/common/metrics.py`
 - [x] 2.4 Прогоны `none`/`oracle`; подбор рандомизации
 - [ ] 2.5 **Гейт G2 (в работе):** `oracle` ≥0.9 и разрыв `oracle−none` ≥0.3 (иначе усилить рандомизацию, не идти дальше)
 
 ## 3. Bi-JEPA
 
-- [x] 3.1 Влить модуль из `step/3.1-bijepa-module` (`callosum/agents/bijepa.py`, `configs/bijepa.py`, `tests/test_bijepa.py`)
+- [x] 3.1 Влить модуль из `step/3.1-bijepa-module` (`callosum/common/bijepa.py`, `configs/bijepa.py`, `tests/test_bijepa.py`)
 - [x] 3.2 Тренер: энкодер своего наблюдения, предиктор латента партнёра, EMA-target, aux-лосс; `ẑ_j` — вход политики
 - [x] 3.3 Логирование `latent_stats` (std/effective rank) и прогноза; отсутствие утечки данных партнёра в `none`/`predicted`
 - [x] 3.4 `predicted-direct` baseline (регрессор текущего wrench партнёра) — если останется время

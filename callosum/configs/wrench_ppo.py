@@ -53,8 +53,8 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from callosum.common.cli import build_dataclass_parser
 from callosum.common.bijepa_config import BiJEPAConfig
+from callosum.common.cli import build_dataclass_parser
 from callosum.configs.coop_tasks import (
     TASKS as COOP_TASKS,
 )

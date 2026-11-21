@@ -33,7 +33,7 @@
 
 - `none` — контроль: только своё наблюдение.
 - `oracle` — привилегированная информация о партнёре (его текущий wrench и приватные параметры) — верхняя граница.
-- `predicted` — Bi-JEPA: латент своего наблюдения → предсказанный латент партнёра `ẑ_j` → вход политики; aux-лосс в латенте (EMA-target, stop-grad), `callosum/agents/bijepa.py` из `step/3.1-bijepa-module`.
+- `predicted` — Bi-JEPA: латент своего наблюдения → предсказанный латент партнёра `ẑ_j` → вход политики; aux-лосс в латенте (EMA-target, stop-grad), `callosum/common/bijepa.py` из `step/3.1-bijepa-module`.
 - `predicted-direct` — дешёвый baseline: регрессор текущего wrench партнёра из своего наблюдения (если останется время; иначе весна).
 
 ## План работ (ветка `step/2.4-wrench-cube` от `step/2.3-skill-level-marl`)
@@ -52,12 +52,12 @@
 - **Гейт G1:** oracle ≥ 0.95 на ≥ 256 эпизодах (RunPod) и стабильный поворот на локальных 1–2 env; без него дальше не идём.
 
 ### 2. Тренер непрерывного IPPO (none/oracle)
-- `callosum/training/wrench_ippo.py`: две независимые гауссовы политики (переиспользовать `callosum/training/_ppo_core.py`: `ActorCritic`, GAE, clipped update), MuJoCo-векторизация циклом по envs (измерить throughput; при необходимости process pool), TensorBoard, чекпоинты, resume.
-- Конфиг `callosum/configs/wrench_ippo.py`; `scripts/eval_wrench_cube.py` поверх `callosum/eval/metrics.py` (success, угол, дрейф, время; `cross_play`/`recovery` — позже).
+- `callosum/training/wrench_ippo.py`: две независимые гауссовы политики (переиспользовать `callosum/common/ppo_core.py`: `ActorCritic`, GAE, clipped update), MuJoCo-векторизация циклом по envs (измерить throughput; при необходимости process pool), TensorBoard, чекпоинты, resume.
+- Конфиг `callosum/configs/wrench_ippo.py`; `scripts/eval_wrench_cube.py` поверх `callosum/common/metrics.py` (success, угол, дрейф, время; `cross_play`/`recovery` — позже).
 - **Гейт G2:** `oracle` ≥ 0.9 и разрыв `oracle−none` ≥ 0.3 (абсолютный) после подбора рандомизации; иначе усилить рандомизацию, а не двигаться дальше.
 
 ### 3. Интеграция Bi-JEPA (`predicted`)
-- Влить модуль из `step/3.1-bijepa-module`: `callosum/agents/bijepa.py`, `callosum/configs/bijepa.py`, `tests/test_bijepa.py` (чистый torch).
+- Влить модуль из `step/3.1-bijepa-module`: `callosum/common/bijepa.py`, `callosum/common/bijepa_config.py`, `tests/test_bijepa.py` (чистый torch).
 - В тренере: энкодер своего наблюдения, предиктор латента партнёра, EMA-target, aux-лосс; `ẑ_j` — вход политики; лог `latent_stats` (std/effective rank).
 - `predicted-direct`: регрессор текущего wrench партнёра (опционально, после базовой тройки).
 - **Гейт G3 (2026-12-05):** если к этой дате `predicted` не даёт измеримого результата — предзащита идёт с `none/oracle` + прогрессом предсказания; не жертвуем остальными пунктами.

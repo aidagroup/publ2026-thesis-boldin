@@ -57,13 +57,10 @@ class EpisodeRecord:
         if self.time_to_success is not None and self.time_to_success < 0:
             raise ValueError(f"time_to_success must be >= 0, got {self.time_to_success}")
         if self.sim_steps_to_success is not None and self.sim_steps_to_success < 0:
-            raise ValueError(
-                f"sim_steps_to_success must be >= 0, got {self.sim_steps_to_success}"
-            )
+            raise ValueError(f"sim_steps_to_success must be >= 0, got {self.sim_steps_to_success}")
         if self.useless_holder < 0 or self.useless_rotator < 0:
             raise ValueError(
-                f"useless counts must be >= 0, got "
-                f"({self.useless_holder}, {self.useless_rotator})"
+                f"useless counts must be >= 0, got ({self.useless_holder}, {self.useless_rotator})"
             )
         if len(self.predicted_partner) != len(self.true_partner):
             raise ValueError(
@@ -233,8 +230,7 @@ class CrossPlayMatrix:
             "holders": list(self.holders),
             "rotators": list(self.rotators),
             "matrix": [
-                [self.cell(holder, rotator) for rotator in self.rotators]
-                for holder in self.holders
+                [self.cell(holder, rotator) for rotator in self.rotators] for holder in self.holders
             ],
             "self_play_mean": self.self_play_mean,
             "cross_play_mean": self.cross_play_mean,
@@ -288,8 +284,6 @@ def recovery_summary(
         time_with=None if time_with is None else time_with[0],
         time_without=None if time_without is None else time_without[0],
         time_delta=(
-            None
-            if time_with is None or time_without is None
-            else time_with[0] - time_without[0]
+            None if time_with is None or time_without is None else time_with[0] - time_without[0]
         ),
     )
