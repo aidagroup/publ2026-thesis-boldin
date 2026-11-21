@@ -692,9 +692,10 @@ def team_reward(
     The reward is the same for both agents. Three cases, in priority order: the success
     step pays `success_bonus - step_penalty`; a step that crosses the failure bounds pays
     `failure_penalty` instead of the plain time cost; every other step pays
-    `-step_penalty`. Success wins over failure if both flags are set (they cannot be at
-    once with a valid config, because the success tolerances are strictly inside the
-    failure bounds).
+    `-step_penalty`. This helper gives success priority when BOTH flags are set, so the envs
+    must clear `succeeded` on a failure step before calling it: `CoopTaskEnv.step` and
+    `CoopBatchGPU.step` both enforce failure priority (a terminal failure pays
+    `failure_penalty` and reports `info["success"] = False`, never the success bonus).
 
     Args:
         succeeded: Whether the step satisfied the task's success rule.
@@ -764,6 +765,10 @@ A paddle tilted by `+tilt` has the face normal `(sin tilt, 0, cos tilt)`; for th
 paddle that points up and to the right (toward the partner), for the right paddle the sign
 is flipped. This is the suite's toss-catch mirror symmetry.
 """
+
+_TOSS_SIDE_X_SIGN = {"left": -1.0, "right": 1.0}
+"""The sign of the court half each paddle owns: the `left` paddle lives on `x < 0`, the
+`right` one on `x > 0` (mirrored `TossConfig.paddle_x_range`)."""
 
 
 def pad_face_normal(tilt: float) -> np.ndarray:
@@ -897,39 +902,142 @@ def toss_floor_failure(
     return ball_z < floor_z or abs(ball_x) > court_x or abs(ball_y) > court_y
 
 
-def toss_success(passes: int, target_passes: int) -> bool:
-    """Whether the team has completed enough consecutive passes (the conjunction rule).
+def toss_ball_on_side(ball_x: float, side: str) -> bool:
+    """Whether the ball centre is on the half of the court that `side`'s paddle owns.
+
+    The paddles live on their own halves (`TossConfig.paddle_x_range`: the `left` paddle in
+    `x < 0`, the `right` one in `x > 0`), so a receiving paddle can only be a real
+    interception partner if the ball has actually crossed the court centre and is on that
+    paddle's half. A contact while the ball is still on the other side (a ball chattering
+    between the near-centre paddle faces, or a paddle reaching across the centre) is not a
+    pass: the throw the agents are meant to complete must fly over the centre line.
 
     Args:
-        passes: Alternating paddle catches completed so far.
-        target_passes: Required number of passes (`n_passes`).
+        ball_x: Ball centre x coordinate (m).
+        side: `"left"` or `"right"` -- the paddle that is in contact.
 
     Returns:
-        `passes >= target_passes`.
+        True when `ball_x < 0` for the left side and `ball_x > 0` for the right one; exactly
+        on the centre line (`x == 0`) counts as neither side's half.
+
+    Raises:
+        ValueError: for an unknown side.
+    """
+    if side not in AGENT_KEYS:
+        raise ValueError(f"side must be one of {AGENT_KEYS}, got {side!r}")
+    return ball_x * _TOSS_SIDE_X_SIGN[side] > 0.0
+
+
+def toss_success(
+    passes: int,
+    target_passes: int,
+    *,
+    ball_x: float,
+    ball_y: float,
+    ball_z: float,
+    floor_z: float,
+    court_x: float,
+    court_y: float,
+    floor_margin: float,
+) -> bool:
+    """Whether the team has completed enough passes while the ball is still in play.
+
+    The success rule is the CONJUNCTION of three conditions, so a policy cannot "finish" an
+    episode with a ball that has already fallen out of play:
+
+    * `passes >= target_passes` -- the alternating catches reached the task's target;
+    * the ball is strictly above `floor_z + floor_margin` on the success step -- the ball
+      has not been dropped (a success frame below the floor is not a catch);
+    * the state does not already violate :func:`toss_floor_failure` (floor or court bounds).
+
+    Failure is additionally given priority over success by the env's `step`, so a step that
+    crosses a failure bound can never pay the success bonus.
+
+    Args:
+        passes: Alternating counted passes completed so far.
+        target_passes: Required number of passes (`n_passes`).
+        ball_x: Ball x coordinate at the success step (m).
+        ball_y: Ball y coordinate at the success step (m).
+        ball_z: Ball z coordinate at the success step (m).
+        floor_z: Lowest allowed ball-centre height (m).
+        court_x: Half-width of the court in x (m).
+        court_y: Half-width of the court in y (m).
+        floor_margin: Required clearance above `floor_z` on the success step (m).
+
+    Returns:
+        True only when every condition holds.
+
+    Raises:
+        ValueError: for a non-positive `target_passes` or a negative `floor_margin`.
     """
     if target_passes < 1:
         raise ValueError(f"target_passes must be >= 1, got {target_passes}")
-    return passes >= target_passes
+    if floor_margin < 0:
+        raise ValueError(f"floor_margin must be >= 0, got {floor_margin}")
+    if passes < target_passes:
+        return False
+    if ball_z <= floor_z + floor_margin:
+        return False
+    return not toss_floor_failure(
+        ball_x, ball_y, ball_z, floor_z=floor_z, court_x=court_x, court_y=court_y
+    )
 
 
-def toss_pass_count(passes: int, last_pass_side: str | None, contact_side: str) -> int:
-    """The pass count after a paddle contact (alternating contacts count as passes).
+def toss_pass_count(
+    passes: int,
+    last_pass_side: str | None,
+    contact_side: str,
+    *,
+    ball_x: float,
+    step: int,
+    last_pass_step: int,
+    min_interval_steps: int,
+) -> int:
+    """The pass count after a paddle contact (an interception pass, not a chatter bounce).
 
-    A pass is an interception by the paddle the ball was travelling toward: consecutive
-    contacts must alternate sides, so a ball chattering on the same paddle (a near-vertical
-    bounce) does not count twice and a double bounce is not a pass.
+    A pass is counted only when ALL of the following hold, otherwise the contact is ignored:
+
+    * **alternation**: `contact_side` differs from the side of the last COUNTED pass, so the
+      ball must have been returned to the other paddle (two passes cannot both be made by
+      the same paddle in a row);
+    * **the ball crossed the centre**: at the contact the ball centre is on the half that
+      `contact_side`'s paddle owns (:func:`toss_ball_on_side`), i.e. the ball really flew over
+      to the receiving partner instead of chattering between the two paddle faces near the
+      court centre;
+    * **minimum interval**: at least `min_interval_steps` control steps passed since the last
+      counted pass, so a ball bouncing several times on the same impact (the physics runs
+      `control_every` substeps per control step, and one bounce can touch/untouch a paddle
+      repeatedly) can never be counted as a series of rapid passes.
 
     Args:
         passes: Current pass count.
         last_pass_side: Side of the last counted pass (`None` before the first one).
         contact_side: Side of the paddle that is in contact now ("left" or "right").
+        ball_x: Ball centre x coordinate at the contact (m).
+        step: Zero-based control step of the contact.
+        last_pass_step: Control step of the last counted pass (`-1` before the first one).
+        min_interval_steps: Minimum control steps between two counted passes (>= 1).
 
     Returns:
         The new pass count.
+
+    Raises:
+        ValueError: for an unknown `contact_side`, a `step`/`last_pass_step` outside their
+            domain or a non-positive `min_interval_steps`.
     """
     if contact_side not in AGENT_KEYS:
         raise ValueError(f"contact_side must be one of {AGENT_KEYS}, got {contact_side!r}")
+    if min_interval_steps < 1:
+        raise ValueError(f"min_interval_steps must be >= 1, got {min_interval_steps}")
+    if step < 0:
+        raise ValueError(f"step must be >= 0, got {step}")
+    if last_pass_step < -1:
+        raise ValueError(f"last_pass_step must be >= -1, got {last_pass_step}")
     if last_pass_side == contact_side:
+        return passes
+    if not toss_ball_on_side(ball_x, contact_side):
+        return passes
+    if last_pass_step >= 0 and step - last_pass_step < min_interval_steps:
         return passes
     return passes + 1
 

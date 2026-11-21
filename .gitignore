@@ -261,3 +261,6 @@ presentation/
 
 # Coop-suite evaluation JSONs (server artifacts)
 results_coop/
+
+# Coop-suite GPU evaluation JSONs (server artifacts)
+results_coop_gpu/

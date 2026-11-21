@@ -156,6 +156,8 @@ class TossCatchEnv(CoopTaskEnv):
         self._release_step = int(randomization.release_delay_steps)
         self._passes = 0
         self._last_pass_side: str | None = None
+        self._last_pass_step = -1
+        """Control step of the last COUNTED pass (`-1` before the first one)."""
         self._contact_side = {"left": False, "right": False}
         self._pad_pose: dict[str, tuple[float, float, float]] = {}
         self._pad_start_pose: dict[str, tuple[float, float, float]] = {}
@@ -207,15 +209,34 @@ class TossCatchEnv(CoopTaskEnv):
         self._apply_interpolated_paddles(1.0 / cfg.control_every)
 
     def _on_substep(self, substep: int) -> None:
-        """Move the paddles toward their target pose and sample the ball/paddle contacts."""
+        """Move the paddles toward their target pose and sample the ball/paddle contacts.
+
+        A new ball/paddle contact is only counted as a pass when the pure
+        `toss_pass_count` rule accepts it (the ball is on the contacting paddle's own half,
+        the sides alternate and `min_pass_interval_steps` control steps passed since the
+        last counted pass); the raw contact flags are still tracked for the oracle and the
+        observation.
+        """
         cfg = self._config()
         alpha = min((substep + 2) / cfg.control_every, 1.0)
         self._apply_interpolated_paddles(alpha)
+        ball_x = float(self._data.qpos[self._ball_qpos])
         for side in AGENT_KEYS:
             contact = self._pad_contacts_ball(side)
             if contact and not self._contact_side[side]:
-                self._passes = toss_pass_count(self._passes, self._last_pass_side, side)
-                self._last_pass_side = side
+                passes = toss_pass_count(
+                    self._passes,
+                    self._last_pass_side,
+                    side,
+                    ball_x=ball_x,
+                    step=self._step_index,
+                    last_pass_step=self._last_pass_step,
+                    min_interval_steps=cfg.min_pass_interval_steps,
+                )
+                if passes != self._passes:
+                    self._passes = passes
+                    self._last_pass_side = side
+                    self._last_pass_step = self._step_index
             self._contact_side[side] = contact
 
     def _apply_interpolated_paddles(self, alpha: float) -> None:
@@ -306,12 +327,14 @@ class TossCatchEnv(CoopTaskEnv):
         return state
 
     def _diagnostics(self) -> dict[str, float]:
-        """Pass progress, the ball's state and the elapsed time."""
+        """Pass progress, the pass gate, the ball's state and the elapsed time."""
         cfg = self._config()
         state = self._task_state()
         return {
             "passes": float(self._passes),
             "target_passes": float(cfg.n_passes),
+            "last_pass_step": float(self._last_pass_step),
+            "min_pass_interval_steps": float(cfg.min_pass_interval_steps),
             "ball_x": state["ball_x"],
             "ball_z": state["ball_z"],
             "ball_speed": math.hypot(state["ball_vx"], state["ball_vz"]),
@@ -319,8 +342,20 @@ class TossCatchEnv(CoopTaskEnv):
         }
 
     def _success(self) -> bool:
-        """Whether the team completed the required number of alternating passes."""
-        return toss_success(self._passes, self._config().n_passes)
+        """Whether the team completed the passes while the ball was still above the floor."""
+        cfg = self._config()
+        data = self._data
+        return toss_success(
+            self._passes,
+            cfg.n_passes,
+            ball_x=float(data.qpos[self._ball_qpos]),
+            ball_y=float(data.qpos[self._ball_qpos + 1]),
+            ball_z=float(data.qpos[self._ball_qpos + 2]),
+            floor_z=cfg.floor_z,
+            court_x=cfg.court_x,
+            court_y=cfg.court_y,
+            floor_margin=cfg.success_floor_margin,
+        )
 
     def _failure(self) -> bool:
         """Whether the ball dropped below the floor or left the court."""

@@ -37,6 +37,7 @@ from callosum.experiments.coop_tasks.logic import (
     paddle_tilt,
     sample_toss_randomization,
     task_diagnostic,
+    toss_ball_on_side,
     toss_floor_failure,
     toss_pass_count,
     toss_potential,
@@ -158,23 +159,142 @@ def test_toss_failure_bounds() -> None:
     assert not toss_floor_failure(1.3, 0.55, 0.8, **kwargs)
 
 
+_SUCCESS_STATE = {
+    "ball_x": 0.4,
+    "ball_y": 0.0,
+    "floor_z": 0.07,
+    "court_x": 1.35,
+    "court_y": 0.6,
+    "floor_margin": 0.02,
+}
+"""The toss-catch success-state arguments shared by the rule tests (ball over the right half)."""
+
+
 def test_toss_success_conjunction() -> None:
-    assert not toss_success(0, 3)
-    assert not toss_success(2, 3)
-    assert toss_success(3, 3)
-    assert toss_success(4, 3)
+    assert not toss_success(0, 3, ball_z=0.8, **_SUCCESS_STATE)
+    assert not toss_success(2, 3, ball_z=0.8, **_SUCCESS_STATE)
+    assert toss_success(3, 3, ball_z=0.8, **_SUCCESS_STATE)
+    assert toss_success(4, 3, ball_z=0.8, **_SUCCESS_STATE)
     with pytest.raises(ValueError, match="target_passes"):
-        toss_success(0, 0)
+        toss_success(0, 0, ball_z=0.8, **_SUCCESS_STATE)
+    with pytest.raises(ValueError, match="floor_margin"):
+        toss_success(3, 3, ball_z=0.8, **{**_SUCCESS_STATE, "floor_margin": -0.1})
+
+
+def test_toss_success_requires_the_ball_above_the_floor() -> None:
+    """A success frame with the ball below the floor (or out of court) is not a success."""
+    # Enough passes but the ball has already been dropped below the floor.
+    assert not toss_success(3, 3, ball_z=0.05, **_SUCCESS_STATE)
+    # Above the floor but inside the success clearance: still not a success.
+    assert not toss_success(3, 3, ball_z=0.07, **_SUCCESS_STATE)
+    assert not toss_success(3, 3, ball_z=0.089, **_SUCCESS_STATE)
+    # Strictly above floor_z + floor_margin: the first valid success frame.
+    assert toss_success(3, 3, ball_z=0.091, **_SUCCESS_STATE)
+    # A court failure cancels the success even when the ball is high enough.
+    assert not toss_success(3, 3, ball_z=0.8, **{**_SUCCESS_STATE, "ball_x": 1.4})
+    assert not toss_success(3, 3, ball_z=0.8, **{**_SUCCESS_STATE, "ball_x": -1.4})
+    assert not toss_success(3, 3, ball_z=0.8, **{**_SUCCESS_STATE, "ball_y": 0.7})
+
+
+def test_toss_ball_on_side() -> None:
+    assert toss_ball_on_side(-0.3, "left")
+    assert not toss_ball_on_side(0.3, "left")
+    assert toss_ball_on_side(0.3, "right")
+    assert not toss_ball_on_side(-0.3, "right")
+    # Exactly on the centre line counts as neither paddle's half.
+    assert not toss_ball_on_side(0.0, "left")
+    assert not toss_ball_on_side(0.0, "right")
+    with pytest.raises(ValueError, match="side must be one of"):
+        toss_ball_on_side(0.3, "middle")
+
+
+def _pass_count(
+    passes: int = 0,
+    last_side: str | None = None,
+    side: str = "right",
+    *,
+    ball_x: float = 0.5,
+    step: int = 10,
+    last_step: int = -1,
+    interval: int = 3,
+) -> int:
+    """One `toss_pass_count` call with the test defaults (a right-side contact on its half)."""
+    return toss_pass_count(
+        passes,
+        last_side,
+        side,
+        ball_x=ball_x,
+        step=step,
+        last_pass_step=last_step,
+        min_interval_steps=interval,
+    )
 
 
 def test_toss_pass_count_requires_alternation() -> None:
-    assert toss_pass_count(0, None, "right") == 1
+    assert _pass_count() == 1
+    assert _pass_count(0, None, "right") == 1
     # A chattering contact on the same paddle does not count twice.
-    assert toss_pass_count(1, "right", "right") == 1
-    assert toss_pass_count(1, "right", "left") == 2
-    assert toss_pass_count(2, "left", "right") == 3
+    assert _pass_count(1, "right", "right") == 1
+    assert _pass_count(1, "right", "left", ball_x=-0.5) == 2
+    assert _pass_count(2, "left", "right", ball_x=0.5) == 3
     with pytest.raises(ValueError, match="contact_side"):
-        toss_pass_count(0, None, "middle")
+        _pass_count(side="middle")
+
+
+def test_toss_pass_count_requires_the_ball_over_the_centre() -> None:
+    """A contact with the ball still on the other half is not a pass (it never crossed)."""
+    # A right-paddle contact while the ball is still on the left half: no pass.
+    assert _pass_count(0, None, "right", ball_x=-0.4) == 0
+    assert _pass_count(1, "left", "right", ball_x=-0.4) == 1
+    # A left-paddle contact while the ball is on the right half: no pass either.
+    assert _pass_count(0, None, "left", ball_x=0.4) == 0
+    # Right at the centre line the ball is not on either paddle's half.
+    assert _pass_count(0, None, "right", ball_x=0.0) == 0
+
+
+def test_toss_pass_count_enforces_the_min_interval() -> None:
+    # First pass at control step 10.
+    assert _pass_count(0, None, "right", step=10) == 1
+    for step in (10, 11, 12):
+        assert _pass_count(1, "right", "left", ball_x=-0.5, step=step, last_step=10) == 1, (
+            f"a pass {step - 10} control step(s) after the previous one must be rejected"
+        )
+    # Exactly `min_interval_steps` control steps later the next pass counts.
+    assert _pass_count(1, "right", "left", ball_x=-0.5, step=13, last_step=10) == 2
+    # A fresh episode (`last_pass_step=-1`) has no interval gate.
+    assert _pass_count(0, None, "left", ball_x=-0.5, step=0, last_step=-1) == 1
+
+
+def test_toss_rapid_alternating_contacts_cannot_race_the_pass_counter() -> None:
+    """The exploit sentinel: a ball chattering across the centre every step counts slowly."""
+    passes, last_side, last_step = 0, None, -1
+    interval = 3
+    for step in range(12):
+        side = "left" if step % 2 == 0 else "right"
+        ball_x = -0.05 if side == "left" else 0.05
+        new = toss_pass_count(
+            passes,
+            last_side,
+            side,
+            ball_x=ball_x,
+            step=step,
+            last_pass_step=last_step,
+            min_interval_steps=interval,
+        )
+        if new != passes:
+            assert last_step < 0 or step - last_step >= interval
+            passes, last_side, last_step = new, side, step
+    # Contact every control step can only produce a pass every `interval` steps.
+    assert passes == 1 + 11 // interval
+
+
+def test_toss_pass_count_rejects_bad_arguments() -> None:
+    with pytest.raises(ValueError, match="min_interval_steps"):
+        _pass_count(interval=0)
+    with pytest.raises(ValueError, match="step must be >= 0"):
+        _pass_count(step=-1)
+    with pytest.raises(ValueError, match="last_pass_step"):
+        _pass_count(last_step=-2)
 
 
 def test_toss_potential_is_bounded_and_monotone() -> None:
@@ -299,6 +419,8 @@ def test_toss_config_defaults_match_the_task_spec() -> None:
     assert 300 <= cfg.max_control_steps <= 400
     assert cfg.action_size == 3
     assert cfg.n_passes == 3
+    assert cfg.min_pass_interval_steps == 3
+    assert 0 < cfg.success_floor_margin < cfg.pad_min_z - cfg.floor_z
     assert 0 < cfg.pad_tilt < cfg.pad_tilt_limit < math.pi / 2
     assert cfg.pad_min_z < cfg.pad_start_z < cfg.pad_max_z
     assert cfg.floor_z < cfg.pad_min_z < cfg.pad_max_z

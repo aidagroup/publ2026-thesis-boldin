@@ -213,6 +213,17 @@ def summarize(records: list[EpisodeRecord], infos: list[dict], task: str) -> dic
     if task == "toss":
         summary["mean_passes"] = float(np.mean([info["passes"] for info in infos]))
         summary["target_passes"] = float(infos[0]["target_passes"])
+        # Honesty diagnostics: a success may only be granted while the ball is above the
+        # floor, and the pass gate requires several control steps per counted pass, so the
+        # success ball heights and the success step counts pin both down in the JSON report.
+        success_ball_z = [info["ball_z"] for info in infos if info["success"]]
+        success_steps = sorted(record.decisions for record in records if record.success)
+        summary["mean_terminal_ball_z"] = float(np.mean([info["ball_z"] for info in infos]))
+        summary["min_success_ball_z"] = float(min(success_ball_z)) if success_ball_z else None
+        summary["min_success_steps"] = float(success_steps[0]) if success_steps else None
+        summary["p10_success_steps"] = (
+            float(success_steps[len(success_steps) // 10]) if success_steps else None
+        )
     return summary
 
 

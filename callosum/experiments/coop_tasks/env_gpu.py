@@ -30,7 +30,9 @@ Task specifics:
   `geom_solref`/`geom_friction` carry the sampled contact restitution/friction, the paddles'
   poses are interpolated over the `control_every` substeps and written to `mocap_pos`/
   `mocap_quat`, and the ball/paddle contacts are detected per substep with small Warp kernels
-  so the alternating pass counter of `toss_catch.py` keeps its CPU semantics. The paddles'
+  so the alternating pass counter of `toss_catch.py` keeps its CPU semantics -- including the
+  anti-chatter gate: a pass counts only on the contacting paddle's own court half and at
+  least `min_pass_interval_steps` control steps after the previous counted pass. The paddles'
   per-substep poses live in a constant pose/quaternion bank computed with torch before the
   graph replay, so no quaternion trigonometry happens inside the captured kernels.
 
@@ -361,16 +363,46 @@ if wp is not None:
         contact_side: wp.array2d(dtype=int),
         passes: wp.array(dtype=int),
         last_side: wp.array(dtype=int),
+        cooldown: wp.array(dtype=int),
+        qpos: wp.array2d(dtype=wp.float32),
+        ball_qpos: int,
+        min_interval: int,
     ):
-        """The CPU `toss_catch.TossCatchEnv._on_substep` pass counter, one substep at a time."""
+        """The CPU `toss_catch.TossCatchEnv._on_substep` pass gate, one substep at a time.
+
+        A new ball/paddle contact is counted only when the sides alternate, the ball centre
+        is on the contacting paddle's own half of the court (left: `x < 0`, right: `x > 0`,
+        the CPU `logic.toss_ball_on_side` rule) and no counted pass happened in the last
+        `min_interval` control steps. `cooldown` is aged once per control step by
+        `CoopBatchGPU.step` and armed to `min_interval` here, so this per-substep kernel
+        needs no step counter (and stays identical between the graph and the eager path).
+        """
         world = wp.tid()
-        for side in range(2):
-            now = flags[world, side]
-            if now == 1 and contact_side[world, side] == 0:
-                if last_side[world] != side:
-                    passes[world] = passes[world] + 1
-                last_side[world] = side
-            contact_side[world, side] = now
+        ball_x = qpos[world, ball_qpos]
+        now_left = flags[world, 0]
+        if (
+            now_left == 1
+            and contact_side[world, 0] == 0
+            and last_side[world] != 0
+            and ball_x < 0.0
+            and cooldown[world] == 0
+        ):
+            passes[world] = passes[world] + 1
+            last_side[world] = 0
+            cooldown[world] = min_interval
+        contact_side[world, 0] = now_left
+        now_right = flags[world, 1]
+        if (
+            now_right == 1
+            and contact_side[world, 1] == 0
+            and last_side[world] != 1
+            and ball_x > 0.0
+            and cooldown[world] == 0
+        ):
+            passes[world] = passes[world] + 1
+            last_side[world] = 1
+            cooldown[world] = min_interval
+        contact_side[world, 1] = now_right
 
 
 # --- step result --------------------------------------------------------------------------
@@ -789,6 +821,10 @@ class CoopBatchGPU:
                     self._contact_side_warp,
                     self._passes_warp,
                     self._last_side_warp,
+                    self._pass_cooldown_warp,
+                    self._data.qpos,
+                    self._ball_qpos,
+                    cfg.min_pass_interval_steps,
                 ],
             )
 
@@ -935,10 +971,15 @@ class CoopBatchGPU:
             self._contact_side_warp = wp.zeros((self.num_envs, pads), dtype=int)
             self._passes_warp = wp.zeros(self.num_envs, dtype=int)
             self._last_side_warp = wp.zeros(self.num_envs, dtype=int)
+            self._pass_cooldown_warp = wp.zeros(self.num_envs, dtype=int)
             self._flags = wp.to_torch(self._flags_warp)
             self._contact_side = wp.to_torch(self._contact_side_warp)
             self._passes = wp.to_torch(self._passes_warp)
             self._last_side = wp.to_torch(self._last_side_warp)
+            self._pass_cooldown = wp.to_torch(self._pass_cooldown_warp)
+            self._last_pass_step = torch.full(
+                (self.num_envs,), -1, dtype=torch.int64, device=device
+            )
             self._pad_mocap_array = wp.array(
                 np.asarray([self._pad_mocap["left"], self._pad_mocap["right"]], dtype=np.int32),
                 dtype=int,
@@ -1120,6 +1161,8 @@ class CoopBatchGPU:
                 self._passes.zero_()
                 self._contact_side.zero_()
                 self._last_side.fill_(-1)
+                self._pass_cooldown.zero_()
+                self._last_pass_step.fill_(-1)
                 self._launch_velocity[:, 0] = launch[:, 0]
                 self._launch_velocity[:, 1] = 0.0
                 self._launch_velocity[:, 2] = launch[:, 1]
@@ -1132,6 +1175,8 @@ class CoopBatchGPU:
                 self._passes[indices] = 0
                 self._contact_side[indices] = 0
                 self._last_side[indices] = -1
+                self._pass_cooldown[indices] = 0
+                self._last_pass_step[indices] = -1
                 self._launch_velocity[indices, 0] = launch[indices, 0]
                 self._launch_velocity[indices, 1] = 0.0
                 self._launch_velocity[indices, 2] = launch[indices, 1]
@@ -1310,7 +1355,13 @@ class CoopBatchGPU:
         self._write_pos = (self._write_pos + 1) % self._delay_size
 
         self._xfrc.zero_()
+        passes_before: torch.Tensor | None = None
         if self.task == "toss":
+            # The pass gate's cooldown is counted in control steps: it is armed to
+            # `min_pass_interval_steps` by the captured kernel on every counted pass and aged
+            # here once per control step (0 stays 0, so a fresh episode can pass immediately).
+            self._pass_cooldown.sub_(1).clamp_(min=0)
+            passes_before = self._passes.clone()
             self._prepare_toss_step(applied)
         else:
             physical = {
@@ -1344,6 +1395,12 @@ class CoopBatchGPU:
             self._qvel[invalid] = 0.0
         if self.task == "toss":
             self._finish_toss_step()
+            if passes_before is not None:
+                # At most one pass can be counted per control step (the cooldown gate), so
+                # the increment identifies the worlds whose pass just happened; `self._step`
+                # was already incremented, hence the `- 1` for the executed 0-based index.
+                counted = self._passes > passes_before
+                self._last_pass_step[counted] = self._step[counted] - 1
         elif self.task == "pendulum":
             self._update_pendulum_tracker()
         observations = self._build_observations()
@@ -1352,6 +1409,9 @@ class CoopBatchGPU:
             succeeded = succeeded & ~invalid
             failed = failed | invalid
             potential_now = torch.where(invalid, self._zero, potential_now)
+        # Failure has priority over success (the CPU `CoopTaskEnv.step` rule): a failure
+        # step pays `failure_penalty` and reports success=False, never the success bonus.
+        succeeded = succeeded & ~failed
         reward = torch.where(
             succeeded,
             self._reward_success,
@@ -1534,9 +1594,16 @@ class CoopBatchGPU:
         ball_x = self._qpos[:, 0]
         ball_y = self._qpos[:, 1]
         ball_z = self._qpos[:, 2]
-        succeeded = self._passes >= cfg.n_passes
         failed = (
             (ball_z < cfg.floor_z) | (ball_x.abs() > cfg.court_x) | (ball_y.abs() > cfg.court_y)
+        )
+        # The CPU `logic.toss_success` conjunction: enough passes AND the ball still in play
+        # above `floor_z + success_floor_margin` (and not a floor/court failure), so an
+        # episode cannot be won on the step that drops the ball out of the court.
+        succeeded = (
+            (self._passes >= cfg.n_passes)
+            & (ball_z > cfg.floor_z + cfg.success_floor_margin)
+            & ~failed
         )
         progress = (self._passes.to(torch.float32) / cfg.n_passes).clamp(min=0.0, max=1.0)
         height = (ball_z / cfg.shaping_height_scale).clamp(min=0.0, max=1.0)
@@ -1627,6 +1694,8 @@ class CoopBatchGPU:
                 (
                     self._passes[rows].to(torch.float64),
                     torch.full_like(step_time, float(cfg.n_passes)),
+                    self._last_pass_step[rows].to(torch.float64),
+                    torch.full_like(step_time, float(cfg.min_pass_interval_steps)),
                     self._qpos[rows, 0].to(torch.float64),
                     self._qpos[rows, 2].to(torch.float64),
                     torch.sqrt(ball_vx**2 + ball_vz**2),
@@ -1634,7 +1703,16 @@ class CoopBatchGPU:
                 ),
                 dim=1,
             )
-            keys = ("passes", "target_passes", "ball_x", "ball_z", "ball_speed", "time")
+            keys = (
+                "passes",
+                "target_passes",
+                "last_pass_step",
+                "min_pass_interval_steps",
+                "ball_x",
+                "ball_z",
+                "ball_speed",
+                "time",
+            )
         for position, row_values in enumerate(values.cpu().tolist()):
             info = {"success": bool(success[position])}
             info.update(zip(keys, (float(value) for value in row_values)))

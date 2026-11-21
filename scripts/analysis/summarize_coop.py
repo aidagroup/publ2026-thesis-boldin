@@ -25,7 +25,7 @@ TASKS = ("cartpole", "pendulum", "toss")
 def _parse_name(path: Path) -> tuple[str, str, int, int] | None:
     """`coop_<task>_<mode>_s<seed>_base<base>.json` -> (task, mode, seed, base)."""
     match = re.fullmatch(
-        r"coop_(?P<task>[a-z]+)_(?P<mode>none|oracle|pred)_s(?P<seed>\d+)_base(?P<base>\d+)",
+        r"(?:gpu_)?coop_(?P<task>[a-z]+)_(?P<mode>none|oracle|pred)_s(?P<seed>\d+)_base(?P<base>\d+)",
         path.stem,
     )
     if match is None:
@@ -35,7 +35,7 @@ def _parse_name(path: Path) -> tuple[str, str, int, int] | None:
 
 def collect(results_dir: Path) -> dict[tuple[str, str], list[dict]]:
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for path in sorted(results_dir.glob("coop_*_base*.json")):
+    for path in sorted(results_dir.glob("*coop_*_base*.json")):
         parsed = _parse_name(path)
         if parsed is None:
             continue

@@ -236,7 +236,8 @@ class CoopTaskEnv(gymnasium.Env):
             `(obs, reward, terminated, truncated, info)`. The reward is `failure_penalty`
             on the step that first crosses the failure bounds, `success_bonus -
             step_penalty` on the success step and `-step_penalty` otherwise (plus the
-            potential-based shaping delta on non-terminal steps).
+            potential-based shaping delta on non-terminal steps). Failure has priority: a
+            failure step never pays the success bonus and its `info["success"]` is False.
         """
         if self._randomization is None:
             raise RuntimeError("call reset() before step()")
@@ -272,6 +273,11 @@ class CoopTaskEnv(gymnasium.Env):
 
         succeeded = self._success()
         failed = self._failure()
+        # Failure has priority over success: a step that crosses a failure bound is a
+        # terminal failure, so it pays `failure_penalty` and reports `success=False` even if
+        # the task's success rule is also satisfied on that step (a "won" episode whose ball
+        # has already dropped below the floor is not a win).
+        succeeded = succeeded and not failed
         cfg = self.config
         reward = team_reward(
             succeeded=succeeded,

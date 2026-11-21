@@ -461,6 +461,10 @@ def test_pendulum_config_defaults_match_the_task_spec() -> None:
         (TossConfig, {"pad_tilt": 1.4}),  # above the tilt limit but below pi/2
         (TossConfig, {"n_passes": 0}),
         (TossConfig, {"n_passes": 99}),
+        (TossConfig, {"min_pass_interval_steps": 0}),
+        (TossConfig, {"min_pass_interval_steps": 200}),  # does not fit the budget
+        (TossConfig, {"success_floor_margin": 0.0}),
+        (TossConfig, {"success_floor_margin": 0.05}),  # above pad_min_z - floor_z
         (TossConfig, {"floor_z": 0.5}),  # above pad_min_z
         (TossConfig, {"pad_ready_z": 5.0}),
         (TossConfig, {"shaping_height_scale": 0.0}),

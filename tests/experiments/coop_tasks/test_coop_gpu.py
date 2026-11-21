@@ -305,6 +305,105 @@ def test_gpu_env_auto_reset_contract(task: str) -> None:
         env.close()
 
 
+def test_gpu_toss_pass_gate_matches_the_cpu_rule() -> None:
+    """The warp pass kernel must reproduce `logic.toss_pass_count` (the exploit sentinel).
+
+    The kernel is driven with a synthetic per-substep contact script instead of the physics:
+    the first control steps are the exploit's chattering alternating contacts (the ball
+    hovering just across the centre), the later ones a spaced rally on the paddles' own
+    halves. The GPU pass/cooldown/alternation state is compared step by step against the
+    pure CPU rule, and the chatter is asserted to count at most one pass per
+    `min_pass_interval_steps` control steps -- the CPU env test covers the same gate of
+    `TossCatchEnv._on_substep`.
+    """
+    from callosum.experiments.coop_tasks import logic
+
+    env = _gpu_env("toss", 2)
+    # The kernel only exists when warp imports (`_gpu_env` skips otherwise).
+    from callosum.experiments.coop_tasks.env_gpu import _update_passes
+
+    try:
+        env.reset(seed=0)
+        cfg = env.config
+        interval = cfg.min_pass_interval_steps
+        steps = 12
+        chatter_steps = 6
+        # Per control step, per substep: `(ball_x, left_contact, right_contact)`.
+        script: list[list[tuple[float, bool, bool]]] = []
+        for step in range(steps):
+            substeps: list[tuple[float, bool, bool]] = []
+            for substep in range(cfg.control_every):
+                if step < chatter_steps:
+                    # The exploit: a contact edge every substep, alternating sides.
+                    left = substep % 2 == 0
+                    right = not left
+                else:
+                    # A spaced rally: one contact on its own half every other step.
+                    left = step % 2 == 0 and substep == 0
+                    right = step % 2 == 1 and substep == 0
+                ball_x = -0.05 if left else (0.05 if right else 0.0)
+                substeps.append((ball_x, left, right))
+            script.append(substeps)
+        warp = env._warp
+        previous = {"left": False, "right": False}
+        cpu_passes = 0
+        cpu_last_side: str | None = None
+        cpu_last_step = -1
+        cpu_cooldown = 0
+        passes_after_chatter: list[int] = []
+        for step in range(steps):
+            # The per-control-step cooldown ageing of `CoopBatchGPU.step` (the kernel itself
+            # only ARMS the cooldown on a counted pass).
+            env._pass_cooldown.sub_(1).clamp_(min=0)
+            cpu_cooldown = max(cpu_cooldown - 1, 0)
+            for ball_x, left, right in script[step]:
+                for side, now in (("left", left), ("right", right)):
+                    if now and not previous[side]:
+                        new = logic.toss_pass_count(
+                            cpu_passes,
+                            cpu_last_side,
+                            side,
+                            ball_x=ball_x,
+                            step=step,
+                            last_pass_step=cpu_last_step,
+                            min_interval_steps=interval,
+                        )
+                        if new != cpu_passes:
+                            cpu_passes, cpu_last_side, cpu_last_step = new, side, step
+                            cpu_cooldown = interval
+                    previous[side] = now
+                env._qpos[:, 0] = ball_x
+                env._flags[:, 0] = int(left)
+                env._flags[:, 1] = int(right)
+                warp.launch(
+                    _update_passes,
+                    dim=env.num_envs,
+                    inputs=[
+                        env._flags_warp,
+                        env._contact_side_warp,
+                        env._passes_warp,
+                        env._last_side_warp,
+                        env._pass_cooldown_warp,
+                        env._data.qpos,
+                        env._ball_qpos,
+                        interval,
+                    ],
+                )
+            env.synchronize()
+            expected_last_side = -1 if cpu_last_side is None else AGENT_KEYS.index(cpu_last_side)
+            assert env._passes.cpu().tolist() == [cpu_passes] * env.num_envs
+            assert env._last_side.cpu().tolist() == [expected_last_side] * env.num_envs
+            assert env._pass_cooldown.cpu().tolist() == [cpu_cooldown] * env.num_envs
+            if step == chatter_steps - 1:
+                passes_after_chatter = env._passes.cpu().tolist()
+        # The rapid chatter alone must not race the counter: at most one pass per interval.
+        assert all(
+            passes <= 1 + (chatter_steps - 1) // interval for passes in passes_after_chatter
+        ), passes_after_chatter
+    finally:
+        env.close()
+
+
 @pytest.mark.parametrize("task", ("cartpole", "pendulum"))
 def test_gpu_one_step_parity_with_the_cpu_env(task: str) -> None:
     """The first control step of the two backends matches (float32 vs float64 physics)."""

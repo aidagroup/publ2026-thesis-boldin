@@ -419,6 +419,90 @@ def test_toss_oracle_returns_the_success_reward() -> None:
         env.close()
 
 
+def test_toss_contact_chatter_cannot_race_the_pass_counter() -> None:
+    """The pass gate: alternating contact edges alone cannot count rapid passes.
+
+    This is the exploit sentinel for the old rule (any "other side" contact edge counted):
+    a ball chattering between the two near-centre paddle faces used to reach `n_passes` in a
+    few control steps. The env must now count at most one pass per
+    `min_pass_interval_steps` control steps (and only with the ball on the contact side's
+    half, which this scripted pattern satisfies).
+    """
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        env.reset(seed=0)
+        call = {"substep": 0}
+
+        def fake_contacts(side: str) -> bool:
+            """Alternating contact edges: left on even substeps, right on odd ones."""
+            even = call["substep"] % 2 == 0
+            return even if side == "left" else not even
+
+        env._pad_contacts_ball = fake_contacts  # type: ignore[method-assign]
+        passes_per_step: list[float] = []
+        for step in range(3 * cfg.min_pass_interval_steps):
+            env._step_index = step
+            for substep in range(cfg.control_every):
+                call["substep"] = substep
+                # The ball stays just across the centre, on whichever side contacts next.
+                env._data.qpos[env._ball_qpos] = -0.05 if substep % 2 == 0 else 0.05
+                env._on_substep(substep)
+            passes_per_step.append(float(env._passes))
+        interval = cfg.min_pass_interval_steps
+        assert passes_per_step == [1.0 + step // interval for step in range(3 * interval)], (
+            passes_per_step
+        )
+    finally:
+        env.close()
+
+
+def test_toss_floor_failure_beats_a_simultaneous_success() -> None:
+    """Failure priority: enough passes with the ball below the floor is a FAILURE step."""
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        env.reset(seed=0)
+        # The exploit's end state: the pass target is reached, but the ball is below the floor.
+        env._passes = cfg.n_passes
+        env._data.qpos[env._ball_qpos + 2] = cfg.floor_z - 0.1
+        assert env._success() is False
+        assert env._failure() is True
+        _obs, reward, terminated, truncated, info = env.step(_toss_zero_action(env))
+        assert terminated and not truncated
+        assert info["success"] is False
+        assert reward == pytest.approx(cfg.reward.failure_penalty)
+        assert info["ball_z"] < cfg.floor_z
+    finally:
+        env.close()
+
+
+def test_toss_success_requires_the_ball_above_the_floor_margin() -> None:
+    """Success is a conjunction with "the ball is still in play", not just the pass count."""
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        env.reset(seed=0)
+        env._passes = cfg.n_passes
+        ball_z = env._data.qpos[env._ball_qpos + 2]
+        env._data.qpos[env._ball_qpos + 2] = cfg.floor_z + cfg.success_floor_margin - 1e-3
+        assert not env._failure()
+        assert env._success() is False
+        env._data.qpos[env._ball_qpos + 2] = cfg.floor_z + cfg.success_floor_margin + 1e-3
+        assert not env._failure()
+        assert env._success() is True
+        # A court failure is not a success even high above the floor.
+        env._data.qpos[env._ball_qpos + 2] = ball_z
+        env._data.qpos[env._ball_qpos] = cfg.court_x + 0.01
+        assert env._failure() is True
+        assert env._success() is False
+    finally:
+        env.close()
+
+
 def test_toss_actions_move_and_tilt_the_paddle() -> None:
     pytest.importorskip("mujoco")
     cfg = coop_config("toss")

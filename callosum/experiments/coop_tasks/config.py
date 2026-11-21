@@ -701,6 +701,23 @@ class TossConfig:
     max_passes: int = 12
     """Sanity cap of `n_passes` (the episode budget must contain several passes)."""
 
+    min_pass_interval_steps: int = 3
+    """Minimum number of control steps between two counted passes (>= 1).
+
+    The physics runs `control_every` substeps per control step, and one ball/paddle impact
+    can start and stop the contact several times, so without this gate a single impact (or a
+    ball chattering between the two paddle faces near the court centre) could be counted as
+    a series of passes. A counted pass also requires the ball to be on the contacting
+    paddle's own half of the court (`logic.toss_ball_on_side`), i.e. the ball has really
+    flown across the centre to the partner."""
+
+    success_floor_margin: float = 0.02
+    """Clearance (m) above `floor_z` the ball must keep on the success step.
+
+    Success is only granted while the ball is strictly above `floor_z + success_floor_margin`
+    and the state is not a floor/court failure, so an episode cannot be "won" on the step
+    that drops the ball below the floor. Must be in `(0, pad_min_z - floor_z)`."""
+
     # --- reward / shaping ------------------------------------------------------------------
     reward: CoopRewardConfig = field(default_factory=CoopRewardConfig)
     """The shared team reward."""
@@ -794,12 +811,24 @@ class TossConfig:
             raise ValueError(
                 f"n_passes must be in [1, max_passes={self.max_passes}], got {self.n_passes}"
             )
+        if self.min_pass_interval_steps < 1:
+            raise ValueError(
+                f"min_pass_interval_steps must be >= 1, got {self.min_pass_interval_steps}"
+            )
+        if not 0 < self.success_floor_margin < self.pad_min_z - self.floor_z:
+            raise ValueError(
+                "success_floor_margin must be in (0, pad_min_z - floor_z) = "
+                f"(0, {self.pad_min_z - self.floor_z}), got {self.success_floor_margin}"
+            )
         # Each pass needs at least a couple of control steps of flight; the budget must
-        # contain the whole rally with a margin.
-        if self.n_passes * 4 > self.max_control_steps:
+        # contain the whole rally with a margin. The pass gate's interval is the tightest
+        # lower bound on the step count of a valid rally.
+        steps_per_pass = max(4, self.min_pass_interval_steps + 1)
+        if self.n_passes * steps_per_pass > self.max_control_steps:
             raise ValueError(
                 "n_passes does not fit the episode budget: "
-                f"n_passes={self.n_passes}, max_control_steps={self.max_control_steps}"
+                f"n_passes={self.n_passes}, steps_per_pass={steps_per_pass}, "
+                f"max_control_steps={self.max_control_steps}"
             )
         for name in ("shaping_pass_coef", "shaping_height_coef"):
             if getattr(self, name) < 0:
