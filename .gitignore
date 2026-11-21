@@ -252,3 +252,6 @@ harbour-space-letter/
 
 # Local demo artifacts (videos/stills, not source)
 demo/
+
+# Local experiment result JSONs (grid/evals; artifacts live on the pod volume)
+results_gpu/
