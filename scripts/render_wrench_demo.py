@@ -18,7 +18,8 @@ on a render-only copy of the scene, see `scripts/_render_utils.py`):
    ``none`` / ``oracle`` engine observations or ``predicted`` (Bi-JEPA ``ẑ_partner``, built by
    `callosum.training.wrench_ppo.LatentInputBuilder`).
 
-Plus ``demo_preview.gif`` (looping preview of the oracle-vs-rotator clip), the first three
+Plus ``demo_preview.gif`` (looping preview; it prefers the learned-policy-vs-oracle clip when
+that scene is rendered and falls back to the oracle-vs-rotator clip), the first three
 frames of every video as PNG stills (``oracle_frame0.png`` ...; they are identical by
 construction, because the slow-motion expansion holds frame 0), a middle frame (``*_mid.png``)
 and the final frame (``*_final.png``) of every clip, and ``demo_summary.json`` with the episode
@@ -313,9 +314,16 @@ class PolicyDemoController:
         return actions
 
     def observe(self, obs: dict[str, np.ndarray]) -> None:
-        """Advance the policy input after a non-terminal step (`predicted` rolls history)."""
-        if self._builder is not None:
-            self._policy_obs = self._builder.step(self._eval._batch_obs(obs), self._torch.zeros(1))
+        """Advance the policy input after a non-terminal step.
+
+        `none`/`oracle`: the policy input is the current env observation itself (the same
+        seam as `eval_wrench_cube.run_episode`). `predicted`: the Bi-JEPA builder rolls the
+        observation history and rebuilds `[own obs, ẑ_partner]`.
+        """
+        batch = self._eval._batch_obs(obs)
+        self._policy_obs = (
+            self._builder.step(batch, self._torch.zeros(1)) if self._builder is not None else batch
+        )
 
 
 DemoController = OracleDemoController | PolicyDemoController
@@ -831,6 +839,58 @@ def _write_sbs_clip(
     return clip
 
 
+def _write_gif_preview(
+    out_dir: Path,
+    left: DemoEpisode,
+    right: DemoEpisode,
+    *,
+    duplicate_left: int,
+    duplicate_right: int,
+    fps: int,
+    gif_width: int,
+    gif_stride: int = 2,
+) -> dict[str, Any]:
+    """Write the looping GIF preview of a side-by-side clip; returns its summary block."""
+    gif_path = out_dir / PREVIEW_GIF
+    gif_frames = write_gif(
+        gif_path,
+        (
+            frame
+            for index, frame in enumerate(
+                side_by_side_frames(
+                    left,
+                    right,
+                    duplicate_left=duplicate_left,
+                    duplicate_right=duplicate_right,
+                )
+            )
+            if index % gif_stride == 0
+        ),
+        frame_duration_ms=round(1000.0 * gif_stride / fps),
+        width=int(gif_width),
+    )
+    with Image.open(gif_path) as gif_image:
+        gif_file_frames = int(getattr(gif_image, "n_frames", 1))
+        gif_frame_ms = int(gif_image.info.get("duration", 0) or 0)
+        gif_size = gif_image.size
+    samples = [
+        left.frames[min(len(left.frames) - 1, len(left.frames) // 2)].image,
+        right.frames[min(len(right.frames) - 1, len(right.frames) // 2)].image,
+    ]
+    return {
+        "path": str(gif_path.resolve()),
+        "bytes": int(gif_path.stat().st_size),
+        "frames": gif_file_frames,
+        "written_frames": int(gif_frames),
+        "duration_s": round(gif_file_frames * max(gif_frame_ms, 1) / 1000.0, 2),
+        "width": gif_size[0],
+        "height": gif_size[1],
+        "gif_stride": gif_stride,
+        "source": f"{left.name} vs {right.name}",
+        "mean_luma": round(float(np.mean([mean_luma(frame) for frame in samples])), 2),
+    }
+
+
 def _print_table(rows: Sequence[Sequence[str]], header: Sequence[str]) -> None:
     """Print a small fixed-width table."""
     widths = [max(len(str(row[i])) for row in (header, *rows)) for i in range(len(header))]
@@ -1032,43 +1092,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 encoders=encoders,
             )
             clips["side-by-side"] = clip
-            duplicate = int(clip["duplicate_left"])
-            gif_stride = 2
-            gif_path = args.out / PREVIEW_GIF
-            gif_frames = write_gif(
-                gif_path,
-                (
-                    frame
-                    for index, frame in enumerate(
-                        side_by_side_frames(
-                            oracle,
-                            rotator,
-                            duplicate_left=duplicate,
-                            duplicate_right=duplicate,
-                        )
-                    )
-                    if index % gif_stride == 0
-                ),
-                frame_duration_ms=round(1000.0 * gif_stride / args.fps),
-                width=int(args.gif_width),
+            clips["preview-gif"] = _write_gif_preview(
+                args.out,
+                oracle,
+                rotator,
+                duplicate_left=int(clip["duplicate_left"]),
+                duplicate_right=int(clip["duplicate_right"]),
+                fps=args.fps,
+                gif_width=args.gif_width,
             )
-            with Image.open(gif_path) as gif_image:
-                gif_file_frames = int(getattr(gif_image, "n_frames", 1))
-                gif_frame_ms = int(gif_image.info.get("duration", 0) or 0)
-                gif_size = gif_image.size
-            clips["preview-gif"] = {
-                "path": str(gif_path.resolve()),
-                "bytes": int(gif_path.stat().st_size),
-                "frames": gif_file_frames,
-                "written_frames": int(gif_frames),
-                "duration_s": round(gif_file_frames * max(gif_frame_ms, 1) / 1000.0, 2),
-                "width": gif_size[0],
-                "height": gif_size[1],
-                "gif_stride": gif_stride,
-                "mean_luma": round(
-                    float(np.mean([mean_luma(image) for image in _gif_luma_samples(oracle)])), 2
-                ),
-            }
 
         if want_policy and policy_controller is not None:
             oracle_upper = run_episode(
@@ -1121,6 +1153,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             clip["policy"] = policy_controller.metadata()
             clip["policy_max_steps"] = policy_steps
             clips["policy-vs-oracle"] = clip
+            # The preview GIF prefers the learned-policy comparison when it is rendered.
+            clips["preview-gif"] = _write_gif_preview(
+                args.out,
+                policy_episode,
+                oracle_upper,
+                duplicate_left=int(clip["duplicate_left"]),
+                duplicate_right=int(clip["duplicate_right"]),
+                fps=args.fps,
+                gif_width=args.gif_width,
+            )
     finally:
         renderer.close()
         if policy_env is not None:
@@ -1170,14 +1212,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"\nartifacts in: {args.out.resolve()}")
     print(f"encoder(s): {sorted(set(encoders))}")
     return 0
-
-
-def _gif_luma_samples(oracle: DemoEpisode) -> list[np.ndarray]:
-    """A few frames of the oracle clip, used as the GIF brightness sample for the report."""
-    count = len(oracle.frames)
-    if count == 0:
-        return []
-    return [oracle.frames[index].image for index in (0, count // 2, count - 1)]
 
 
 if __name__ == "__main__":
