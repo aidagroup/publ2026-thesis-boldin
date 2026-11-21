@@ -44,7 +44,7 @@ tests/
   experiments/{cube_wrench,coop_tasks,arm}/    # тесты по экспериментам
 ```
 
-**Entry points:** `python -m callosum.experiments.cube_wrench.{train,eval,render}`, `python -m callosum.experiments.coop_tasks.eval`, `python -m callosum.experiments.arm.{trainer,bc,skills_eval}`, smoke-скрипты — `scripts/experiments/<experiment>/...`. План рефакторинга и финальное дерево: [`docs/refactor-plan.md`](docs/refactor-plan.md).
+**Entry points:** `python -m callosum.experiments.cube_wrench.{train,eval,render}`, `python -m callosum.experiments.coop_tasks.{eval,render}`, `python -m callosum.experiments.arm.{trainer,bc,skills_eval}`, smoke-скрипты — `scripts/experiments/<experiment>/...`. План рефакторинга и финальное дерево: [`docs/refactor-plan.md`](docs/refactor-plan.md).
 
 ## Содержание
 
