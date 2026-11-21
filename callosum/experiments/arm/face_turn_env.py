@@ -36,7 +36,7 @@ _DIAG_QUANTITIES = (
 )
 
 
-# 400 control steps: the scripted holder-then-rotator expert (scripts/probe_face_turn.py, CPU sim)
+# 400 control steps: the scripted holder-then-rotator expert (scripts/experiments/arm/probe_face_turn.py, CPU sim)
 # first reaches success after 329 steps (350 incl. the release), so 300 would cut it off. It is
 # deliberately slow (waypoint paths, settling steps), but a learned policy needs room for
 # exploration and regrasps too. TwoSO101-v0 (reach only) stays at 100.

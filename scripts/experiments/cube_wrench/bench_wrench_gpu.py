@@ -15,7 +15,7 @@ The GPU backend needs the optional `mujoco-warp==4.0.1` install (the `sandbox-gp
 Linux/CUDA only; the pod's plain `uv sync --frozen` removes it), so on the pod run:
 
     uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1
-    python scripts/bench_wrench_gpu.py --nworld 256 1024 4096 --steps 100
+    python scripts/experiments/cube_wrench/bench_wrench_gpu.py --nworld 256 1024 4096 --steps 100
 
 Run it on the pod only (the CPU loop is slow and the plan forbids heavy sim on the laptop).
 """

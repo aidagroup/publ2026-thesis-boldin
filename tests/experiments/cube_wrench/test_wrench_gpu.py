@@ -10,7 +10,7 @@ Two layers, so the Mac/CI run stays green without the GPU stack:
 * **GPU**: the batch env itself (`WrenchCubeBatchGPU`) is only built when `mujoco_warp`
   imports AND a CUDA device exists; the shape/validation/one-step-parity tests skip
   otherwise. The full multi-step parity and the throughput numbers are the pod scripts
-  (`scripts/check_wrench_gpu_parity.py`, `scripts/bench_wrench_gpu.py`), not pytest.
+  (`scripts/experiments/cube_wrench/check_wrench_gpu_parity.py`, `scripts/experiments/cube_wrench/bench_wrench_gpu.py`), not pytest.
 
 CI installs only the `dev` extra (no torch, no mujoco, no warp), so every test here is a
 skip there; locally (`make dev` + the macOS `sandbox` extra) the GPU cases skip and the rest

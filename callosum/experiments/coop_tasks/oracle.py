@@ -6,7 +6,7 @@ CENTRALISED scripts (one program commands both agents) used only to check that t
 the one-sided authority and the observation/reward contract are sane -- not policies and not
 part of the learned `none`/`oracle`/`predicted` triple. They are also the source of the
 "only-left" non-additivity baseline: run the same oracle but zero the right agent, and the
-task must become unachievable (see `scripts/smoke_coop.py`).
+task must become unachievable (see `scripts/experiments/coop_tasks/smoke_coop.py`).
 
 The scripted oracle is deliberately PRIVILEGED: it reads the env's sampled randomisation
 (each agent's latency and start delay) and the base env's `pending_commands()` (the

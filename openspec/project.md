@@ -85,7 +85,7 @@
 
 ## Ограничения
 
-- **Compute (обновлено 2026-11-15):** RunPod, GPU Pod **A40 48 ГБ** (Ampere; раннее решение про A6000/4090 скорректировано по наличию), On-Demand по умолчанию / Spot для длинных прогонов, container disk ~50 ГБ, network volume `/workspace` (20 ГБ) под `~/callosum-runs` (симлинк; чекпоинты переживают удаление пода). State-обучение работает (Vulkan — software/lavapipe; hardware-Vulkan для видеорендера — открытый вопрос, не блокирует E1/E2). Ранбук — `docs/cloud-gpu.md`; авто-рестарт — `scripts/cloud_resume_loop.sh`. Storage-скрипты верифицированы первым прогоном 2026-11-15.
+- **Compute (обновлено 2026-11-15):** RunPod, GPU Pod **A40 48 ГБ** (Ampere; раннее решение про A6000/4090 скорректировано по наличию), On-Demand по умолчанию / Spot для длинных прогонов, container disk ~50 ГБ, network volume `/workspace` (20 ГБ) под `~/callosum-runs` (симлинк; чекпоинты переживают удаление пода). State-обучение работает (Vulkan — software/lavapipe; hardware-Vulkan для видеорендера — открытый вопрос, не блокирует E1/E2). Ранбук — `docs/cloud-gpu.md`; авто-рестарт — `scripts/ops/cloud_resume_loop.sh`. Storage-скрипты верифицированы первым прогоном 2026-11-15.
 - **`main` заморожен** до server-верификации storage-скриптов; работа в step-ветках, push регулярно.
 - **Мак локально:** ruff, юнит-pytest, чтение кода; изредка 1–2-средовые CPU-пробы в одноразовом окружении (в т.ч. MuJoCo `CubeWrench-v0`); никаких тренировок, GPU, 256-сред.
 - Язык: доки на русском; код, комментарии и коммиты на английском; коммиты `type: msg` без атрибуции.

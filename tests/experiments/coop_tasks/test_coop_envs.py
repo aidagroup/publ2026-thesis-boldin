@@ -3,7 +3,7 @@
 The environments need the `sandbox` extra (mujoco), which CI does not install, so every test
 here starts with `pytest.importorskip("mujoco")` (the same pattern as the simulator-side
 checks of `tests/test_wrench_logic.py`): CI skips them, the macOS sandbox venv runs them, and
-`scripts/smoke_coop.py` covers the scripted oracle/baseline rollouts on a machine with the
+`scripts/experiments/coop_tasks/smoke_coop.py` covers the scripted oracle/baseline rollouts on a machine with the
 simulator.
 
 What is checked: the Gymnasium spaces and observation widths (against the pure

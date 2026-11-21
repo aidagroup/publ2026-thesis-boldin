@@ -22,7 +22,7 @@ class BCConfig:
     """
 
     demos: str = ""
-    """Demo file written by `scripts/collect_demos.py` (required)."""
+    """Demo file written by `scripts/experiments/arm/collect_demos.py` (required)."""
     exp_name: str | None = None
     """Run name; outputs go to `<runs_dir>/<exp_name>/` (default: `bc__<seed>__<time>`)."""
     runs_dir: str = "runs"
@@ -60,7 +60,9 @@ class BCConfig:
 
     def __post_init__(self) -> None:
         if not self.demos:
-            raise ValueError("demos is required (--demos <file from scripts/collect_demos.py>)")
+            raise ValueError(
+                "demos is required (--demos <file from scripts/experiments/arm/collect_demos.py>)"
+            )
         validate_partner_obs(self.partner_obs)
         if self.device not in DEVICES:
             raise ValueError(f"device must be one of {DEVICES}, got {self.device!r}")

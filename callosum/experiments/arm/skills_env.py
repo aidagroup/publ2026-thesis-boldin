@@ -30,7 +30,7 @@ reward per decision is `success_bonus * success - step_penalty` (`SkillsRewardCo
 
 [gpu]: the heavy path (SAPIEN articulation, GPU batched buffers) only runs on Linux;
 this module imports mani_skill at module level and is therefore not importable on
-macOS, exactly like `callosum.experiments.arm.face_turn_env` (see `scripts/smoke_face_turn_skills.py`
+macOS, exactly like `callosum.experiments.arm.face_turn_env` (see `scripts/experiments/arm/smoke_face_turn_skills.py`
 for the [cloud] smoke check and `tests/test_face_turn_skills_logic.py` for the pure
 logic).
 """

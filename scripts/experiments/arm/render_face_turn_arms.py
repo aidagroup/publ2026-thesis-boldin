@@ -44,7 +44,7 @@ Usage (pod, repo root; the sim venv is `/root/callosum-arms-venv`, built with
 `uv sync --frozen --extra sim --extra train --extra dev`):
 ```
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
-  /root/callosum-arms-venv/bin/python scripts/render_face_turn_arms.py \
+  /root/callosum-arms-venv/bin/python scripts/experiments/arm/render_face_turn_arms.py \
   --out /root/arms_demo_out --seed 0
 ```
 Quick framing check (stills only, stop before the release):

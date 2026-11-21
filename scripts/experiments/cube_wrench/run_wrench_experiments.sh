@@ -11,9 +11,9 @@
 # thread pool oversubscribes on a many-core pod -> each run exports one torch thread).
 #
 # Usage (on the RunPod pod, from the repo checkout):
-#   bash scripts/run_wrench_experiments.sh                  # 3 seeds, 500 updates
-#   SEEDS="0" UPDATES=100 bash scripts/run_wrench_experiments.sh
-#   MODES="none oracle" SEEDS="0 1" bash scripts/run_wrench_experiments.sh
+#   bash scripts/experiments/cube_wrench/run_wrench_experiments.sh                  # 3 seeds, 500 updates
+#   SEEDS="0" UPDATES=100 bash scripts/experiments/cube_wrench/run_wrench_experiments.sh
+#   MODES="none oracle" SEEDS="0 1" bash scripts/experiments/cube_wrench/run_wrench_experiments.sh
 #
 # The training logs land in $RUNS_DIR/<exp-name>.log; the eval JSONs in
 # $RESULTS_DIR/<exp-name>.json. Override RUNS_DIR to point at the network volume.

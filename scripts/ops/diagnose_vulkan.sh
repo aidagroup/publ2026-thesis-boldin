@@ -2,7 +2,7 @@
 # Short Vulkan diagnostic for the lab server: which NVIDIA libs / ICD manifests /
 # loaders exist, and what `vulkaninfo --summary` says for each candidate pair.
 #
-#   bash scripts/diagnose_vulkan.sh
+#   bash scripts/ops/diagnose_vulkan.sh
 #
 # Read-only apart from its own temp output. Expected on a healthy setup: the
 # generated manifest + current loader shows the A100 with
@@ -91,4 +91,4 @@ else
   echo "  venv python not found: $VENV_PY"
 fi
 echo
-echo "To re-pick the best combination: bash scripts/setup_server.sh  (log of every probe: $WORK/vulkan-probe.log)"
+echo "To re-pick the best combination: bash scripts/ops/setup_server.sh  (log of every probe: $WORK/vulkan-probe.log)"

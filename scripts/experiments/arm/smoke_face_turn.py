@@ -14,7 +14,6 @@ See docs/implementation-plan.md, step 1.3, "Критерий готовност�
 """
 
 import torch
-from _sim_utils import make_env, parse_args
 from mani_skill.utils.structs.pose import Pose
 
 # Importing the module (not just the callosum.envs package) runs its
@@ -23,6 +22,7 @@ from mani_skill.utils.structs.pose import Pose
 # re-export this submodule -- see docs/implementation-plan.md section 0.
 import callosum.experiments.arm.face_turn_env  # noqa: F401
 from callosum.experiments.arm.face_turn_env import TARGET_FACE_ANGLE
+from callosum.experiments.arm.sim_utils import make_env, parse_args
 
 
 def main() -> None:

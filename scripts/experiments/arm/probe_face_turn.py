@@ -3,7 +3,7 @@
 The readiness check for step 1.5, and a worked example of a feasible strategy. There is no
 teleporting or pinning of anything: both arms are driven only through their joint controllers
 and the cube is only ever touched by the grippers. The strategy itself lives in
-`callosum.experiments.arm.expert` (shared with `scripts/collect_demos.py`); `--control delta`
+`callosum.experiments.arm.expert` (shared with `scripts/experiments/arm/collect_demos.py`); `--control delta`
 runs it under the training controller (`pd_joint_delta_pos`) instead of `pd_joint_pos`.
 
 Strategy (arms stand 90 degrees apart around the cube, see `callosum.experiments.arm.layout`):
@@ -54,7 +54,6 @@ import sys
 
 import numpy as np
 import torch
-from _sim_utils import make_env, parse_args
 from mani_skill.utils import common
 
 import callosum.experiments.arm.face_turn_env  # noqa: F401  (registers FaceTurn-v0)
@@ -62,6 +61,7 @@ from callosum.experiments.arm.expert import ArmModel, Rig, run_expert
 from callosum.experiments.arm.expert_config import CONTROL_MODES, ExpertControlConfig
 from callosum.experiments.arm.face_turn_config import FaceTurnPhysicsConfig
 from callosum.experiments.arm.face_turn_env import TARGET_FACE_ANGLE
+from callosum.experiments.arm.sim_utils import make_env, parse_args
 
 
 def report(rig: Rig, phase: str) -> dict:

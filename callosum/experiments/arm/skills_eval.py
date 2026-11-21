@@ -12,7 +12,7 @@ lands in `--out` as JSON together with the full config (reproducible launch).
 Checkpoints are the IPPO trainer's run directories (their `latest.pt` is used) or `.pt`
 files directly; several at once and/or as glob patterns:
 
-    uv run python scripts/eval_skills.py \
+    uv run python python -m callosum.experiments.arm.skills_eval \
         --checkpoints 'runs/skills_oracle_s*' --partner-mode oracle \
         --episodes 100 --cross-play --recovery --out results.json
 
@@ -449,7 +449,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: `python scripts/eval_skills.py [flags]` ([cloud] only)."""
+    """CLI entry point: `python python -m callosum.experiments.arm.skills_eval [flags]` ([cloud] only)."""
     # The server runs this detached under nohup with stdout redirected to a file:
     # flush per line, like the trainer.
     sys.stdout.reconfigure(line_buffering=True)

@@ -7,7 +7,7 @@ server.
 
 Why: IPPO from scratch never finds a grasp on FaceTurn-v0 (diagnostics of a 10M-step run: no arm
 ever grasps anything). The scripted expert (`callosum.experiments.arm.expert`) does, so the
-policies start from its demonstrations (`scripts/collect_demos.py`) and PPO fine-tunes from there
+policies start from its demonstrations (`scripts/experiments/arm/collect_demos.py`) and PPO fine-tunes from there
 (`ippo --checkpoint <run>/bc.pt`, optionally with `--critic-warmup-iters` and the auxiliary demo
 loss `--demos/--bc-coef`).
 

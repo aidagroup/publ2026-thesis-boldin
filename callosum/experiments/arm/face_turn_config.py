@@ -159,7 +159,7 @@ class FaceTurnPhysicsConfig:
     articulation builder drops the friction given to `set_joint_properties`, so the old value
     0.02 was a no-op; `build_turntable_cube` now sets it on the built joint.
 
-    Measured on the Mac CPU sim (1 env, `scripts/probe_face_turn.py`, wrist roll of 95.7 degrees,
+    Measured on the Mac CPU sim (1 env, `scripts/experiments/arm/probe_face_turn.py`, wrist roll of 95.7 degrees,
     `pd_joint_pos`). Rotator alone (`--no-holder --no-lock`, holder at rest), after the turn:
     friction 0 to 2: face 90 deg, body rotated 5 to 7.5 deg; 5: 88.5 / 6.6; 10: 83.6 / 11.8;
     20: 82.3 / 13.1; 50: 73 / 23; 100: 61.6 / 35; 300: 42 / 54 (face angle / body rotation in

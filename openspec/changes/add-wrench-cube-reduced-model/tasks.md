@@ -13,7 +13,7 @@
 - [x] 1.1 `WrenchCubeEnv`: Gymnasium API (`reset/step`), Dict-action по агентам, obs/info, терминация/обрезка, `success/angle/drift`
 - [x] 1.2 Непрерывные 6D-wrench → `xfrc_applied` (holder→core, rotator→layer), лимиты/латентности/slip из конфига
 - [x] 1.3 Скриптовый oracle-контроллер (`wrench_cube/oracle.py`): стабилизация core + доведение слоя до 90°
-- [x] 1.4 `scripts/smoke_wrench_cube.py --envs 2 --episodes 5 --controller oracle|random|zero`
+- [x] 1.4 `scripts/experiments/cube_wrench/smoke_wrench_cube.py --envs 2 --episodes 5 --controller oracle|random|zero`
 - [x] 1.5 **Гейт G1 (пройден 2026-11-21):** oracle 0.988 на 256 эпизодах, rotator-only 0.000 с дрейфом 29.8° > порога oracle ≥0.95 на ≥256 эпизодах (RunPod) и стабильный локальный поворот (1–2 env)
 
 ## 2. Тренер IPPO

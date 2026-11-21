@@ -1,6 +1,6 @@
 """Demonstration files of the scripted expert: layout, assembly, loading, Monte-Carlo returns.
 
-`scripts/collect_demos.py` records the expert (`callosum.experiments.arm.expert`) driving the
+`scripts/experiments/arm/collect_demos.py` records the expert (`callosum.experiments.arm.expert`) driving the
 training env (`pd_joint_delta_pos`, `obs_mode="state"`, `reward_mode="normalized_dense"`) and
 writes a `.pt` file with the layout below; `callosum.experiments.arm.bc` and the IPPO fine-tune
 (`--demos`) read it. No mani_skill import, and torch is only imported inside the functions that

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Auto-restart loop for IPPO training on preemptible cloud VMs (Nebius).
-# Usage: bash scripts/cloud_resume_loop.sh <run_name> [ippo args...]
+# Usage: bash scripts/ops/cloud_resume_loop.sh <run_name> [ippo args...]
 #
 # Start the run once with the normal trainer command (see
 # docs/server-runbook.md) so that runs/<run_name>/latest.pt exists, then

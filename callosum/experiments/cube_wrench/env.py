@@ -40,7 +40,7 @@ and owns the geometry and the two masses (see the config docstring: writing `bod
 runtime would leave MuJoCo's inertia inconsistent).
 
 The scripted oracle for environment validation lives in `oracle.py`; the local smoke
-check is `scripts/smoke_wrench_cube.py`. Only one env is supported on purpose -- the
+check is `scripts/experiments/cube_wrench/smoke_wrench_cube.py`. Only one env is supported on purpose -- the
 trainer (phase 2) does the vectorisation.
 """
 

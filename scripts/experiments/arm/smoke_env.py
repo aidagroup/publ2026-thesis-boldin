@@ -4,13 +4,12 @@ Meant for the GPU server; `--sim-backend cpu` runs a single env locally (also on
 See docs/implementation-plan.md, step 1.2, "Критерий готовности (СЕРВЕР)".
 """
 
-from _sim_utils import make_env, parse_args
-
 # Importing the module (not just the callosum.envs package) runs its
 # @register_env("TwoSO101-v0", ...) decorator. callosum.envs itself stays
 # import-clean on macOS/CI (no mani_skill there), so it deliberately does not
 # re-export this submodule -- see docs/implementation-plan.md section 0.
 import callosum.experiments.arm.scene  # noqa: F401
+from callosum.experiments.arm.sim_utils import make_env, parse_args
 
 
 def main() -> None:

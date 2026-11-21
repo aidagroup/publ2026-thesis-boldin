@@ -9,7 +9,7 @@ the latency/injection helpers, the success/failure/reward rules and the config v
 The few tests that need the simulator -- config-as-truth writes to the MuJoCo model, the
 per-reset friction application and the failure-penalty reward -- are guarded with
 `pytest.importorskip("mujoco")`: CI (dev extra only) skips them, the macOS sandbox venv
-runs them, and `scripts/smoke_wrench_cube.py` covers the oracle / non-additivity rollouts.
+runs them, and `scripts/experiments/cube_wrench/smoke_wrench_cube.py` covers the oracle / non-additivity rollouts.
 """
 
 import math

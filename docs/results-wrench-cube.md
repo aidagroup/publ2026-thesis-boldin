@@ -67,9 +67,9 @@
 
 ```bash
 # CPU-среда (macOS/Linux), локально только 1-2 env:
-./.venv/bin/python scripts/smoke_wrench_cube.py --envs 2 --episodes 10 --controller oracle
-./.venv/bin/python scripts/smoke_wrench_cube.py --envs 2 --episodes 10 --controller rotator-only
-./.venv/bin/python scripts/smoke_wrench_cube.py --envs 2 --episodes 10 --controller random
+./.venv/bin/python scripts/experiments/cube_wrench/smoke_wrench_cube.py --envs 2 --episodes 10 --controller oracle
+./.venv/bin/python scripts/experiments/cube_wrench/smoke_wrench_cube.py --envs 2 --episodes 10 --controller rotator-only
+./.venv/bin/python scripts/experiments/cube_wrench/smoke_wrench_cube.py --envs 2 --episodes 10 --controller random
 
 # тесты/линт:
 ./.venv/bin/python -m pytest -q && ./.venv/bin/ruff check .

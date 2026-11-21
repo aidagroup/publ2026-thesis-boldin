@@ -21,9 +21,9 @@ Controllers (`--controller`):
 Exit code: 0 when the selected controller meets its expectation (the `random` controller is
 a diagnostic and always exits 0), 1 otherwise.
 
-    ./.venv/bin/python scripts/smoke_coop.py --task cartpole --controller oracle --envs 2 --episodes 10
-    ./.venv/bin/python scripts/smoke_coop.py --task pendulum --controller oracle --envs 2 --episodes 10
-    ./.venv/bin/python scripts/smoke_coop.py --task cartpole --controller only-left --envs 2 --episodes 10
+    ./.venv/bin/python scripts/experiments/coop_tasks/smoke_coop.py --task cartpole --controller oracle --envs 2 --episodes 10
+    ./.venv/bin/python scripts/experiments/coop_tasks/smoke_coop.py --task pendulum --controller oracle --envs 2 --episodes 10
+    ./.venv/bin/python scripts/experiments/coop_tasks/smoke_coop.py --task cartpole --controller only-left --envs 2 --episodes 10
 """
 
 import argparse

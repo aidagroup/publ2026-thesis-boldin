@@ -12,9 +12,9 @@ Sections (openspec tasks 2.1/2.5):
      beyond this decision-boundary planning is future cloud work).
 
 Never run on the Mac: the skill env needs the simulator (Linux/GPU or a Linux CPU
-probe with --sim-backend cpu). Style follows scripts/smoke_face_turn.py.
+probe with --sim-backend cpu). Style follows scripts/experiments/arm/smoke_face_turn.py.
 
-    uv run python scripts/smoke_face_turn_skills.py --sim-backend gpu --num-envs 16
+    uv run python scripts/experiments/arm/smoke_face_turn_skills.py --sim-backend gpu --num-envs 16
 """
 
 import sys
@@ -22,9 +22,9 @@ import time
 
 import numpy as np
 import torch
-from _sim_utils import make_env, parse_args
 
 import callosum.experiments.arm.skills_env  # noqa: F401  (registers FaceTurnSkills-v0)
+from callosum.experiments.arm.sim_utils import make_env, parse_args
 from callosum.experiments.arm.skills_agent_obs import SkillsObsBuilder
 from callosum.experiments.arm.skills_conductor import SkillsConductor
 from callosum.experiments.arm.skills_obs import (

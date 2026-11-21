@@ -46,7 +46,7 @@ Two ways of driving the arms (`ExpertControlConfig.control`):
 
 `Rig.step` reports every env step to registered callbacks (observation before the step, the
 action dict that was passed to `env.step`, reward, terminated, truncated, info), which is what
-`scripts/collect_demos.py` records.
+`scripts/experiments/arm/collect_demos.py` records.
 
 Needs mani_skill and scipy (not importable on the CI runner); the pure-Python tracking config is
 `callosum.experiments.arm.expert_config`.

@@ -6,10 +6,10 @@
 #   uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1
 #
 # Usage (from the repo checkout on the pod):
-#   bash scripts/run_wrench_gpu_grid.sh grid      # 12 runs: default/harsh x modes x seeds
-#   bash scripts/run_wrench_gpu_grid.sh sweep     # 4 predicted configs (aux_coef x history_len)
-#   bash scripts/run_wrench_gpu_grid.sh eval      # 128-episode greedy evals, 3 seeds per ckpt
-#   bash scripts/run_wrench_gpu_grid.sh summary   # markdown/JSON summary in results_gpu/
+#   bash scripts/experiments/cube_wrench/run_wrench_gpu_grid.sh grid      # 12 runs: default/harsh x modes x seeds
+#   bash scripts/experiments/cube_wrench/run_wrench_gpu_grid.sh sweep     # 4 predicted configs (aux_coef x history_len)
+#   bash scripts/experiments/cube_wrench/run_wrench_gpu_grid.sh eval      # 128-episode greedy evals, 3 seeds per ckpt
+#   bash scripts/experiments/cube_wrench/run_wrench_gpu_grid.sh summary   # markdown/JSON summary in results_gpu/
 #
 # Grid (`grid`, K=3 concurrent so the graph replays/PPO are not oversubscribed):
 #   default preset: none/oracle/predicted at seeds 1,2  (seed 0 already exists as *_s0)
@@ -157,7 +157,7 @@ case "${1:-}" in
     echo "EVAL_DONE $(date -u +%H:%M:%S)"
     ;;
   summary)
-    "$PY" scripts/summarize_wrench_gpu.py --results "$RESULTS"
+    "$PY" scripts/analysis/summarize_wrench_gpu.py --results "$RESULTS"
     ;;
   *)
     echo "usage: $0 grid|sweep|eval|summary" >&2

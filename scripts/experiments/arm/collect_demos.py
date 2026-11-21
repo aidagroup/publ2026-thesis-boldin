@@ -1,6 +1,6 @@
 """Collect demonstrations of the scripted FaceTurn expert in the policies' own action space.
 
-The expert (`callosum.experiments.arm.expert`, the strategy of `scripts/probe_face_turn.py`) runs
+The expert (`callosum.experiments.arm.expert`, the strategy of `scripts/experiments/arm/probe_face_turn.py`) runs
 in `control="delta"` mode: the env is the one the IPPO trainer uses (`FaceTurn-v0`,
 `pd_joint_delta_pos`, the registered 400-step episode, `obs_mode="state"`,
 `render_backend="none"`, `reward_mode="normalized_dense"`) and the arms are driven with delta
@@ -17,9 +17,9 @@ envs completed it and the min / median / max env step at which they did, plus th
 the summary (success rate, first-success step distribution) doubles as the self-check that the
 expert fits into the episode under the training controller.
 
-    uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --out runs/demos/a.pt
+    uv run python scripts/experiments/arm/collect_demos.py --num-envs 256 --num-batches 2 --out runs/demos/a.pt
     # Mac CPU sim, 20 episodes (see CLAUDE.md for the throwaway env):
-    python scripts/collect_demos.py --sim-backend cpu --num-batches 20
+    python scripts/experiments/arm/collect_demos.py --sim-backend cpu --num-batches 20
 
 The file layout is documented in `callosum.experiments.arm.demos`. Exit status: 1 if no successful
 episode was collected. A batch without any success prints how far its episodes got (expert
@@ -38,7 +38,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from _sim_utils import make_env, parse_args
 from mani_skill.utils import gym_utils
 
 import callosum.experiments.arm.face_turn_env  # noqa: F401  (registers FaceTurn-v0)
@@ -53,6 +52,7 @@ from callosum.experiments.arm.demos import (
 from callosum.experiments.arm.expert import ArmModel, Rig, run_expert
 from callosum.experiments.arm.expert_config import ExpertControlConfig
 from callosum.experiments.arm.face_turn_env import TARGET_FACE_ANGLE
+from callosum.experiments.arm.sim_utils import make_env, parse_args
 from callosum.experiments.arm.tracking import describe_progress
 
 ENV_ID = "FaceTurn-v0"

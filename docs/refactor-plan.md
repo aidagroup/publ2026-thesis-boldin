@@ -40,7 +40,7 @@ callosum/
       env.py, obs.py, logic.py, plans.py, cube.py, face_lock.py
       runtime.py, conductor.py                # из experts/skills_*
       train.py                # категориальный IPPO (из training/ippo.py? отдельный путь)
-      eval.py                 # из scripts/eval_skills.py
+      eval.py                 # из python -m callosum.experiments.arm.skills_eval
     arm_joint_legacy/         # joint-level линия: мотивация/негативный результат
       README.md               # «сохранено как evidence, не развивается»
       env.py, base.py, oracle.py, expert.py, phases.py, tracking.py, noise.py

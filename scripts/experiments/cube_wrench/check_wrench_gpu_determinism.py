@@ -14,7 +14,7 @@ trajectory. This script checks, on the GPU pod:
 Run on the pod (a plain `uv sync --frozen` removes the optional Warp stack):
 
     uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1
-    python scripts/check_wrench_gpu_determinism.py --worlds 8 --steps 80
+    python scripts/experiments/cube_wrench/check_wrench_gpu_determinism.py --worlds 8 --steps 80
 
 Exit code 0 when every comparison is bit-identical, 1 otherwise.
 """

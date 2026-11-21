@@ -2,11 +2,11 @@
 # Update the server checkout to the latest pushed code, then re-run setup.
 # One command for the lab JupyterHub terminal (no SSH, no root):
 #
-#   bash scripts/update_server.sh                       # current branch, then setup_server.sh
-#   bash scripts/update_server.sh --branch main         # switch to another branch
-#   bash scripts/update_server.sh --force               # discard local changes to tracked files
-#   bash scripts/update_server.sh --no-setup            # only update the code
-#   bash scripts/update_server.sh -- --smoke            # args after `--` go to setup_server.sh
+#   bash scripts/ops/update_server.sh                       # current branch, then setup_server.sh
+#   bash scripts/ops/update_server.sh --branch main         # switch to another branch
+#   bash scripts/ops/update_server.sh --force               # discard local changes to tracked files
+#   bash scripts/ops/update_server.sh --no-setup            # only update the code
+#   bash scripts/ops/update_server.sh -- --smoke            # args after `--` go to setup_server.sh
 #
 # The server checkout is disposable (code is never edited there), and the remote
 # history can be rewritten by force-pushes. So this is a HARD sync, never a
@@ -24,12 +24,12 @@ die() { printf '   \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-usage: bash scripts/update_server.sh [--branch <name>] [--force] [--no-setup] [-- <setup_server.sh args>]
+usage: bash scripts/ops/update_server.sh [--branch <name>] [--force] [--no-setup] [-- <setup_server.sh args>]
 
   --branch <name>  switch to <name> (default: the currently checked-out branch)
   --force          discard uncommitted changes to tracked files instead of refusing
-  --no-setup       only update the code, do not run scripts/setup_server.sh
-  --               everything after this is passed to scripts/setup_server.sh (e.g. --smoke)
+  --no-setup       only update the code, do not run scripts/ops/setup_server.sh
+  --               everything after this is passed to scripts/ops/setup_server.sh (e.g. --smoke)
 EOF
 }
 
@@ -66,11 +66,11 @@ main() {
   fi
 
   if [ "$run_setup" = 1 ]; then
-    say "Running scripts/setup_server.sh${setup_args[*]:+ ${setup_args[*]}}"
-    [ -f scripts/setup_server.sh ] || die "scripts/setup_server.sh not found in $repo"
+    say "Running scripts/ops/setup_server.sh${setup_args[*]:+ ${setup_args[*]}}"
+    [ -f scripts/ops/setup_server.sh ] || die "scripts/ops/setup_server.sh not found in $repo"
     # Not `exec`: keep the exit code visible; `|| rc=$?` also survives `set -e`.
     local rc=0
-    bash scripts/setup_server.sh ${setup_args[@]+"${setup_args[@]}"} || rc=$?
+    bash scripts/ops/setup_server.sh ${setup_args[@]+"${setup_args[@]}"} || rc=$?
     exit "$rc"
   fi
   ok "Code updated; setup skipped (--no-setup)"
@@ -147,7 +147,7 @@ sync_checkout() {
 
   # Self-update: if this script changed, run the new version for the remaining steps.
   if [ -n "$old" ] && [ "$old" != "$new" ] \
-     && ! git diff --quiet "$old" "$new" -- scripts/update_server.sh; then
+     && ! git diff --quiet "$old" "$new" -- scripts/ops/update_server.sh; then
     say "update_server.sh itself changed; restarting the new version"
     export CALLOSUM_UPDATE_REEXEC=1
     exec bash "$script_dir/update_server.sh" "$@"

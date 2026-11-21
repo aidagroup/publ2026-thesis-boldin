@@ -7,7 +7,7 @@ second no matter how small the reduced model is. This module is the batched GPU 
 queues, failure injections, `xfrc_applied`, 8 physics substeps, observations, reward and the
 auto-reset of finished worlds) is tensor algebra on the GPU, and a single Python call steps
 thousands of environments. The physics, the randomisation and the observation/reward layout
-are the SAME contract as the CPU env -- `scripts/check_wrench_gpu_parity.py` compares the two
+are the SAME contract as the CPU env -- `scripts/experiments/cube_wrench/check_wrench_gpu_parity.py` compares the two
 step by step (qpos/qvel within 1e-5, observations within 1e-4; float32 Warp against float64
 MuJoCo is the only intended difference).
 

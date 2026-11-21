@@ -22,7 +22,7 @@
 
 ### Requirement: update_server.sh — жёсткая синхронизация
 
-`bash scripts/update_server.sh` SHALL обновлять checkout до последнего запушенного кода и перезапускать `setup_server.sh` (идемпотентно, быстро без изменений). Это жёсткая синхронизация, не `git pull`: `git fetch --prune origin` (с тайм-аутом), затем `git checkout -B <branch> origin/<branch>` — переписанная (force-pushed) история не проблема. Опции: `--branch <name>` (переключить ветку), `--force` (отбросить локальные правки отслеживаемых файлов), `--no-setup` (только код), `-- ...` (аргументы в setup). Незакоммиченные правки отслеживаемых файлов отклоняются (печатаются) без `--force`; неотслеживаемые и игнорируемые файлы (symlink `runs`, логи) сохраняются — `git clean` нет. Если сам скрипт изменился в обновлении, новая версия перезапускается автоматически. Код на сервере не правится.
+`bash scripts/ops/update_server.sh` SHALL обновлять checkout до последнего запушенного кода и перезапускать `setup_server.sh` (идемпотентно, быстро без изменений). Это жёсткая синхронизация, не `git pull`: `git fetch --prune origin` (с тайм-аутом), затем `git checkout -B <branch> origin/<branch>` — переписанная (force-pushed) история не проблема. Опции: `--branch <name>` (переключить ветку), `--force` (отбросить локальные правки отслеживаемых файлов), `--no-setup` (только код), `-- ...` (аргументы в setup). Незакоммиченные правки отслеживаемых файлов отклоняются (печатаются) без `--force`; неотслеживаемые и игнорируемые файлы (symlink `runs`, логи) сохраняются — `git clean` нет. Если сам скрипт изменился в обновлении, новая версия перезапускается автоматически. Код на сервере не правится.
 
 #### Scenario: Обновление безопасно после force-push
 
@@ -36,7 +36,7 @@
 
 ### Requirement: setup_server.sh — идемпотентная установка и проверки
 
-`bash scripts/setup_server.sh` SHALL выполнять идемпотентную установку и проверки: проверяет Linux + `nvidia-smi`; выбирает layout (home по умолчанию; scratch только по запросу или при < 30 ГБ свободного места); ставит uv в `~/.local/bin`, Python 3.12, синкает `sim` + `train` + `dev` из `uv.lock` (`--frozen`, без ресолва — рассинхрон lock/pyproject отклоняется); устраняет причуды SAPIEN (неверсионированный `libcuda.so`, Vulkan-устройство — пробирует кандидатов в свежих процессах, берёт первый, который строит `RenderMaterial()` и `RenderSystem("cuda:0")`; lavapipe — только fallback), предзагружает PhysX GPU-библиотеку в `~/.sapien`; верифицирует: torch CUDA build, реальный CUDA matmul, compute capability против версии CUDA, импорт `mani_skill`, агент `so101_pg`, регистрация `TwoSO101-v0` / `FaceTurn-v0`; с `--smoke` гоняет GPU-проверки (`smoke_env.py`, `smoke_face_turn.py`).
+`bash scripts/ops/setup_server.sh` SHALL выполнять идемпотентную установку и проверки: проверяет Linux + `nvidia-smi`; выбирает layout (home по умолчанию; scratch только по запросу или при < 30 ГБ свободного места); ставит uv в `~/.local/bin`, Python 3.12, синкает `sim` + `train` + `dev` из `uv.lock` (`--frozen`, без ресолва — рассинхрон lock/pyproject отклоняется); устраняет причуды SAPIEN (неверсионированный `libcuda.so`, Vulkan-устройство — пробирует кандидатов в свежих процессах, берёт первый, который строит `RenderMaterial()` и `RenderSystem("cuda:0")`; lavapipe — только fallback), предзагружает PhysX GPU-библиотеку в `~/.sapien`; верифицирует: torch CUDA build, реальный CUDA matmul, compute capability против версии CUDA, импорт `mani_skill`, агент `so101_pg`, регистрация `TwoSO101-v0` / `FaceTurn-v0`; с `--smoke` гоняет GPU-проверки (`smoke_env.py`, `smoke_face_turn.py`).
 
 #### Scenario: Повторный запуск быстрый
 
@@ -45,7 +45,7 @@
 
 ### Requirement: Верификация отложена до первого прогона на RunPod
 
-Скрипты storage-слоя написаны вслепую под лабораторный сервер (JupyterHub, A100, доступ только через веб-терминал) и на нём больше не проверяются: лабораторный сервер недоступен, compute переведён на RunPod (GPU Pod + network volume; ранбук `docs/cloud-gpu.md`). Первый прогон на поде RunPod (`bash scripts/setup_server.sh --smoke`) MUST верифицировать `scripts/update_server.sh` и персистентный layout; `main` заморожен до этой верификации.
+Скрипты storage-слоя написаны вслепую под лабораторный сервер (JupyterHub, A100, доступ только через веб-терминал) и на нём больше не проверяются: лабораторный сервер недоступен, compute переведён на RunPod (GPU Pod + network volume; ранбук `docs/cloud-gpu.md`). Первый прогон на поде RunPod (`bash scripts/ops/setup_server.sh --smoke`) MUST верифицировать `scripts/ops/update_server.sh` и персистентный layout; `main` заморожен до этой верификации.
 
 #### Scenario: Первый cloud-прогон валидирует скрипты
 

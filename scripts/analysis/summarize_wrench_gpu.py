@@ -1,6 +1,6 @@
 """Summarise a CubeWrench-v0 GPU experiment grid (logs + `results_gpu/*.json`).
 
-Reads the per-run evaluation JSONs written by `scripts/run_wrench_gpu_grid.sh eval` (128 greedy
+Reads the per-run evaluation JSONs written by `scripts/experiments/cube_wrench/run_wrench_gpu_grid.sh eval` (128 greedy
 episodes x eval seeds 0/1/2) and the training logs of the runs, and prints the tables the
 ablation needs:
 

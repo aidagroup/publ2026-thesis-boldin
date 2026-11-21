@@ -8,7 +8,7 @@ reward rules, the task config validation and the (pure) task-aware trainer confi
 
 The environment-side checks (spaces, oracle success, absent-agent baseline, seed determinism
 and the vec-env contract) live in `tests/test_coop_envs.py` and are skipped without mujoco;
-`scripts/smoke_coop.py` covers the scripted rollouts on a machine with the simulator.
+`scripts/experiments/coop_tasks/smoke_coop.py` covers the scripted rollouts on a machine with the simulator.
 """
 
 import math

@@ -14,7 +14,7 @@ class ArmLayout:
     FaceTurn-v0) stands at `azimuth_a` / `radius_a`, `agent_b` (the rotator) at `azimuth_b` /
     `radius_b`.
 
-    The defaults are the layout found with `scripts/probe_face_turn.py`, where a scripted
+    The defaults are the layout found with `scripts/experiments/arm/probe_face_turn.py`, where a scripted
     holder and rotator complete the face turn on the CPU sim: the arms are 90 degrees apart (the
     holder at -y, the rotator at +x). The arms can not face each other, because the holder would
     then clamp the body from the rotator's side and their wrist housings (12.8 cm wide) collide

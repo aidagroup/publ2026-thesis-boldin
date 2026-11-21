@@ -22,8 +22,8 @@ Controllers (`--controller`):
 Exit code: 0 when the selected controller meets its expectation (the `random`/`zero`
 controllers are diagnostics and always exit 0), 1 otherwise.
 
-    ./.venv/bin/python scripts/smoke_wrench_cube.py --envs 2 --episodes 10 --controller oracle
-    ./.venv/bin/python scripts/smoke_wrench_cube.py --envs 2 --episodes 10 --controller rotator-only
+    ./.venv/bin/python scripts/experiments/cube_wrench/smoke_wrench_cube.py --envs 2 --episodes 10 --controller oracle
+    ./.venv/bin/python scripts/experiments/cube_wrench/smoke_wrench_cube.py --envs 2 --episodes 10 --controller rotator-only
 """
 
 import argparse

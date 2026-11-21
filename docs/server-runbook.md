@@ -58,7 +58,7 @@ ls -d ~/callosum ~/.callosum ~/callosum-runs     # all persistent across restart
 ```bash
 git clone -b step/2.1-ippo-so101 https://github.com/aidagroup/publ2026-thesis-boldin.git ~/callosum
 cd ~/callosum                                    # the branch of the session (or main)
-bash scripts/setup_server.sh --smoke             # drop --smoke to skip the GPU smoke tests
+bash scripts/ops/setup_server.sh --smoke             # drop --smoke to skip the GPU smoke tests
 ```
 
 (See [Migration from the /tmp layout](#migration-from-the-tmp-layout) if this account still
@@ -70,21 +70,21 @@ terminal afterwards (or `source ~/.callosum-env.sh`) so the variables are set.
 ```bash
 source ~/.callosum-env.sh                  # automatic in new terminals via ~/.bashrc
 cd "$CALLOSUM_REPO"                        # = ~/callosum
-bash scripts/update_server.sh              # fetch + hard-sync, then setup_server.sh
+bash scripts/ops/update_server.sh              # fetch + hard-sync, then setup_server.sh
 ```
 
 `update_server.sh` updates the checkout to the latest pushed code and then re-runs
-`scripts/setup_server.sh` (idempotent; quick when nothing changed). It is a hard
+`scripts/ops/setup_server.sh` (idempotent; quick when nothing changed). It is a hard
 sync, not a `git pull`: `git fetch --prune origin` (time-bounded), then
 `git checkout -B <branch> origin/<branch>`, so a force-pushed (rewritten) remote
 history is no problem. It prints old → new commit and a `git diff --stat`.
 
 ```bash
-bash scripts/update_server.sh                        # current branch
-bash scripts/update_server.sh --branch main          # switch branch (needed on a detached HEAD)
-bash scripts/update_server.sh --force                # discard uncommitted changes to tracked files
-bash scripts/update_server.sh --no-setup             # only update the code
-bash scripts/update_server.sh -- --smoke             # args after `--` go to setup_server.sh
+bash scripts/ops/update_server.sh                        # current branch
+bash scripts/ops/update_server.sh --branch main          # switch branch (needed on a detached HEAD)
+bash scripts/ops/update_server.sh --force                # discard uncommitted changes to tracked files
+bash scripts/ops/update_server.sh --no-setup             # only update the code
+bash scripts/ops/update_server.sh -- --smoke             # args after `--` go to setup_server.sh
 ```
 
 Uncommitted changes to tracked files are refused (printed) unless `--force`; code is
@@ -99,7 +99,7 @@ history** (the script cannot run, or `git pull` complains about divergent branch
 ```bash
 cd "$CALLOSUM_REPO"
 git fetch origin && git checkout -B step/1.5-parallel-gripper origin/step/1.5-parallel-gripper
-bash scripts/update_server.sh              # from now on, use the script
+bash scripts/ops/update_server.sh              # from now on, use the script
 ```
 
 (Add `-f` to `git checkout` if it refuses because of local changes to tracked files;
@@ -147,17 +147,17 @@ Then continue the interrupted fine-tune from the new checkout with the usual res
 command (section 3). If `/tmp/callosum` or `/tmp/<user>-callosum` happen to still exist
 (no restart yet), setup prints them at the end and removes nothing; once no run uses them:
 `rm -rf /tmp/callosum /tmp/<user>-callosum` (no trailing slash: the `runs` symlink inside is
-deleted, not its target). Do not run `scripts/setup_server.sh` from the old `/tmp` checkout
+deleted, not its target). Do not run `scripts/ops/setup_server.sh` from the old `/tmp` checkout
 while a run there is active; it would only add a warning, but the GPU smoke tests would
 compete with the run.
 
 ### 2. Phase-1 debt: the GPU-backend checks
 
 ```bash
-bash scripts/setup_server.sh --smoke       # or, once set up:
-uv run python scripts/smoke_env.py
-uv run python scripts/smoke_face_turn.py
-uv run python scripts/probe_face_turn.py
+bash scripts/ops/setup_server.sh --smoke       # or, once set up:
+uv run python scripts/experiments/arm/smoke_env.py
+uv run python scripts/experiments/arm/smoke_face_turn.py
+uv run python scripts/experiments/arm/probe_face_turn.py
 ```
 
 Pre-check the same scripts on the Mac CPU sim first (`--sim-backend cpu`,
@@ -351,7 +351,7 @@ smoke/probe scripts pass it via `--render-backend` (default `none`, which stays 
 default for state training everywhere). Use `--render-backend gpu` for camera
 rendering (vision phase, wrist-camera videos) **only when setup printed
 `Vulkan: HARDWARE NVIDIA Vulkan on ...`** (or `RenderSystem('cuda:0'): OK` from
-`bash scripts/diagnose_vulkan.sh`).
+`bash scripts/ops/diagnose_vulkan.sh`).
 
 #### Long runs (detached)
 
@@ -417,7 +417,7 @@ Why: IPPO from scratch on `FaceTurn-v0` never grasps anything (10M-step run: `ev
 rot 0.00`; the policies only learn to hover near the cube). A grasp needs a sustained wide
 gripper opening during a precise approach and then a close, which Gaussian exploration does not
 find. So both policies are pretrained by behaviour cloning on demonstrations of the scripted
-expert (`callosum/experiments/arm/expert.py`, the strategy of `scripts/probe_face_turn.py`),
+expert (`callosum/experiments/arm/expert.py`, the strategy of `scripts/experiments/arm/probe_face_turn.py`),
 then fine-tuned with PPO. Use the same pipeline for every `--partner-obs` mode (run BC and the
 fine-tune with the same `--partner-obs`).
 
@@ -445,21 +445,21 @@ about 280 steps is not possible with this expert; a learned policy has little sl
 
 ```bash
 source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
-bash scripts/update_server.sh                  # code and venv up to date (not while a job runs)
+bash scripts/ops/update_server.sh                  # code and venv up to date (not while a job runs)
 
 # 0. The expert under the training controller on the GPU (exit 0 = success in every env).
 #    Prints a status snapshot per phase (when half of the envs completed it) and at the end the
 #    per-phase table: how many envs completed the phase, min / median / max env step at which
 #    they did, how it ended (tol / stall / timeout / extra = face turned / still = jaws at
 #    rest), the failed (IK) envs, the IK planning time and the per-env first-success steps.
-uv run python scripts/probe_face_turn.py --control delta --overlap
+uv run python scripts/experiments/arm/probe_face_turn.py --control delta --overlap
 
 # 1. Collect demonstrations: 256 envs per reset, 2 resets (seeds 0 and 1); successful episodes
 #    only, cut at the first success. --action-noise 0.1 perturbs the executed arm actions
 #    (DART) and records the clean expert action as the label, so the policy sees recovery
 #    states. The per-env IK plan (once per reset, for all phases) runs in a Python loop: expect minutes per batch (printed as `expert planning (IK) took ...`).
 mkdir -p runs/demos
-uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --action-noise 0.1 \
+uv run python scripts/experiments/arm/collect_demos.py --num-envs 256 --num-batches 2 --action-noise 0.1 \
     --out runs/demos/faceturn_a.pt
 ```
 
@@ -476,7 +476,7 @@ checkpoints remember it and the IPPO warm start warns). Reference values from th
 successful, first success at step 290 to 364 (median 310); with `--action-noise 0.1` 385/400
 (96%; one of the failures is an unreachable cube placement, reported as "IK failure" and
 skipped), median 325, max 393; with 0.2 only 8/10 (up to 376 steps), so do not go above 0.1.
-If many envs fail on the GPU, look at `scripts/probe_face_turn.py --control delta --overlap`
+If many envs fail on the GPU, look at `scripts/experiments/arm/probe_face_turn.py --control delta --overlap`
 first (contact behaviour on the GPU backend is unverified). Several hundred successful
 episodes are a sensible target (400 episodes are about 125 000 transitions). For the check
 of the async expert, run the clean collection too (`--action-noise 0`, the default): with no
@@ -484,7 +484,7 @@ noise the per-env first success should be about 300 steps for every env, and the
 completion steps should not depend on `--num-envs`.
 
 ```bash
-uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --out runs/demos/clean.pt
+uv run python scripts/experiments/arm/collect_demos.py --num-envs 256 --num-batches 2 --out runs/demos/clean.pt
 ```
 
 ```bash
@@ -647,17 +647,17 @@ converge, and any layout/tuning constants that had to change.
 ## Server quirks (SAPIEN, PhysX, Vulkan)
 
 Carried over from the earlier SO-100-era setup of this same server (an archived
-branch, probed 2026-08-30). `scripts/setup_server.sh` applies them (the libcuda shim only when needed;
+branch, probed 2026-08-30). `scripts/ops/setup_server.sh` applies them (the libcuda shim only when needed;
 Vulkan is re-probed on every run); **none has been fully re-verified yet on the current
 environment** — treat the setup output as the verification. What to look for in the
-Vulkan part of `bash scripts/update_server.sh`: `✓ ... GPU render device (NVIDIA A100...)` and
+Vulkan part of `bash scripts/ops/update_server.sh`: `✓ ... GPU render device (NVIDIA A100...)` and
 `✓ Vulkan: HARDWARE NVIDIA Vulkan on NVIDIA A100... via generated NVIDIA manifest + current loader`.
-`! Vulkan: SOFTWARE ...` means the fallback; run `bash scripts/diagnose_vulkan.sh` and send its output.
+`! Vulkan: SOFTWARE ...` means the fallback; run `bash scripts/ops/diagnose_vulkan.sh` and send its output.
 
 | Symptom | Cause | What setup does |
 |---|---|---|
 | `OSError: libcuda.so: cannot open shared object file` from `sapien/physx/__init__.py` (`enable_gpu`), while torch sees the GPU | SAPIEN loads the *unversioned* `libcuda.so`; the container runtime only injects `libcuda.so.1` | symlinks `libcuda.so.1` into `~/.callosum/lib/libcuda.so`, prepends it to `LD_LIBRARY_PATH` |
-| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"`; or `Failed to find a supported physical device "cuda:0"` (lavapipe) | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) is too old for the 570.x NVIDIA ICD; the pod has the NVIDIA user-space libs (`libGLX_nvidia.so.0`, despite `NVIDIA_DRIVER_CAPABILITIES=compute,utility`) but a usable ICD manifest may be missing, and when `/usr/share/vulkan/icd.d/nvidia_icd.json` is absent SAPIEN swaps in its own bundled manifest (api 1.2.140), which hides the driver | **Expected result: hardware NVIDIA Vulkan** via a manifest generated at `~/.callosum/vulkan/icd.d/nvidia_icd.json` (absolute path to `libGLX_nvidia.so.0`) plus a current loader: `conda create -p ~/.callosum/mesa -c conda-forge mesalib vulkan-tools` (conda cache in `~/.callosum/conda-pkgs`; persistent, so this runs once), only `libvulkan.so.1` symlinked into `~/.callosum/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch). Setup **probes** candidates in order (generated manifest + current loader, + system loader, stock, other system manifests, lavapipe) in fresh processes and takes the first that constructs `RenderMaterial()` **and** `RenderSystem("cuda:0")` (proof it is the GPU). It is re-evaluated on every run (a past lavapipe pick is not sticky; inherited `VK_ICD_FILENAMES`/`vklib` are ignored) and `~/.callosum-env.sh` is rewritten. Lavapipe (software) is only the fallback: fine for state training with `render_backend="none"`, not for vision. **History:** hardware worked on this server in Aug 2026 (archived `step/2.1-ippo`); on 2026-10-04 the first `setup_server.sh` run ended on lavapipe (that version only scanned manifests already on disk and never wrote its own for `libGLX_nvidia.so.0`; the exact cause on the new pod is unconfirmed, the probe log will tell). Check the current state with `bash scripts/diagnose_vulkan.sh` (NVIDIA libs, manifests, loader versions, `vulkaninfo --summary` per candidate, SAPIEN's view); every probe's stderr is in `~/.callosum/vulkan-probe.log` |
+| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"`; or `Failed to find a supported physical device "cuda:0"` (lavapipe) | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) is too old for the 570.x NVIDIA ICD; the pod has the NVIDIA user-space libs (`libGLX_nvidia.so.0`, despite `NVIDIA_DRIVER_CAPABILITIES=compute,utility`) but a usable ICD manifest may be missing, and when `/usr/share/vulkan/icd.d/nvidia_icd.json` is absent SAPIEN swaps in its own bundled manifest (api 1.2.140), which hides the driver | **Expected result: hardware NVIDIA Vulkan** via a manifest generated at `~/.callosum/vulkan/icd.d/nvidia_icd.json` (absolute path to `libGLX_nvidia.so.0`) plus a current loader: `conda create -p ~/.callosum/mesa -c conda-forge mesalib vulkan-tools` (conda cache in `~/.callosum/conda-pkgs`; persistent, so this runs once), only `libvulkan.so.1` symlinked into `~/.callosum/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch). Setup **probes** candidates in order (generated manifest + current loader, + system loader, stock, other system manifests, lavapipe) in fresh processes and takes the first that constructs `RenderMaterial()` **and** `RenderSystem("cuda:0")` (proof it is the GPU). It is re-evaluated on every run (a past lavapipe pick is not sticky; inherited `VK_ICD_FILENAMES`/`vklib` are ignored) and `~/.callosum-env.sh` is rewritten. Lavapipe (software) is only the fallback: fine for state training with `render_backend="none"`, not for vision. **History:** hardware worked on this server in Aug 2026 (archived `step/2.1-ippo`); on 2026-10-04 the first `setup_server.sh` run ended on lavapipe (that version only scanned manifests already on disk and never wrote its own for `libGLX_nvidia.so.0`; the exact cause on the new pod is unconfirmed, the probe log will tell). Check the current state with `bash scripts/ops/diagnose_vulkan.sh` (NVIDIA libs, manifests, loader versions, `vulkaninfo --summary` per candidate, SAPIEN's view); every probe's stderr is in `~/.callosum/vulkan-probe.log` |
 | First `gym.make(..., sim_backend="gpu")` hangs/fails while downloading | SAPIEN fetches `libPhysXGpu_64.so` (~240 MB unpacked) from a `github.com` release into `~/.sapien/physx/<version>/` | `~/.sapien` is a real directory in `$HOME` (persistent); setup pre-fetches via `physx.enable_gpu()`. Manual fallback: download the `linux-so.zip` named in SAPIEN's message elsewhere, upload, unzip into that directory |
 
 Notes:
@@ -680,7 +680,7 @@ Notes:
 
 Everything above that is not a measured fact, in the order it will bite:
 
-1. `bash scripts/setup_server.sh` completes: `uv sync --frozen` pulls the `cu128`
+1. `bash scripts/ops/setup_server.sh` completes: `uv sync --frozen` pulls the `cu128`
    wheels (torch, CUDA libs) through `download-r2.pytorch.org`; `uv` installs via
    `pip --user` from PyPI (fallback: the astral.sh installer, which fetches from github.com); uv's Python 3.12 download from GitHub works.
 2. Which of the quirk fixes (libcuda shim, Vulkan loader, PhysX download) the script

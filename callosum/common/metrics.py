@@ -1,6 +1,6 @@
 """Coordination metrics of the skill-level cube assembly (openspec tasks 4.1-4.4): pure logic.
 
-This module is the metric layer behind `scripts/eval_skills.py`: it aggregates finished
+This module is the metric layer behind `python -m callosum.experiments.arm.skills_eval`: it aggregates finished
 episodes (`EpisodeRecord`), never environments -- the [cloud] harness records episodes,
 this layer turns them into the numbers the coordination-metrics spec demands (success
 rate, time to success, useless-action rate, partner-primitive prediction accuracy) plus

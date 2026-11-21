@@ -62,8 +62,8 @@ The GPU backend needs the optional `mujoco-warp==4.0.1` install (the `sandbox-gp
 Linux/CUDA only; the pod's plain `uv sync --frozen` removes it), so on the pod run:
 
     uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1
-    python scripts/check_wrench_gpu_parity.py --controller random --partner-mode oracle
-    python scripts/check_wrench_gpu_parity.py --controller oracle --partner-mode oracle
+    python scripts/experiments/cube_wrench/check_wrench_gpu_parity.py --controller random --partner-mode oracle
+    python scripts/experiments/cube_wrench/check_wrench_gpu_parity.py --controller oracle --partner-mode oracle
 
 Exit code 0 when every comparison is inside its tolerance, 1 otherwise.
 """

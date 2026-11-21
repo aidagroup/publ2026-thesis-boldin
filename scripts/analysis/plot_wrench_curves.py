@@ -5,8 +5,8 @@ draws one line per run with Pillow (the repo's dev venv has Pillow, not matplotl
 this script must stay runnable on the mac and in CI). The x-axis is the PPO update; the
 y-axis is the greedy success rate on the trainer's 32-episode eval.
 
-    python scripts/plot_wrench_curves.py runs/*.log -o demo/learning_curves.png
-    python scripts/plot_wrench_curves.py runs/wrench_warp_*.log --group-mode
+    python scripts/analysis/plot_wrench_curves.py runs/*.log -o demo/learning_curves.png
+    python scripts/analysis/plot_wrench_curves.py runs/wrench_warp_*.log --group-mode
 """
 
 from __future__ import annotations

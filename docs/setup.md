@@ -48,7 +48,7 @@ Mac in a throwaway env, which is the first check for anything sim-related
 
 ```bash
 PYTHONPATH=. uv run --no-project --python 3.12 --with mani-skill==3.0.1 --with torch \
-    python scripts/smoke_env.py --sim-backend cpu --num-envs 2
+    python scripts/experiments/arm/smoke_env.py --sim-backend cpu --num-envs 2
 ```
 
 The smoke scripts take `--sim-backend` / `--num-envs`. GPU simulation and
@@ -62,11 +62,11 @@ repeat this):
 ```bash
 git clone -b step/2.1-ippo-so101 https://github.com/aidagroup/publ2026-thesis-boldin.git ~/callosum
 cd ~/callosum
-bash scripts/setup_server.sh --smoke
+bash scripts/ops/setup_server.sh --smoke
 ```
 
 The scripts work from any checkout path; `~/callosum` is the recommended one.
-Later: `cd "$CALLOSUM_REPO" && bash scripts/update_server.sh` (hard-syncs the checkout to the
+Later: `cd "$CALLOSUM_REPO" && bash scripts/ops/update_server.sh` (hard-syncs the checkout to the
 latest pushed code, safe after force-pushes, then re-runs setup; options in
 [server-runbook.md](server-runbook.md#1-environment-clone-or-update-then-setup)).
 (`CALLOSUM_REPO` comes from `~/.callosum-env.sh`, below). The repo is cloned over
@@ -121,7 +121,7 @@ A restart therefore costs nothing: open a terminal, `cd ~/callosum`, continue
 full-state checkpoint). One data root serves one active checkout (the editable install in
 the venv points at the checkout that ran setup last).
 
-*Scratch layout* (opt-in with `CALLOSUM_SCRATCH=/big/disk/dir bash scripts/setup_server.sh`,
+*Scratch layout* (opt-in with `CALLOSUM_SCRATCH=/big/disk/dir bash scripts/ops/setup_server.sh`,
 or `CALLOSUM_LAYOUT=scratch`; automatic only when the data root has < 30 GB free): the same
 sub-directories under `$CALLOSUM_SCRATCH` (default `/tmp/<user>-callosum`), and `~/.sapien`
 becomes a symlink into it. Assumed wiped on restart: re-run setup then (re-downloads torch
@@ -203,7 +203,7 @@ immediately without reinstalling.
 edit locally  →  git commit  →  git push                              (dev / macOS)
                                     │
                                     ▼
-JupyterHub terminal:  bash scripts/update_server.sh  →  detached run
+JupyterHub terminal:  bash scripts/ops/update_server.sh  →  detached run
                                     │
                                     ▼
 JupyterHub file browser: download results                              (→ dev / macOS)

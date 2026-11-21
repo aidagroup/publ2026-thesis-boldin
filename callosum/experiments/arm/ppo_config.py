@@ -118,7 +118,7 @@ class IPPOConfig:
     and PPO advantages computed with it would push the BC policy around at random; 0 = off (the
     plain PPO behaviour). The window is by iteration, so `resume` continues it where it stopped."""
     demos: str | None = None
-    """Demo file (`scripts/collect_demos.py`) for the auxiliary BC loss (`bc_coef`)."""
+    """Demo file (`scripts/experiments/arm/collect_demos.py`) for the auxiliary BC loss (`bc_coef`)."""
     bc_coef: float = 0.0
     """DAPG-style auxiliary loss: `bc_coef * mean((actor_mean(demo_obs) - demo_action)^2)` on a
     demo minibatch, added to every PPO minibatch step's actor loss. The coefficient decays

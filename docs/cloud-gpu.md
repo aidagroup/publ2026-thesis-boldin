@@ -44,23 +44,23 @@ ssh runpod-gpu
 3. **Установка + серверная верификация storage-скриптов.** Fresh install:
 
    ```bash
-   bash scripts/setup_server.sh --smoke
+   bash scripts/ops/setup_server.sh --smoke
    ```
 
    Это одновременно **первая серверная проверка** storage-слоя (до этого
    скрипты проходили только локальный `bash -n`). Повторные синхронизации:
 
    ```bash
-   bash scripts/update_server.sh -- --smoke
+   bash scripts/ops/update_server.sh -- --smoke
    ```
 
 4. **GPU smoke-прогоны** — в порядке возрастания (ожидания и диагностика — в
    [server-runbook.md](server-runbook.md)):
 
    ```bash
-   uv run python scripts/smoke_env.py
-   uv run python scripts/smoke_face_turn.py
-   uv run python scripts/probe_face_turn.py
+   uv run python scripts/experiments/arm/smoke_env.py
+   uv run python scripts/experiments/arm/smoke_face_turn.py
+   uv run python scripts/experiments/arm/probe_face_turn.py
    ```
 
 5. **Отчёт домой:** успех/провал каждого шага, полный вывод `nvidia-smi`,
@@ -79,7 +79,7 @@ ssh runpod-gpu
   дедлайн-критичных прогонов (декабрь) — On-Demand.
   `TODO(review)`: проверить при первом spot-прогоне, как именно приходит
   прерывание и есть ли авто-рестарт пода.
-- **Цикл авто-рестарта** (`scripts/cloud_resume_loop.sh`) — для прерываний на
+- **Цикл авто-рестарта** (`scripts/ops/cloud_resume_loop.sh`) — для прерываний на
   уровне процесса:
 
   ```bash
@@ -87,7 +87,7 @@ ssh runpod-gpu
   #    server-runbook.md), дождаться появления runs/<run_name>/latest.pt
   # 2) держать его под циклом в tmux:
   tmux new -s train
-  bash scripts/cloud_resume_loop.sh <run_name> [ippo args...]
+  bash scripts/ops/cloud_resume_loop.sh <run_name> [ippo args...]
   # Ctrl-b d — detach; tmux attach -t train — вернуться
   ```
 
