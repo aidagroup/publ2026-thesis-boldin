@@ -11,9 +11,16 @@ and the fallback seed.
 
 Pure stdlib on purpose (same rule as `callosum.envs._wrench_logic`): the config must
 import and validate on macOS, where mujoco is absent, so the env's logic is unit-testable
-without the simulator. The MuJoCo model is `callosum/envs/wrench_cube/assets/cube_wrench.xml`;
-`WrenchCubeEnv` writes the fields below into `model.dof_*`/`model.opt.timestep` at
-construction, so this dataclass -- not the XML -- is the single source of truth for them.
+without the simulator. The MuJoCo model is `callosum/envs/wrench_cube/assets/cube_wrench.xml`.
+
+Config as truth for timing and DOF parameters: `WrenchCubeEnv` writes `dt` into
+`model.opt.timestep`, `hinge_limit` into `model.jnt_range`, and the damping/frictionloss/
+armature into `model.dof_*` (the nominal hinge frictionloss is then replaced per episode
+by the sampled `layer_frictionloss`). Geometry and the two masses are deliberately
+XML-owned: MuJoCo's `mj_setConst` does not recompute a body's inertia when `body_mass`
+changes, so writing the masses at runtime would leave the model with an inconsistent
+inertia. The XML carries the geometry/mass (core 0.2 kg, layer 0.02 kg) and is the source
+of truth for them.
 
 Physical scale note: the defaults are tuned so that the scripted oracle (holder PD +
 rotator PD, both lead-compensated for their own action latency) reaches success under the
@@ -21,14 +28,26 @@ full randomisation ranges, while the rotator alone drifts the core past the fail
 (the non-additivity the design needs). Details of the balance:
 `core_ang_damping` / `core_lin_damping` are the reduced model's isotropic medium damping
 (the free-floating cube has no contacts and no gravity, so without it the delayed wrench
-control would be an undamped oscillator); `hinge_damping` sets both the layer's turn
-speed and the reaction impulse the holder must absorb. All of these are the "точные
-масса/инерция/параметры шарнира и лимиты моментов" open question of PLAN.md to be
-re-tuned at gates G1/G2.
+control would be an undamped oscillator); `hinge_damping`/`hinge_frictionloss` set both
+the layer's turn speed and the reaction impulse the holder must absorb. All of these are
+the "точные масса/инерция/параметры шарнира и лимиты моментов" open question of PLAN.md
+to be re-tuned at gates G1/G2.
+
+The config enforces the design's non-additivity invariant in `__post_init__`: the
+rotator-only quasi-static core drift must exceed `success_rot_tol` by a safe margin, so
+"the rotator alone cannot keep the core still" is a validated property of the parameters
+rather than an assumption.
 """
 
 import math
 from dataclasses import dataclass
+
+_NON_ADDITIVITY_MARGIN = 1.5
+"""Required ratio between the predicted rotator-only core drift and `success_rot_tol`.
+
+The review's minimum: the drift must be at least 1.5x the success rotation tolerance, so
+the holder is genuinely necessary and a near-miss episode cannot count as a success.
+"""
 
 
 def _check_range(
@@ -63,7 +82,10 @@ class WrenchCubeConfig:
 
     The field groups follow the environment spec: decision timing, the physical model,
     the two agents' wrench authority, the success/failure tolerances, the per-episode
-    randomisation ranges, the team reward and the seed fallback.
+    randomisation ranges, the team reward and the seed fallback. `__post_init__` validates
+    the domains and the design invariants: `goal_angle <= hinge_limit`, the initial angle
+    inside the hinge range, the non-additivity drift margin, and the failure penalty no
+    better than a step penalty.
     """
 
     # --- decision timing -----------------------------------------------------------------
@@ -79,7 +101,11 @@ class WrenchCubeConfig:
     """Episode budget in control steps (14 s at the defaults, inside the spec's 300-400
     range). A policy that has not succeeded by then is truncated."""
 
-    # --- physical model (written into model.dof_*; the XML values are defaults only) ------
+    # --- physical model (timing/dof params written into the model; mass/geometry in XML) -
+    hinge_limit: float = math.pi / 2
+    """Hinge travel limit (rad) of the layer, from 0 to this value. Written into
+    `model.jnt_range`; the XML value is a default only. `goal_angle` must not exceed it."""
+
     core_lin_damping: float = 0.5
     """Linear viscous damping (Ns/m) on the core's free-joint translation DOFs. The cube
     floats (no gravity, no contacts), so this is the medium damping that makes the
@@ -93,12 +119,18 @@ class WrenchCubeConfig:
     hinge_damping: float = 3.0e-4
     """Viscous damping (Nms/rad) of the layer hinge. Dominates the layer's turn speed
     and therefore the reaction impulse the holder must absorb: raising it needs more
-    rotator torque and more holder authority."""
+    rotator torque and more holder authority. Model assumption: the reaction path from the
+    rotator's layer torque back to the core is the hinge's COMBINED damping/frictionloss
+    (`hinge_damping + hinge_frictionloss`); the non-additivity check in `__post_init__`
+    and the XML/env docstrings state this explicitly."""
 
     hinge_frictionloss: float = 1.0e-6
-    """Coulomb friction loss (Nm) of the layer hinge. Kept small so that the rotator's
-    steady-state angle error (`frictionloss / rotator PD gain`) stays far below the
-    success angle tolerance."""
+    """Nominal Coulomb friction loss (Nm) of the layer hinge, written into
+    `model.dof_frictionloss` at construction. Each `reset` replaces it with the episode's
+    sample from `layer_frictionloss_range` (the range is what the episodes actually see);
+    this nominal value is kept for the construction-time model and the non-additivity
+    validation. It must stay small so that the rotator's steady-state angle error
+    (`frictionloss / rotator PD gain`) stays well below the success angle tolerance."""
 
     hinge_armature: float = 1.0e-4
     """Hinge armature (kg m^2), added to the thin layer's own inertia so the hinge
@@ -168,8 +200,21 @@ class WrenchCubeConfig:
     start_delay_range: tuple[float, float] = (0.0, 0.3)
     """Per-agent delay (s) before the agent's wrench takes effect for the first time."""
 
-    initial_angle_range: tuple[float, float] = (-0.05, 0.05)
-    """Initial layer angle offset (rad) around 0, sampled per episode."""
+    layer_frictionloss_range: tuple[float, float] = (0.0, 2.0e-5)
+    """Per-episode Coulomb friction loss (Nm) of the layer hinge: the layer-friction
+    randomness the rotator cannot observe (it only sees its own latency/gain/limit in its
+    observation). Sampled once per episode and written into `model.dof_frictionloss` on
+    every `reset`. The range is adapted to this model's scale, not the review's
+    illustrative (0.02, 0.08): the rotator's torque authority is 2e-3 Nm, so friction at
+    that scale would exceed the available torque and freeze the hinge. At the default
+    upper bound the turn takes ~12% longer and the worst steady-state angle error
+    (`frictionloss / oracle rotator kp`, ~0.033 rad) stays inside `success_angle_tol`
+    (locally probed: the scripted oracle still succeeds at this upper bound over 60 seeds)."""
+
+    initial_angle_range: tuple[float, float] = (0.0, 0.05)
+    """Initial layer angle (rad), sampled per episode. It must lie inside the hinge range
+    `[0, hinge_limit]`: with the old default `(-0.05, 0.05)` the negative half was outside
+    the hinge limit and got pushed to 0 by the joint limit on the first step."""
 
     impulse_prob_range: tuple[float, float] = (0.0, 0.3)
     """Episode probability range of one common impulse disturbance on the core. Like the
@@ -186,6 +231,13 @@ class WrenchCubeConfig:
 
     step_penalty: float = 0.01
     """Team reward subtracted on every control step (the shared time cost)."""
+
+    failure_penalty: float = -1.0
+    """Team reward on the step that first violates the failure condition -- it replaces
+    the plain `-step_penalty` there, so drifting the core out of bounds is punished rather
+    than merely costing one more step. Must be negative and no better than a step penalty
+    (`failure_penalty <= -step_penalty`). The success step keeps
+    `success_bonus - step_penalty`."""
 
     # --- fallback seed --------------------------------------------------------------------
     seed: int = 0
@@ -216,8 +268,13 @@ class WrenchCubeConfig:
         ):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} must be > 0, got {getattr(self, name)}")
-        if not 0 < self.goal_angle <= math.pi / 2:
-            raise ValueError(f"goal_angle must be in (0, pi/2], got {self.goal_angle}")
+        if not 0 < self.hinge_limit <= math.pi:
+            raise ValueError(f"hinge_limit must be in (0, pi], got {self.hinge_limit}")
+        if not 0 < self.goal_angle <= self.hinge_limit:
+            raise ValueError(
+                f"goal_angle must be in (0, hinge_limit] = (0, {self.hinge_limit}], "
+                f"got {self.goal_angle}"
+            )
         if not 0 < self.success_angle_tol < self.goal_angle:
             raise ValueError(
                 f"success_angle_tol must be in (0, goal_angle) = (0, {self.goal_angle}), "
@@ -243,6 +300,41 @@ class WrenchCubeConfig:
         _check_range("start_delay_range", self.start_delay_range)
         _check_range("impulse_prob_range", self.impulse_prob_range)
         _check_range("impulse_magnitude_range", self.impulse_magnitude_range)
+        _check_range("layer_frictionloss_range", self.layer_frictionloss_range)
+        # Non-additivity invariant (the design's premise): without the holder, the
+        # rotator's reaction must drift the core past the success rotation tolerance by a
+        # safe margin. Quasi-static estimate of the rotator-only drift:
+        #     drift = goal_angle * c / (c + core_ang_damping),
+        # with c the hinge's combined damping/friction resistance. The estimate matches
+        # the local rotator-only probe (predicted ~0.59 rad vs ~0.52 rad observed when the
+        # 0.5 rad failure bound stops the episode).
+        hinge_resistance = self.hinge_damping + self.hinge_frictionloss
+        if not hinge_resistance > 0:
+            raise ValueError(
+                "hinge_damping + hinge_frictionloss must be > 0: a frictionless hinge "
+                "would let the rotator turn the layer without a reaction on the core, "
+                f"got {hinge_resistance}"
+            )
+        sampled_min_resistance = self.hinge_damping + self.layer_frictionloss_range[0]
+        if not sampled_min_resistance > 0:
+            raise ValueError(
+                "hinge_damping + layer_frictionloss_range[0] must be > 0: an episode with "
+                "no hinge resistance would let the rotator turn the layer without "
+                f"drifting the core, got {sampled_min_resistance}"
+            )
+        resistance = min(hinge_resistance, sampled_min_resistance)
+        predicted_drift = self.goal_angle * resistance / (resistance + self.core_ang_damping)
+        required_drift = _NON_ADDITIVITY_MARGIN * self.success_rot_tol
+        if predicted_drift < required_drift:
+            raise ValueError(
+                "non-additivity violated: the predicted rotator-only core drift is "
+                f"{predicted_drift:.4f} rad (goal_angle * c / (c + core_ang_damping) with "
+                f"c = {resistance:.3g}), below the required {_NON_ADDITIVITY_MARGIN} x "
+                f"success_rot_tol = {required_drift:.4f} rad. With these parameters the "
+                "rotator alone would not move the core far enough for the holder to be "
+                "necessary; lower core_ang_damping, raise the hinge damping/frictionloss, "
+                "or raise success_rot_tol (it must stay below failure_rot_drift)."
+            )
         if self.slip_prob_range[1] > 1:
             raise ValueError(f"slip_prob_range must be within [0, 1], got {self.slip_prob_range}")
         if self.impulse_prob_range[1] > 1:
@@ -254,9 +346,11 @@ class WrenchCubeConfig:
             raise ValueError(
                 f"slip_decisions_range must be 1 <= lo <= hi, got {self.slip_decisions_range}"
             )
-        if not self.initial_angle_range[0] <= self.initial_angle_range[1]:
+        _check_range("initial_angle_range", self.initial_angle_range)
+        if self.initial_angle_range[1] > self.hinge_limit:
             raise ValueError(
-                f"initial_angle_range must have lo <= hi, got {self.initial_angle_range}"
+                "initial_angle_range must lie inside the hinge range [0, hinge_limit] = "
+                f"[0, {self.hinge_limit}], got {self.initial_angle_range}"
             )
         if not 0 <= self.success_bonus:
             raise ValueError(f"success_bonus must be >= 0, got {self.success_bonus}")
@@ -264,6 +358,13 @@ class WrenchCubeConfig:
             raise ValueError(
                 f"step_penalty must be in [0, success_bonus) = [0, {self.success_bonus}), "
                 f"got {self.step_penalty}"
+            )
+        if not self.failure_penalty < 0:
+            raise ValueError(f"failure_penalty must be < 0, got {self.failure_penalty}")
+        if not self.failure_penalty <= -self.step_penalty:
+            raise ValueError(
+                "failure_penalty must be no better than a step penalty "
+                f"(<= -step_penalty = {-self.step_penalty}), got {self.failure_penalty}"
             )
         if self.seed < 0:
             raise ValueError(f"seed must be >= 0, got {self.seed}")

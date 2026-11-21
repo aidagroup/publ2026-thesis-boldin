@@ -13,10 +13,21 @@ Both agents act through `mujoco.mjData.xfrc_applied` (holder -> `core`, rotator 
 `layer`); there are deliberately NO actuators and NO equality constraints, so the
 policy output is a raw 6D wrench and the physics is the whole dynamic.
 
-The hinge damping/frictionloss/armature values here are DEFAULTS only: `WrenchCubeEnv`
-overwrites the corresponding `model.dof_*` entries from `WrenchCubeConfig` (the config
-is the single source of truth, per the repo convention "tunables live in configs/").
-The gravity-free option is the design's "cube floats" assumption.
+MODEL ASSUMPTION of the design's non-additivity: the rotator's torque on the layer reaches
+the core only through the hinge's COMBINED damping/frictionloss (`hinge_damping +
+hinge_frictionloss`). That is what makes the rotator alone drift the core (its predicted
+drift is validated in `WrenchCubeConfig.__post_init__`, against the success tolerance) and
+forces the holder's counter-wrench. This is the reduced model's abstraction, not a contact
+model -- the layer's collision is disabled and there are no contacts anywhere.
+
+The hinge damping/frictionloss/armature values and the hinge `range` here are DEFAULTS
+only: `WrenchCubeEnv` overwrites the `model.dof_*` entries and `model.jnt_range` from
+`WrenchCubeConfig` (the config is the single source of truth for timing and DOF
+parameters, per the repo convention "tunables live in configs/"), and each `reset`
+replaces the hinge frictionloss with the sampled `layer_frictionloss`. The geometry and
+the two masses are XML-owned (MuJoCo's `mj_setConst` does not recompute a body's inertia
+when `body_mass` changes, so they are not written at runtime). The gravity-free option is
+the design's "cube floats" assumption.
 -->
 <mujoco model="cube_wrench">
   <compiler angle="radian"/>

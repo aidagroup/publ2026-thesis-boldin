@@ -7,23 +7,37 @@ decentralised agents, each commanding a raw 6D wrench applied through
 are no actuators, no equalities and no contacts: policy -> wrench -> physics is the whole
 dynamic, so the coordination problem is the only thing between the agents and success.
 
+Model assumption (the design's non-additivity mechanism): the rotator's torque on the
+layer reaches the core only through the hinge's COMBINED damping/frictionloss
+(`hinge_damping + hinge_frictionloss`). That reaction path is the reduced model's
+deliberate abstraction, not a contact model; the config's `__post_init__` validates that
+it makes the rotator alone drift the core past the success tolerance, so the holder is
+genuinely necessary. `assets/cube_wrench.xml` states the same assumption.
+
 Per control step (`control_every` physics substeps): both commands go through the agent's
 private latency queue, gain / authority scale and failure injections (start delay,
 slip), the impulse disturbance is added on its step, the physics runs, and the observation
-/ reward / termination are computed from the resulting state:
+/ reward / termination are computed from the resulting state. The per-episode layer
+friction is part of that private randomness: the sampled Coulomb `layer_frictionloss` is
+written into `model.dof_frictionloss` on every `reset` (the model is shared by the
+episodes, so the write is per reset; a future GPU-vectorised trainer will need its own
+per-env model copies -- the trainer of this step is the single-env loop).
 
-* observation: one flat `spaces.Box` per agent with the named-field layout of
-  `callosum.envs._wrench_logic` (own wrench + own private parameters + shared cube state
-  + goal/time, plus the partner block under `partner_mode="oracle"`);
-* reward: the shared team reward (`success_bonus` on the success step, `-step_penalty`
-  every step), see `_wrench_logic.team_reward`;
+* observation: one flat `spaces.Box` per agent, built by the pure
+  `callosum.envs._wrench_logic.build_observation` from a role-tagged `values` dict (own
+  wrench + own private parameters + shared cube state + goal/time, plus the partner block
+  under `partner_mode="oracle"`; the "none" mode never sees the partner keys);
+* reward: the shared team reward (`success_bonus - step_penalty` on the success step,
+  `failure_penalty` on the failure step, `-step_penalty` otherwise), see
+  `_wrench_logic.team_reward`;
 * termination: success (`success`) or failure (`failure`); truncation at
   `max_control_steps`.
 
 The config (`callosum.configs.wrench_cube.WrenchCubeConfig`) is the source of truth for
-the timing, the physics parameters written into `model.dof_*`, the authority, the
-tolerances and the randomisation. The XML (`assets/cube_wrench.xml`) carries only the
-defaults.
+the decision timing, the hinge range and the DOF parameters written into the model
+(`model.opt.timestep`, `model.jnt_range`, `model.dof_*`); the XML carries their defaults
+and owns the geometry and the two masses (see the config docstring: writing `body_mass` at
+runtime would leave MuJoCo's inertia inconsistent).
 
 The scripted oracle for environment validation lives in `oracle.py`; the local smoke
 check is `scripts/smoke_wrench_cube.py`. Only one env is supported on purpose -- the
@@ -46,17 +60,18 @@ from callosum.configs.wrench_cube import WrenchCubeConfig
 from callosum.envs._wrench_logic import (
     AGENT_KEYS,
     CUBE_STATE_FIELDS,
-    OWN_WRENCH_FIELDS,
-    PARTNER_WRENCH_FIELDS,
     EpisodeRandomization,
+    build_observation,
+    delayed_command,
     failure,
-    obs_fields,
+    injection_active,
     obs_size,
-    partner_fields,
+    param_value_fields,
     sample_episode_randomization,
     success,
     team_reward,
     validate_partner_mode,
+    wrench_value_fields,
 )
 
 _ASSET_PATH = Path(__file__).resolve().parent / "assets" / "cube_wrench.xml"
@@ -113,11 +128,9 @@ class WrenchCubeEnv(gymnasium.Env):
         self._write_model_params()
         self._data = mujoco.MjData(self._model)
 
-        core_joint = self._model.joint("core_joint")
         hinge_joint = self._model.joint(_HINGE_JOINT)
         self._core_id = self._model.body(_CORE_BODY).id
         self._layer_id = self._model.body(_LAYER_BODY).id
-        self._core_dof0 = int(self._model.jnt_dofadr[core_joint.id])
         self._hinge_qpos = int(self._model.jnt_qposadr[hinge_joint.id])
         self._hinge_dof = int(self._model.jnt_dofadr[hinge_joint.id])
 
@@ -131,24 +144,39 @@ class WrenchCubeEnv(gymnasium.Env):
             }
         )
 
-        self.randomization: EpisodeRandomization | None = None
-        """The episode's sampled private randomness (None before the first `reset`)."""
+        self._randomization: EpisodeRandomization | None = None
         self._episode_index = 0
         self._step_index = 0
         self._last_commands = {key: np.zeros(_WRENCH_SIZE) for key in AGENT_KEYS}
         self._delay_queues: dict[str, deque[np.ndarray]] = {}
-        self._initial_quat = np.array([1.0, 0.0, 0.0, 0.0])
-        self._initial_pos = np.zeros(3)
+        self._initial_core_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        self._initial_core_pos = np.zeros(3)
+
+    @property
+    def randomization(self) -> EpisodeRandomization | None:
+        """The episode's sampled private randomness (None before the first `reset`).
+
+        Read-only accessor kept for the scripted oracle: it reads its own agents' latency
+        from here, exactly like a policy reads its own private parameters from its
+        observation. The env itself uses the private `_randomization` attribute.
+        """
+        return self._randomization
 
     # --- setup ---------------------------------------------------------------------------
     def _write_model_params(self) -> None:
-        """Write the config's timing and DOF parameters into the model (config is truth)."""
+        """Write the config's decision timing and DOF/limit parameters into the model.
+
+        Config as truth: `dt` -> `model.opt.timestep`, `hinge_limit` -> `model.jnt_range`,
+        the damping/frictionloss/armature -> `model.dof_*`. The nominal hinge frictionloss
+        written here is replaced on every `reset` by the sampled `layer_frictionloss`.
+        The masses and the geometry are XML-owned (see the config docstring).
+        """
         cfg = self.config
         self._model.opt.timestep = cfg.dt
-        core_joint = self._model.joint("core_joint")
         hinge_joint = self._model.joint(_HINGE_JOINT)
-        core_dof0 = int(self._model.jnt_dofadr[core_joint.id])
         hinge_dof = int(self._model.jnt_dofadr[hinge_joint.id])
+        core_dof0 = int(self._model.jnt_dofadr[self._model.joint("core_joint").id])
+        self._model.jnt_range[hinge_joint.id] = (0.0, cfg.hinge_limit)
         self._model.dof_damping[core_dof0 : core_dof0 + 3] = cfg.core_lin_damping
         self._model.dof_damping[core_dof0 + 3 : core_dof0 + 6] = cfg.core_ang_damping
         self._model.dof_damping[hinge_dof] = cfg.hinge_damping
@@ -168,6 +196,10 @@ class WrenchCubeEnv(gymnasium.Env):
     ) -> tuple[dict[str, np.ndarray], dict[str, float | bool]]:
         """Start a new episode: sample the private randomness and place the cube.
 
+        The sampled layer friction is written into `model.dof_frictionloss` here (the model
+        is shared between episodes, so it is a per-reset write), and the layer starts at
+        the sampled angle inside the hinge range `[0, hinge_limit]`.
+
         Args:
             seed: Episode seed. `None` uses `config.seed + <episode index>`, so
                 consecutive resets without an explicit seed still get fresh randomness.
@@ -181,7 +213,8 @@ class WrenchCubeEnv(gymnasium.Env):
         self._episode_index += 1
         super().reset(seed=episode_seed)
         randomization = sample_episode_randomization(self.config, episode_seed)
-        self.randomization = randomization
+        self._randomization = randomization
+        self._model.dof_frictionloss[self._hinge_dof] = randomization.layer_frictionloss
         self._step_index = 0
         self._last_commands = {key: np.zeros(_WRENCH_SIZE) for key in AGENT_KEYS}
         self._delay_queues = {
@@ -194,8 +227,8 @@ class WrenchCubeEnv(gymnasium.Env):
         mujoco.mj_resetData(self._model, self._data)
         self._data.qpos[self._hinge_qpos] = randomization.layer_initial_angle
         mujoco.mj_forward(self._model, self._data)
-        self._initial_pos = self._data.qpos[0:3].copy()
-        self._initial_quat = self._data.qpos[3:7].copy()
+        self._initial_core_pos = self._data.qpos[0:3].copy()
+        self._initial_core_quat = self._data.qpos[3:7].copy()
         return self._observation(), self._info(succeeded=False)
 
     def step(
@@ -207,11 +240,13 @@ class WrenchCubeEnv(gymnasium.Env):
             action: `{"holder": (6,), "rotator": (6,)}` normalized wrenches in `[-1, 1]`.
 
         Returns:
-            `(obs, reward, terminated, truncated, info)`.
+            `(obs, reward, terminated, truncated, info)`. The reward is `failure_penalty`
+            on the step that first crosses the failure bounds, `success_bonus -
+            step_penalty` on the success step and `-step_penalty` otherwise.
         """
-        if self.randomization is None:
+        if self._randomization is None:
             raise RuntimeError("call reset() before step()")
-        randomization = self.randomization
+        randomization = self._randomization
         commands = self._parse_action(action)
         self._last_commands = commands
 
@@ -219,13 +254,8 @@ class WrenchCubeEnv(gymnasium.Env):
         for agent_idx, key in enumerate(AGENT_KEYS):
             agent = randomization.agents[agent_idx]
             queue = self._delay_queues[key]
-            queue.append(commands[key])
-            applied = queue.popleft().copy()
-            if (
-                self._step_index < agent.start_delay_steps
-                or agent.slip_active
-                and (agent.slip_step <= self._step_index < agent.slip_step + agent.slip_steps)
-            ):
+            applied = np.asarray(delayed_command(queue, commands[key]), dtype=np.float64)
+            if injection_active(agent, self._step_index):
                 applied = np.zeros(_WRENCH_SIZE)
             wrenches[key] = applied * self._authority(agent_idx) * agent.limit_scale * agent.gain
 
@@ -239,12 +269,15 @@ class WrenchCubeEnv(gymnasium.Env):
         self._step_index += 1
 
         succeeded = self._success()
+        failed = self._failure()
         reward = team_reward(
             succeeded=succeeded,
+            failed=failed,
             success_bonus=self.config.success_bonus,
             step_penalty=self.config.step_penalty,
+            failure_penalty=self.config.failure_penalty,
         )
-        terminated = succeeded or self._failure()
+        terminated = succeeded or failed
         truncated = (not terminated) and self._step_index >= self.config.max_control_steps
         return self._observation(), reward, terminated, truncated, self._info(succeeded)
 
@@ -289,8 +322,8 @@ class WrenchCubeEnv(gymnasium.Env):
         """The current angle / drift / time numbers of the episode."""
         data = self._data
         angle = float(data.qpos[self._hinge_qpos])
-        drift_pos = float(np.linalg.norm(data.qpos[0:3] - self._initial_pos))
-        drift_rot = float(_rotation_angle(self._initial_quat, data.qpos[3:7]))
+        drift_pos = float(np.linalg.norm(data.qpos[0:3] - self._initial_core_pos))
+        drift_rot = float(_rotation_angle(self._initial_core_quat, data.qpos[3:7]))
         return {
             "angle_deg": math.degrees(angle),
             "drift_pos": drift_pos,
@@ -308,8 +341,8 @@ class WrenchCubeEnv(gymnasium.Env):
         ang_speed = float(np.linalg.norm(np.append(core_ang_vel, layer_ang_vel)))
         return success(
             angle=float(data.qpos[self._hinge_qpos]),
-            drift_pos=float(np.linalg.norm(core_pos - self._initial_pos)),
-            drift_rot=float(_rotation_angle(self._initial_quat, data.qpos[3:7])),
+            drift_pos=float(np.linalg.norm(core_pos - self._initial_core_pos)),
+            drift_rot=float(_rotation_angle(self._initial_core_quat, data.qpos[3:7])),
             goal_angle=cfg.goal_angle,
             angle_tol=cfg.success_angle_tol,
             pos_tol=cfg.success_pos_tol,
@@ -325,8 +358,8 @@ class WrenchCubeEnv(gymnasium.Env):
         cfg = self.config
         data = self._data
         return failure(
-            float(np.linalg.norm(data.qpos[0:3] - self._initial_pos)),
-            float(_rotation_angle(self._initial_quat, data.qpos[3:7])),
+            float(np.linalg.norm(data.qpos[0:3] - self._initial_core_pos)),
+            float(_rotation_angle(self._initial_core_quat, data.qpos[3:7])),
             pos_drift=cfg.failure_pos_drift,
             rot_drift=cfg.failure_rot_drift,
         )
@@ -348,37 +381,29 @@ class WrenchCubeEnv(gymnasium.Env):
         )
         return tuple(float(value) for value in values)
 
-    def _obs_values(self, agent_idx: int) -> dict[str, float]:
-        """The `{field_name: value}` dict of `agent_idx`'s observation under the mode."""
-        if self.randomization is None:
-            raise RuntimeError("call reset() before building an observation")
-        key = AGENT_KEYS[agent_idx]
-        partner_idx = 1 - agent_idx
-        partner_key = AGENT_KEYS[partner_idx]
-        agent = self.randomization.agents[agent_idx]
-        partner = self.randomization.agents[partner_idx]
+    def _values(self) -> dict[str, float]:
+        """The role-tagged `{field: value}` facts `build_observation` flattens.
 
+        Collected once per step for BOTH agents (the previous `_obs_values` was rebuilt for
+        every field of every agent): the commanded wrench and private parameters per role,
+        the shared cube state, the goal and the time fraction. Partner keys are always
+        present; `build_observation` decides by partner mode whether they reach a vector.
+        """
+        if self._randomization is None:
+            raise RuntimeError("call reset() before building an observation")
         values: dict[str, float] = {}
-        values.update(zip(OWN_WRENCH_FIELDS, self._last_commands[key]))
-        values["own_latency"] = agent.latency_s
-        values["own_gain"] = agent.gain
-        values["own_limit_scale"] = agent.limit_scale
+        for agent_idx, key in enumerate(AGENT_KEYS):
+            agent = self._randomization.agents[agent_idx]
+            values.update(zip(wrench_value_fields(key), self._last_commands[key]))
+            values.update(
+                zip(param_value_fields(key), (agent.latency_s, agent.gain, agent.limit_scale))
+            )
         values.update(zip(CUBE_STATE_FIELDS, self._cube_state_values()))
         values["goal_angle"] = self.config.goal_angle
         values["time_fraction"] = self._step_index / self.config.max_control_steps
-        if partner_fields(self.partner_mode):
-            values.update(zip(PARTNER_WRENCH_FIELDS, self._last_commands[partner_key]))
-            values["partner_latency"] = partner.latency_s
-            values["partner_gain"] = partner.gain
-            values["partner_limit_scale"] = partner.limit_scale
         return {name: float(value) for name, value in values.items()}
 
     def _observation(self) -> dict[str, np.ndarray]:
-        """Both agents' flat observation vectors, in the `obs_fields` order."""
-        fields = obs_fields(self.partner_mode)
-        return {
-            key: np.asarray(
-                [self._obs_values(agent_idx)[name] for name in fields], dtype=np.float32
-            )
-            for agent_idx, key in enumerate(AGENT_KEYS)
-        }
+        """Both agents' flat observation vectors, built by the pure `build_observation`."""
+        values = self._values()
+        return {key: build_observation(values, key, self.partner_mode) for key in AGENT_KEYS}

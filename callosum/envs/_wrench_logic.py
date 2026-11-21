@@ -25,14 +25,30 @@ Observation of ONE agent, in field order (`obs_fields`):
   ablation triple. `"predicted"` (Bi-JEPA, phase 3) will replace that block with a
   latent and is deliberately NOT part of this layout yet.
 
-The env builds a `{field_name: value}` dict and `obs_fields` fixes the order and width,
-so no observation width is hardcoded in the env.
+The env does not assemble the vector itself. It collects one flat `{field: value}` dict
+of role-tagged facts -- `holder_wrench_fx`/`rotator_latency`/... for the two agents'
+own blocks, the shared `core_*`/`layer_*` state and `goal_angle`/`time_fraction` -- and
+`build_observation(values, agent, partner_mode)` selects and flattens the fields of
+`obs_fields(mode)`. Partner keys are always present in `values`; the mode alone decides
+whether they reach the vector, so the "none" leakage rule is concentrated in one pure
+function and tested bit-for-bit (tests/test_wrench_logic.py). `obs_fields` fixes the
+order and width, so no observation width is hardcoded in the env.
+
+The action path is testable here too: `delayed_command` is the per-agent latency queue
+(a command becomes the applied one exactly `latency_steps` steps later) and
+`injection_active` decides whether a command is suppressed (start delay or slip window).
+The episode randomisation includes the layer's sampled Coulomb friction, the private
+rotator-side randomness the holder cannot observe.
 """
 
 import math
 import random
+from collections import deque
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 if TYPE_CHECKING:
     from callosum.configs.wrench_cube import WrenchCubeConfig
@@ -83,6 +99,33 @@ CUBE_STATE_FIELDS = (
 GOAL_FIELDS = ("goal_angle", "time_fraction")
 """Names of the goal block: target hinge angle (rad) and fraction of the time budget."""
 
+_PRIVATE_PARAM_NAMES = ("latency", "gain", "limit_scale")
+"""Values-dict suffixes of the agent's private parameters, in `OWN_PARAM_FIELDS` order."""
+
+
+def partner_of(agent: str) -> str:
+    """The other role key (`"holder"` <-> `"rotator"`).
+
+    Args:
+        agent: One of `AGENT_KEYS`.
+
+    Returns:
+        The opposite role key.
+    """
+    if agent not in AGENT_KEYS:
+        raise ValueError(f"agent must be one of {AGENT_KEYS}, got {agent!r}")
+    return AGENT_KEYS[1 - AGENT_KEYS.index(agent)]
+
+
+def wrench_value_fields(agent: str) -> tuple[str, ...]:
+    """Values-dict keys of `agent`'s commanded-wrench block (`holder_wrench_fx`, ...)."""
+    return tuple(f"{agent}_wrench_{axis}" for axis in _WRENCH_AXES)
+
+
+def param_value_fields(agent: str) -> tuple[str, ...]:
+    """Values-dict keys of `agent`'s private parameters (`holder_latency`, ...)."""
+    return tuple(f"{agent}_{name}" for name in _PRIVATE_PARAM_NAMES)
+
 
 def validate_partner_mode(mode: str) -> None:
     """Raise ValueError if `mode` isn't one of `PARTNER_MODES`."""
@@ -120,6 +163,74 @@ def obs_fields(mode: str) -> tuple[str, ...]:
 def obs_size(mode: str) -> int:
     """Width of one agent's flat observation vector under `mode`."""
     return len(obs_fields(mode))
+
+
+def _observation_field_value(
+    values: Mapping[str, float], agent: str, partner_mode: str, field_name: str
+) -> float:
+    """One observation field's value from the role-tagged `values` dict.
+
+    The observation layout names are mapped onto the values schema by prefix:
+    `own_wrench_<axis>` -> `"<agent>_wrench_<axis>"`, `own_<param>` -> `"<agent>_<param>"`,
+    `partner_*` -> the same keys for the partner role, and every other field (shared cube
+    state, goal) is looked up verbatim. Mapping here keeps the vector order tied to
+    `obs_fields` automatically, so the layout constants cannot silently drift apart.
+
+    Args:
+        values: Role-tagged facts collected by the env (see `build_observation`).
+        agent: `"holder"` or `"rotator"` -- whose observation is being built.
+        partner_mode: `"none"` or `"oracle"` (only used for the error message).
+        field_name: One name of `obs_fields(partner_mode)`.
+
+    Returns:
+        The field's value as a float.
+    """
+    if field_name.startswith("own_wrench_"):
+        key = f"{agent}_wrench_{field_name.removeprefix('own_wrench_')}"
+    elif field_name.startswith("partner_wrench_"):
+        key = f"{partner_of(agent)}_wrench_{field_name.removeprefix('partner_wrench_')}"
+    elif field_name.startswith("own_"):
+        key = f"{agent}_{field_name.removeprefix('own_')}"
+    elif field_name.startswith("partner_"):
+        key = f"{partner_of(agent)}_{field_name.removeprefix('partner_')}"
+    else:
+        key = field_name
+    try:
+        return float(values[key])
+    except KeyError as exc:
+        raise ValueError(
+            f"values is missing {key!r}, required for the {agent!r} observation under "
+            f"partner_mode={partner_mode!r}"
+        ) from exc
+
+
+def build_observation(values: Mapping[str, float], agent: str, partner_mode: str) -> np.ndarray:
+    """Build one agent's flat observation vector from the env's role-tagged `values`.
+
+    Pure logic (no mujoco): the env collects the facts once per step and calls this for
+    each agent, so the partner-visibility rule is decided here, not in the simulator code.
+    Under `partner_mode="none"` every partner key of `values` is ignored, so changing them
+    cannot change the returned vector -- the leakage sentinel
+    (`tests/test_wrench_logic.py`) pins that bit-for-bit.
+
+    Args:
+        values: Role-tagged facts: `{agent}_wrench_{axis}` and `{agent}_{param}` for both
+            agents (`wrench_value_fields` / `param_value_fields`), the shared cube-state
+            fields of `CUBE_STATE_FIELDS`, `goal_angle` and `time_fraction`.
+        agent: `"holder"` or `"rotator"` -- whose observation this is.
+        partner_mode: `"none"` or `"oracle"`; selects the partner block.
+
+    Returns:
+        `np.float32` vector of width `obs_size(partner_mode)`, in `obs_fields` order.
+    """
+    if agent not in AGENT_KEYS:
+        raise ValueError(f"agent must be one of {AGENT_KEYS}, got {agent!r}")
+    validate_partner_mode(partner_mode)
+    vector = [
+        _observation_field_value(values, agent, partner_mode, field_name)
+        for field_name in obs_fields(partner_mode)
+    ]
+    return np.asarray(vector, dtype=np.float32)
 
 
 # --- episode randomisation ---------------------------------------------------------------
@@ -168,7 +279,11 @@ class EpisodeRandomization:
     agents: tuple[AgentRandomization, AgentRandomization]
     """Holder record, then rotator record (the `AGENT_KEYS` order)."""
     layer_initial_angle: float
-    """Initial layer hinge angle (rad) around 0."""
+    """Initial layer hinge angle (rad) inside `[0, hinge_limit]`."""
+    layer_frictionloss: float
+    """Sampled Coulomb friction loss (Nm) of the layer hinge for this episode. It is the
+    layer-friction randomness the rotator cannot observe (hidden from both agents' obs);
+    the env writes it into `model.dof_frictionloss` on reset."""
     impulse_active: bool
     """Whether the one common impulse disturbance happens in this episode."""
     impulse_step: int
@@ -189,8 +304,8 @@ def sample_episode_randomization(config: "WrenchCubeConfig", seed: int) -> Episo
     the env's reset). The draw order is fixed so a seed fully determines the episode:
     per agent (holder, then rotator) -- latency, gain, authority scale, slip probability,
     slip Bernoulli, slip duration, slip start step, start delay; then the episode-wide
-    layer initial angle, impulse probability, impulse Bernoulli, impulse step, impulse
-    direction (three draws) and impulse magnitude.
+    layer initial angle, layer friction loss, impulse probability, impulse Bernoulli,
+    impulse step, impulse direction (three draws) and impulse magnitude.
 
     Args:
         config: The environment config whose ranges are sampled.
@@ -224,6 +339,7 @@ def sample_episode_randomization(config: "WrenchCubeConfig", seed: int) -> Episo
             )
         )
     layer_initial_angle = rng.uniform(*config.initial_angle_range)
+    layer_frictionloss = rng.uniform(*config.layer_frictionloss_range)
     impulse_prob = rng.uniform(*config.impulse_prob_range)
     impulse_active = rng.random() < impulse_prob
     impulse_step = rng.randrange(config.max_control_steps)
@@ -239,10 +355,51 @@ def sample_episode_randomization(config: "WrenchCubeConfig", seed: int) -> Episo
         seed=seed,
         agents=(agents[0], agents[1]),
         layer_initial_angle=layer_initial_angle,
+        layer_frictionloss=layer_frictionloss,
         impulse_active=impulse_active,
         impulse_step=impulse_step,
         impulse_force=impulse_force,
     )
+
+
+# --- action path (latency queue and injections) ------------------------------------------
+
+
+def delayed_command(queue: deque[Sequence[float]], command: Sequence[float]) -> Sequence[float]:
+    """Push this step's `command` through an agent's latency queue, return the applied one.
+
+    The env initialises the queue with `latency_steps` zero commands at reset. With
+    `latency_steps == 0` the queue is empty before the call, so the command takes effect
+    on the same step; with `latency_steps == 1` the first call returns the zero command
+    enqueued at reset and the command takes effect one step later, and so on. Mutating the
+    queue in place keeps the helper dependency-free (it works for tuples, lists and numpy
+    arrays alike), so the latency behaviour is unit-testable without MuJoCo.
+
+    Args:
+        queue: The agent's in-flight commands, at most `latency_steps` long.
+        command: The normalized wrench commanded on this step.
+
+    Returns:
+        The command that takes effect on this step (still a sequence of floats).
+    """
+    queue.append(command)
+    return queue.popleft()
+
+
+def injection_active(agent: AgentRandomization, step: int) -> bool:
+    """Whether the agent's wrench is suppressed on `step` (start delay or slip window).
+
+    Args:
+        agent: The agent's episode randomisation record.
+        step: Zero-based control-step index of the episode.
+
+    Returns:
+        True inside the start delay (`step < start_delay_steps`) or inside the agent's one
+        slip window (`slip_step <= step < slip_step + slip_steps`); boundaries included.
+    """
+    in_start_delay = step < agent.start_delay_steps
+    in_slip = agent.slip_active and agent.slip_step <= step < agent.slip_step + agent.slip_steps
+    return in_start_delay or in_slip
 
 
 # --- success / failure / reward -----------------------------------------------------------
@@ -310,19 +467,36 @@ def failure(drift_pos: float, drift_rot: float, *, pos_drift: float, rot_drift: 
     return drift_pos > pos_drift or drift_rot > rot_drift
 
 
-def team_reward(*, succeeded: bool, success_bonus: float, step_penalty: float) -> float:
+def team_reward(
+    *,
+    succeeded: bool,
+    success_bonus: float,
+    step_penalty: float,
+    failed: bool = False,
+    failure_penalty: float = 0.0,
+) -> float:
     """The shared (non-additive) team reward of one control step.
 
-    The reward is the same for both agents: the success bonus on the step that first
-    satisfies the success condition, minus the per-step time penalty. It is the
-    cooperative signal the trainer discounts per control step.
+    The reward is the same for both agents. Three cases, in priority order: the success
+    step pays `success_bonus - step_penalty`; a step that crosses the failure bounds pays
+    `failure_penalty` instead of the plain time cost; every other step pays
+    `-step_penalty`. Success wins over failure if both flags are set (they cannot be at
+    once with a valid config, because the success tolerances are strictly inside the
+    failure bounds).
 
     Args:
         succeeded: Whether the step satisfied `success`.
         success_bonus: Bonus on a successful step (>= 0).
         step_penalty: Per-step time penalty (>= 0, below the bonus).
+        failed: Whether the step crossed the failure bounds.
+        failure_penalty: Reward on the failure step (< 0, no better than `-step_penalty`).
 
     Returns:
-        `success_bonus - step_penalty` on a successful step, `-step_penalty` otherwise.
+        `success_bonus - step_penalty` on success, `failure_penalty` on a failure step,
+        `-step_penalty` otherwise.
     """
-    return (success_bonus if succeeded else 0.0) - step_penalty
+    if succeeded:
+        return success_bonus - step_penalty
+    if failed:
+        return failure_penalty
+    return -step_penalty
