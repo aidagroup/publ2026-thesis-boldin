@@ -28,6 +28,10 @@ train = [
     "benchmarl",
     "tensorboard",
 ]
+# Reduced wrench-level cube sandbox (MuJoCo, CPU; runs on macOS and Linux).
+sandbox = [
+    "mujoco",
+]
 dev = [
     "ruff",
     "pytest",

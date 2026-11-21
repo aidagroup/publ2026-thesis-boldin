@@ -135,3 +135,42 @@ Bi-Manual Block Assembly via Sim-to-Real RL (2303.14870); Bi-Manual Manipulation
 - Bi-Manual Manipulation & Attachment (sim2real RL): https://arxiv.org/abs/2203.08277
 - Bi-Touch (tactile bimanual sim2real RL): https://arxiv.org/abs/2307.06423
 - Bimanual via Multi-Agent In-Context Learning: https://arxiv.org/abs/2604.20348
+
+---
+
+## Четвёртый проход (2026-11-21): reduced-модель и уточнение prior art
+
+Повод: перед выбором площадки для предзащиты сделан свежий поиск по «multi-agent JEPA / teammate modeling / embodied multi-agent manipulation». Вывод: область продолжает уплотняться, формулировку «первый JEPA-teammate» в тексте использовать нельзя.
+
+### Имя и ближайшие работы
+
+- **«BiJEPA» как термин занят** — BiJEPA (Yongchao Huang, arXiv 2603.00049, 2026) — симметричный JEPA для SSL (циклически согласованное предсказание между представлениями), без агентов и роботов. Наш механизм — *JEPA-предсказание латента партнёра в MARL*; в тексте даём операциональное определение и цитируем BiJEPA только как соседнюю SSL-работу (или переименовываем механизм, если научрук настаивает).
+- **LatentToM** (CoRL 2025, https://proceedings.mlr.press/v305/he25a.html) — ближайший опубликованный аналог: децентрализованные diffusion-политики, у каждого робота ego- и consensus-эмбеддинг, обученный декодер выводит ego-эмбеддинг другого робота («ToM в латентном пространстве»), исполнение только по наблюдению, без связи. Только реальное железо, не JEPA-лосс.
+- **CLS-DP** (IROS 2026, https://arxiv.org/abs/2606.22982) — CTDE, дистилляция привилегированной динамики в collaborative latent из локального RGB; RoboFactory (6 задач, 2–4 руки), 38% SR против 20% у лучшей централизованной, 9% у децентрализованной абляции без латента; sim-only.
+- **CARE** («Before We Act», 2026, https://jeong-zju.github.io/care/) — action-conditioned team-response belief из локальной истории; RoboFactory, +13.3 SR к LatentToM, физические dual-arm SO-101 (12 DoF); изолирует «верит ли агент партнёру» от «лучшей политики».
+- **MA-JEPA** (2026, https://arxiv.org/abs/2609.33563) — JEPA world model для MARL: training-only joint-предиктор следующего локального эмбеддинга каждого агента, децентрализованное исполнение; SMAC.
+- **Dreaming of Others** (2026, https://arxiv.org/abs/2605.31361) — факторизованный RSSM + ToM-голова, воркшоп-пейпер без экспериментов; полезен как источник протокола оценки.
+
+### Уточнённая ниша
+
+1. **State-only reduced-модель** (непрерывные моменты, изолированный куб) с ablation `none/oracle/predicted` — дешёвая и воспроизводимая проверка именно латентного предсказания партнёра, без RGB и без моторного шума.
+2. **Перенос на реальные SO-ARM101** — весенний arms-мост: профили моментов из reduced-модели реализуются скриптовыми примитивами (`hold`/`turn`); сравнение с реконструктивными/дистилляционными teammate-моделями.
+3. **Практическая воспроизводимость** (конфиги/сиды/команды) — то, чего у соседей обычно нет.
+
+### Бенчмарк-ландшафт (следствие для выбора площадки)
+
+- **RoboFactory** остаётся стандартом сравнимости с CLS-DP/CARE; брать весной (IL-бенчмарк без наград, 500 шагов, Python 3.9).
+- **ManiSkill `TwoRobotPickCube/StackCube`** — единственные multi-agent среды в стеке (2× Panda, dense reward); возможный in-stack reference, не основная площадка.
+- **SO-101-бенчмарки** (SO-101 Bench, ArmnetBench, LeHome, CARE) — IL/VLA и реальное железо, per-agent RL-наград не дают; Isaac-стек недоступен на A100/драйвере 570.
+- **VMAS `joint_passage`/`wheel`/`transport`** — дешёвый прокси для механизменной проверки, если разрыв `oracle−none` в reduced-модели окажется слабым.
+
+### Источники (4-й проход)
+
+- LatentToM: https://proceedings.mlr.press/v305/he25a.html
+- CLS-DP: https://arxiv.org/abs/2606.22982
+- CARE: https://jeong-zju.github.io/care/
+- MA-JEPA: https://arxiv.org/abs/2609.33563
+- Dreaming of Others: https://arxiv.org/abs/2605.31361
+- BiJEPA (SSL): https://arxiv.org/abs/2603.00049
+- RoboFactory: https://arxiv.org/abs/2503.16408 · https://github.com/MARS-EAI/RoboFactory
+- SO-101 Bench: https://arxiv.org/abs/2610.36420 · ArmnetBench: https://arxiv.org/abs/2607.24481
