@@ -1,0 +1,39 @@
+<!-- Reduced wrench-level cube of CubeWrench-v0 (see callosum/envs/wrench_cube/env.py).
+
+Model layout (PLAN.md "Среда CubeWrench-v0", TECH MINIMUM 1):
+  * `core`      -- the cube body: a free-floating 5.7 cm box (half-size 0.0285 m,
+                   mass 0.2 kg, inertia derived by MuJoCo from the box geometry);
+  * `layer`     -- the active layer: a thin plate parented to `core` on a hinge
+                   about the local +z axis, limited to [0, pi/2] (the face-turn
+                   range). Its collision is disabled: the layer only exists as the
+                   body the rotator's wrench acts on, there is no contact anywhere
+                   in this sandbox.
+
+Both agents act through `mujoco.mjData.xfrc_applied` (holder -> `core`, rotator ->
+`layer`); there are deliberately NO actuators and NO equality constraints, so the
+policy output is a raw 6D wrench and the physics is the whole dynamic.
+
+The hinge damping/frictionloss/armature values here are DEFAULTS only: `WrenchCubeEnv`
+overwrites the corresponding `model.dof_*` entries from `WrenchCubeConfig` (the config
+is the single source of truth, per the repo convention "tunables live in configs/").
+The gravity-free option is the design's "cube floats" assumption.
+-->
+<mujoco model="cube_wrench">
+  <compiler angle="radian"/>
+  <option timestep="0.005" integrator="implicitfast" gravity="0 0 0"/>
+
+  <worldbody>
+    <body name="core" pos="0 0 0">
+      <freejoint name="core_joint"/>
+      <geom name="core_geom" type="box" size="0.0285 0.0285 0.0285" mass="0.2"/>
+
+      <!-- Thin plate sitting on top of the core; hinge axis = its local +z. -->
+      <body name="layer" pos="0 0 0.0305">
+        <joint name="layer_hinge" type="hinge" axis="0 0 1" range="0 1.5708"
+               limited="true" damping="0.0001" frictionloss="0.00001" armature="0"/>
+        <geom name="layer_geom" type="box" size="0.0285 0.0285 0.002" mass="0.02"
+              contype="0" conaffinity="0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
