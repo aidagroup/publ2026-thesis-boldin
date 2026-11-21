@@ -1,0 +1,44 @@
+<!-- CartPoleCoop-v0: the cart-pole reduced model of the two-agent coop suite
+     (see callosum/envs/coop/cartpole.py and callosum/configs/coop_tasks.CartPoleConfig).
+
+Model layout (PLAN.md "Two-robot task suite"):
+  * `cart` -- a 2.0 kg box (half extents 0.10 x 0.05 x 0.05 m) on ONE slide joint along
+              world +x; the joint is what puts the cart on the rail (`y`/`z` are fixed);
+  * `pole` -- a 3.0 m thin capsule (mass 0.2 kg) parented to the cart on a hinge about
+              world +y, so its natural variable is the pole angle from upright.
+
+The two agents act through `mujoco.mjData.xfrc_applied` on the cart: the `left` pusher
+commands only `+x` force, the `right` pusher only `-x` force (the env's one-sided
+actuation). There are deliberately NO actuators, NO cameras and NO contacts: the cart is
+held on its rail by the slide joint and the geoms are collision-free, so the policy ->
+force -> physics is the whole dynamic.
+
+XML-OWNED physics: the two masses and the geometry (the cart box and the pole capsule's
+length). MuJoCo derives the body inertias from the geom geometry at compile time and
+`mj_setConst` does not recompute them when `body_mass` is written at runtime, so the
+masses/lengths stay XML-owned; `CartPoleConfig` documents them and is the source of truth
+for everything else (timestep, gravity, joint limits, damping, armature, force authority),
+which `CartPoleEnv` writes into the model. The damping/armature values below are defaults
+only; each reset also replaces the pole damping with the episode's sampled randomisation.
+-->
+<mujoco model="cartpole_coop">
+  <compiler angle="radian"/>
+  <option timestep="0.005" integrator="implicitfast" gravity="0 0 -9.81"/>
+
+  <worldbody>
+    <!-- Cart on the rail: slide joint along +x, gravity is taken by the joint. -->
+    <body name="cart" pos="0 0 0">
+      <joint name="cart_slide" type="slide" axis="1 0 0" range="-1.2 1.2" limited="true"
+             damping="0.2" armature="0.0"/>
+      <geom name="cart_geom" type="box" size="0.10 0.05 0.05" mass="2.0"
+            contype="0" conaffinity="0"/>
+
+      <!-- Pole: hinge at the top of the cart, capsule pointing straight up at angle 0. -->
+      <body name="pole" pos="0 0 0.05">
+        <joint name="pole_hinge" type="hinge" axis="0 1 0" damping="0.0" armature="0.01"/>
+        <geom name="pole_geom" type="capsule" fromto="0 0 0 0 0 3.0" size="0.03" mass="0.2"
+              contype="0" conaffinity="0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

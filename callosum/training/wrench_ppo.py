@@ -1,9 +1,16 @@
-"""Continuous-wrench IPPO trainer for CubeWrench-v0 (PLAN.md steps 2 and 3, `wrench_ppo`).
+"""IPPO trainer of the reduced two-agent suite: CubeWrench-v0 and the coop tasks.
 
-Two independent PPO learners -- one Gaussian actor-critic per role (`holder`, `rotator`) --
-share one environment step and one **team** reward, so the coordination has to be learned
-from the decentralised observations alone (the `none` / `oracle` / `predicted` ablation of
-the plan). The default env backend (`--backend cpu`) is the single-instance MuJoCo CPU env
+The `--task` flag selects the environment: the default `"cube"` keeps the thesis main line
+(`CubeWrench-v0`, `holder`/`rotator`) bit-for-bit on its original CPU/warp paths, while
+`"cartpole"`/`"pendulum"` train the two-agent coop suite (`left`/`right`) on the same
+trainer, policies, GAE, checkpoints and Bi-JEPA path -- the env supplies its observation
+width, action width and agent keys (`WrenchPPOConfig.env_obs_size`/`action_size`/
+`agent_keys`), and the coop vectorisation is `callosum.training._vec_coop.VecCoopEnv`.
+
+Two independent PPO learners -- one Gaussian actor-critic per agent -- share one
+environment step and one **team** reward, so the coordination has to be learned from the
+decentralised observations alone (the `none` / `oracle` / `predicted` ablation of the
+plan). The default env backend (`--backend cpu`) is the single-instance MuJoCo CPU env
 (`callosum.envs.wrench_cube.WrenchCubeEnv`), so its vectorisation is a Python loop:
 `callosum.training._vec_wrench.VecWrenchCube` drives `num_envs` copies with auto-reset and
 the finished-episode statistics. The optional GPU backend (`--backend warp --device cuda`)
@@ -84,7 +91,9 @@ from callosum.agents.bijepa import BiJEPA, latent_stats
 from callosum.configs.wrench_ppo import (
     INPUT_MODES,
     WrenchPPOConfig,
+    checkpoint_task,
     parse_args_with_explicit,
+    task_obs_size,
 )
 from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
 from callosum.training._bijepa_probe import ridge_probe
@@ -120,27 +129,38 @@ _WRENCH_SIZE = 6
 
 
 def make_policies(
-    partner_mode: str, device: torch.device | str = "cpu", *, latent_dim: int = 0
+    partner_mode: str,
+    device: torch.device | str = "cpu",
+    *,
+    latent_dim: int = 0,
+    input_size: int | None = None,
+    action_dim: int = _WRENCH_SIZE,
 ) -> list[ActorCritic]:
-    """One independent Gaussian actor-critic per role, in `AGENT_KEYS` order.
+    """One independent Gaussian actor-critic per role, in the env's agent-key order.
 
-    The input width is `callosum.envs._wrench_logic.obs_size(partner_mode) + latent_dim`: the
-    env's flat observation for that mode (28 for `none`, 45 for `oracle`) plus the predicted
-    partner latent appended under `predicted` (`latent_dim=cfg.latent_dim`, so 28 + 32 = 60).
-    The output is the role's normalized 6D wrench. Sharing no parameters is what makes the
-    pair an IPPO-style decentralised team rather than a single joint policy.
+    The default input width is `callosum.envs._wrench_logic.obs_size(partner_mode) +
+    latent_dim` (the cube: 28 for `none`, 45 for `oracle`, plus the Bi-JEPA latent under
+    `predicted`); the coop tasks pass their env observation width explicitly
+    (`WrenchPPOConfig.env_obs_size`), so the same policy code serves both suites. The
+    output width is the env's action width (`6` for the cube's 6D wrench, `1` for the coop
+    tasks' one-sided force/torque). Sharing no parameters is what makes the pair an
+    IPPO-style decentralised team rather than a single joint policy.
 
     Args:
-        partner_mode: Env partner-visibility mode fixing the env observation width.
+        partner_mode: Env partner-visibility mode; used to derive the default input width.
         device: Torch device of both policies.
         latent_dim: Width of the appended Bi-JEPA predicted latent (`0` for the `none` /
             `oracle` baselines).
+        input_size: Explicit policy input width (env observation width) when the caller
+            knows the task, otherwise derived from `partner_mode`.
+        action_dim: Width of one action (the env's action-space width).
 
     Returns:
-        `[holder_policy, rotator_policy]`.
+        Two policies, one per agent (for the cube `[holder, rotator]`, for the coop suite
+        `[left, right]`).
     """
-    input_size = obs_size(partner_mode) + latent_dim
-    return [ActorCritic(input_size, _WRENCH_SIZE).to(device) for _ in AGENT_KEYS]
+    policy_input = (obs_size(partner_mode) if input_size is None else input_size) + latent_dim
+    return [ActorCritic(policy_input, action_dim).to(device) for _ in AGENT_KEYS]
 
 
 def make_bijepa(cfg: WrenchPPOConfig, device: torch.device | str = "cpu") -> BiJEPA | None:
@@ -188,10 +208,24 @@ class LatentInputBuilder:
     latents of two episodes.
     """
 
-    def __init__(self, bijepa: BiJEPA, device: torch.device | str = "cpu") -> None:
-        """Wrap a trained-in-training Bi-JEPA module; `history_len`/`latent_dim` come from it."""
+    def __init__(
+        self,
+        bijepa: BiJEPA,
+        device: torch.device | str = "cpu",
+        *,
+        agent_keys: tuple[str, ...] | None = None,
+    ) -> None:
+        """Wrap a trained-in-training Bi-JEPA module; `history_len`/`latent_dim` come from it.
+
+        Args:
+            bijepa: The Bi-JEPA module (its observation width fixes the own-observation size).
+            device: Torch device of the history buffers and the module.
+            agent_keys: The env's two agent keys, in observation-dict order; defaults to the
+                cube's `("holder", "rotator")` so the old call sites keep working.
+        """
         self.bijepa = bijepa
         self.device = torch.device(device)
+        self.agent_keys = AGENT_KEYS if agent_keys is None else tuple(agent_keys)
         self.history_len = bijepa.cfg.history_len
         self.obs_dim = bijepa.obs_dims[0]
         self.latent_dim = bijepa.cfg.latent_dim
@@ -206,7 +240,7 @@ class LatentInputBuilder:
     def reset(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Start a new rollout: every history window is `history_len` copies of `obs`."""
         self.history = {
-            name: obs[name].unsqueeze(1).repeat(1, self.history_len, 1) for name in AGENT_KEYS
+            name: obs[name].unsqueeze(1).repeat(1, self.history_len, 1) for name in self.agent_keys
         }
         return self._augment(self.history)
 
@@ -236,7 +270,7 @@ class LatentInputBuilder:
     ) -> dict[str, torch.Tensor]:
         """Shift every history window by one observation (episode-resetting `done` envs)."""
         rolled: dict[str, torch.Tensor] = {}
-        for name in AGENT_KEYS:
+        for name in self.agent_keys:
             window = torch.cat([self.history[name][:, 1:, :], obs[name].unsqueeze(1)], dim=1)
             if done is not None:
                 mask = done.bool().view(-1, 1, 1)
@@ -248,7 +282,7 @@ class LatentInputBuilder:
     def _augment(self, history: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """`[last own observation, predicted partner latent]` for every role."""
         inputs: dict[str, torch.Tensor] = {}
-        for index, name in enumerate(AGENT_KEYS):
+        for index, name in enumerate(self.agent_keys):
             z_hist = self.bijepa.encode(history[name], index)
             z_hat = self.bijepa.predict_partner(z_hist, index)
             inputs[name] = torch.cat([history[name][:, -1, :], z_hat], dim=-1)
@@ -347,6 +381,7 @@ def evaluate_greedy(
     device: torch.device | str = "cpu",
     seed: int = 0,
     bijepa: BiJEPA | None = None,
+    agent_keys: tuple[str, ...] | None = None,
 ) -> EvalSummary:
     """Greedy evaluation on a FIXED set of held-out seeds, one episode per seed.
 
@@ -379,8 +414,9 @@ def evaluate_greedy(
     Returns:
         The aggregated `EvalSummary` over exactly `episodes` first episodes.
     """
+    keys = AGENT_KEYS if agent_keys is None else tuple(agent_keys)
     torch_io = bool(getattr(vec, "torch_io", False))
-    builder = LatentInputBuilder(bijepa, device) if bijepa is not None else None
+    builder = LatentInputBuilder(bijepa, device, agent_keys=keys) if bijepa is not None else None
     num_envs = int(vec.num_envs)
     max_control_steps = int(vec.config.max_control_steps)
     successes: list[bool] = []
@@ -394,7 +430,7 @@ def evaluate_greedy(
         recorded = [False] * num_envs
         for _step in range(max_control_steps + 1):
             actions = {}
-            for name, policy in zip(AGENT_KEYS, policies):
+            for name, policy in zip(keys, policies):
                 action = policy.get_action(inputs[name], deterministic=True)
                 clipped = torch.clamp(action, -1.0, 1.0)
                 actions[name] = clipped if torch_io else clipped.cpu().numpy()
@@ -512,6 +548,7 @@ def probe_predictions(
     terms: dict[str, torch.Tensor],
     obs_hist_a: torch.Tensor,
     obs_hist_b: torch.Tensor,
+    action_size: int = _WRENCH_SIZE,
 ) -> dict[str, float]:
     """Held-out linear-probe quality of the predicted partner latents (`aux/probe/*` scalars).
 
@@ -534,7 +571,7 @@ def probe_predictions(
         fully independent test: treat `r2` as an optimistic but consistently comparable
         quality signal, not as an unbiased generalisation estimate.
     """
-    wrench = {"a": obs_hist_b[:, -1, :_WRENCH_SIZE], "b": obs_hist_a[:, -1, :_WRENCH_SIZE]}
+    wrench = {"a": obs_hist_b[:, -1, :action_size], "b": obs_hist_a[:, -1, :action_size]}
     wrench_rows = [
         ridge_probe(terms[f"z_pred_{direction}"], wrench[direction]) for direction in ("a", "b")
     ]
@@ -605,7 +642,7 @@ def aux_update(
     metrics["latent/std"] = stats["std_mean"]
     metrics["latent/std_min"] = stats["std_min"]
     metrics["latent/effective_rank"] = stats["eff_rank"]
-    metrics.update(probe_predictions(terms, obs_hist_a, obs_hist_b))
+    metrics.update(probe_predictions(terms, obs_hist_a, obs_hist_b, cfg.action_size))
     return metrics
 
 
@@ -644,6 +681,7 @@ def save_checkpoint(
     *,
     bijepa: BiJEPA | None = None,
     bijepa_optimizer: torch.optim.Optimizer | None = None,
+    agent_keys: tuple[str, ...] | None = None,
 ) -> None:
     """Write the full training state to `path` atomically.
 
@@ -668,14 +706,14 @@ def save_checkpoint(
         bijepa: The run's Bi-JEPA module (only for `use_bijepa=True` runs).
         bijepa_optimizer: Its Adam optimizer, restored by `--resume`.
     """
+    keys = AGENT_KEYS if agent_keys is None else tuple(agent_keys)
     payload = {
         "format": CHECKPOINT_FORMAT,
-        "agents": {name: policy.state_dict() for name, policy in zip(AGENT_KEYS, policies)},
-        "optimizers": {
-            name: optimizer.state_dict() for name, optimizer in zip(AGENT_KEYS, optimizers)
-        },
+        "agents": {name: policy.state_dict() for name, policy in zip(keys, policies)},
+        "optimizers": {name: optimizer.state_dict() for name, optimizer in zip(keys, optimizers)},
         "config": dataclasses.asdict(cfg),
         "obs_size": cfg.obs_size,
+        "action_size": cfg.action_size,
         "partner_mode": cfg.partner_mode,
         "input_mode": cfg.input_mode,
         "policy_input_size": cfg.policy_input_size,
@@ -704,15 +742,27 @@ def load_checkpoint(path: str | Path) -> dict:
     return payload
 
 
-def load_weights(payload: dict, policies: list[ActorCritic]) -> None:
-    """Load both policies' weights from a checkpoint payload (in `AGENT_KEYS` order)."""
-    for name, policy in zip(AGENT_KEYS, policies):
+def load_weights(
+    payload: dict,
+    policies: list[ActorCritic],
+    *,
+    agent_keys: tuple[str, ...] | None = None,
+) -> None:
+    """Load both policies' weights from a checkpoint payload (in the env's agent-key order)."""
+    keys = AGENT_KEYS if agent_keys is None else tuple(agent_keys)
+    for name, policy in zip(keys, policies):
         policy.load_state_dict(payload["agents"][name])
 
 
-def load_optimizers(payload: dict, optimizers: list[torch.optim.Optimizer]) -> None:
-    """Load both optimizer states from a checkpoint payload (in `AGENT_KEYS` order)."""
-    for name, optimizer in zip(AGENT_KEYS, optimizers):
+def load_optimizers(
+    payload: dict,
+    optimizers: list[torch.optim.Optimizer],
+    *,
+    agent_keys: tuple[str, ...] | None = None,
+) -> None:
+    """Load both optimizer states from a checkpoint payload (in the env's agent-key order)."""
+    keys = AGENT_KEYS if agent_keys is None else tuple(agent_keys)
+    for name, optimizer in zip(keys, optimizers):
         optimizer.load_state_dict(payload["optimizers"][name])
 
 
@@ -792,7 +842,11 @@ def check_checkpoint_compat(payload: dict, input_mode: str) -> tuple[str, int]:
             f"checkpoint was made with partner_mode={saved_partner!r}, input_mode "
             f"{input_mode!r} needs partner_mode={env_mode!r}"
         )
-    expected_obs = obs_size(env_mode)
+    task = checkpoint_task(payload)
+    expected_obs = task_obs_size(task, env_mode)
+    saved_task = (payload.get("config") or {}).get("task")
+    if saved_task is not None and saved_task != task:  # pragma: no cover - defensive
+        raise ValueError(f"checkpoint records task={saved_task!r} but its config says {task!r}")
     saved_obs = payload.get("obs_size")
     if saved_obs is not None and int(saved_obs) != expected_obs:
         raise ValueError(
@@ -814,6 +868,13 @@ def check_checkpoint_compat(payload: dict, input_mode: str) -> tuple[str, int]:
             )
         latent_dim = 0
     expected_input = expected_obs + latent_dim
+    expected_action = 6 if task == "cube" else 1
+    saved_action = payload.get("action_size")
+    if saved_action is not None and int(saved_action) != expected_action:
+        raise ValueError(
+            f"checkpoint policies output {saved_action} action values but task {task!r} has "
+            f"{expected_action} action dimensions"
+        )
     saved_input_size = payload.get("policy_input_size")
     if saved_input_size is not None and int(saved_input_size) != expected_input:
         raise ValueError(
@@ -884,9 +945,7 @@ def apply_runtime_overrides(
             if getattr(requested, field) != getattr(defaults, field)
         )
     overrides = {
-        field: getattr(requested, field)
-        for field in RUNTIME_RESOURCE_FIELDS
-        if field in explicit
+        field: getattr(requested, field) for field in RUNTIME_RESOURCE_FIELDS if field in explicit
     }
     if not overrides:
         return saved
@@ -904,10 +963,6 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
             `--resume` for the runtime resources (`backend`, `device`).
     """
     requested = cfg
-    if cfg.backend == "warp":
-        from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
-    else:
-        from callosum.training._vec_wrench import VecWrenchCube
 
     # The policies are tiny MLPs; on a many-core server the default thread pool
     # oversubscribes and makes the env loop 30x slower (measured on 96-core RunPod).
@@ -918,9 +973,7 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
     resumed: dict | None = None
     if cfg.resume:
         run_dir, resumed = _resolve_resume(cfg.resume)
-        cfg = apply_runtime_overrides(
-            _config_from_payload(resumed, run_dir), requested, explicit
-        )
+        cfg = apply_runtime_overrides(_config_from_payload(resumed, run_dir), requested, explicit)
         if int(resumed["update"]) >= cfg.total_updates:
             print(
                 f"run {run_dir} is already complete (update {resumed['update']}/"
@@ -934,33 +987,56 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
             flush=True,
         )
     else:
-        run_name = cfg.exp_name or f"wrench_{cfg.input_mode}_s{cfg.seed}_{int(time.time())}"
+        task_prefix = "wrench" if cfg.task == "cube" else f"coop_{cfg.task}"
+        run_name = cfg.exp_name or f"{task_prefix}_{cfg.input_mode}_s{cfg.seed}_{int(time.time())}"
         run_dir = Path(cfg.runs_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # The run's randomisation preset is part of the config, so the CPU and the GPU backend
-    # build the SAME environment variant (and the evaluator rebuilds it from the checkpoint).
-    env_config = cfg.env_config()
-    if cfg.backend == "warp":
-        # Lazy import above: the GPU stack (mujoco_warp/warp) is only needed for this branch.
-        train_vec = WrenchCubeBatchGPU(
-            cfg.num_envs,
-            config=env_config,
-            partner_mode=cfg.partner_mode,
-            seed=cfg.seed,
-            device=cfg.device,
-        )
-        eval_vec = WrenchCubeBatchGPU(
-            cfg.eval_envs,
-            config=env_config,
-            partner_mode=cfg.partner_mode,
-            seed=cfg.seed + 1_000_003,
-            device=cfg.device,
-        )
+    # Backend selection is task-based: the cube keeps its original CPU/warp paths (the
+    # environment variant follows the run's randomisation preset), while the coop suite has
+    # only the CPU MuJoCo loop (`callosum.training._vec_coop`, the same contract).
+    if cfg.task == "cube":
+        env_config = cfg.env_config()
+        if cfg.backend == "warp":
+            # Lazy import: the GPU stack (mujoco_warp/warp) is only needed for this branch.
+            from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
+
+            train_vec = WrenchCubeBatchGPU(
+                cfg.num_envs,
+                config=env_config,
+                partner_mode=cfg.partner_mode,
+                seed=cfg.seed,
+                device=cfg.device,
+            )
+            eval_vec = WrenchCubeBatchGPU(
+                cfg.eval_envs,
+                config=env_config,
+                partner_mode=cfg.partner_mode,
+                seed=cfg.seed + 1_000_003,
+                device=cfg.device,
+            )
+        else:
+            from callosum.training._vec_wrench import VecWrenchCube
+
+            train_vec = VecWrenchCube(
+                cfg.num_envs, cfg.partner_mode, config=env_config, seed=cfg.seed
+            )
+            eval_vec = VecWrenchCube(
+                cfg.eval_envs, cfg.partner_mode, config=env_config, seed=cfg.seed + 1_000_003
+            )
     else:
-        train_vec = VecWrenchCube(cfg.num_envs, cfg.partner_mode, config=env_config, seed=cfg.seed)
-        eval_vec = VecWrenchCube(
-            cfg.eval_envs, cfg.partner_mode, config=env_config, seed=cfg.seed + 1_000_003
+        from callosum.training._vec_coop import VecCoopEnv
+
+        env_config = cfg.coop_env_config()
+        train_vec = VecCoopEnv(
+            cfg.task, cfg.num_envs, cfg.partner_mode, config=env_config, seed=cfg.seed
+        )
+        eval_vec = VecCoopEnv(
+            cfg.task,
+            cfg.eval_envs,
+            cfg.partner_mode,
+            config=env_config,
+            seed=cfg.seed + 1_000_003,
         )
     try:
         return train(cfg, run_dir, train_vec, eval_vec, resumed)
@@ -1022,7 +1098,15 @@ def train(
 
     device = torch.device(cfg.device)
     latent_dim = cfg.latent_dim if cfg.use_bijepa else 0
-    policies = make_policies(cfg.partner_mode, device, latent_dim=latent_dim)
+    agent_keys = cfg.agent_keys
+    action_size = cfg.action_size
+    policies = make_policies(
+        cfg.partner_mode,
+        device,
+        latent_dim=latent_dim,
+        input_size=cfg.env_obs_size,
+        action_dim=action_size,
+    )
     optimizers = [
         torch.optim.Adam(policy.parameters(), lr=cfg.learning_rate, eps=1e-5) for policy in policies
     ]
@@ -1032,8 +1116,8 @@ def train(
     eval_metrics: dict[str, float] = {}
     if resumed is not None:
         _check_resumed_state(resumed, cfg)
-        load_weights(resumed, policies)
-        load_optimizers(resumed, optimizers)
+        load_weights(resumed, policies, agent_keys=agent_keys)
+        load_optimizers(resumed, optimizers, agent_keys=agent_keys)
         if bijepa is not None and bijepa_optimizer is not None:
             load_bijepa_weights(resumed, bijepa)
             load_bijepa_optimizer(resumed, bijepa_optimizer)
@@ -1064,12 +1148,13 @@ def train(
 
     if hasattr(train_vec, "software_versions"):
         print(f"env software: {train_vec.software_versions()}", flush=True)
+    env_label = "CubeWrench-v0" if cfg.task == "cube" else f"coop:{cfg.task}"
     print(
-        f"run {run_dir} | CubeWrench-v0 | input_mode {cfg.input_mode} (env partner_mode "
+        f"run {run_dir} | {env_label} | input_mode {cfg.input_mode} (env partner_mode "
         f"{cfg.partner_mode}) | backend {cfg.backend} | randomization {cfg.randomization} | "
         f"device {device} | torch {torch.__version__} | obs "
         f"{cfg.env_obs_size} + latent {latent_dim} = policy input "
-        f"{cfg.policy_input_size} -> act {_WRENCH_SIZE}",
+        f"{cfg.policy_input_size} -> act {action_size}",
         flush=True,
     )
     if bijepa is not None:
@@ -1094,7 +1179,7 @@ def train(
     torch_io = bool(getattr(train_vec, "torch_io", False))
     obs_dim = cfg.policy_input_size
     obs_buf = [torch.zeros((steps, num_envs, obs_dim), device=device) for _ in policies]
-    act_buf = [torch.zeros((steps, num_envs, _WRENCH_SIZE), device=device) for _ in policies]
+    act_buf = [torch.zeros((steps, num_envs, action_size), device=device) for _ in policies]
     logprob_buf = [torch.zeros((steps, num_envs), device=device) for _ in policies]
     value_buf = [torch.zeros((steps, num_envs), device=device) for _ in policies]
     rewards = torch.zeros((steps, num_envs), device=device)
@@ -1105,12 +1190,14 @@ def train(
     obs_hist_buf = (
         [
             torch.zeros((steps, num_envs, cfg.history_len, cfg.env_obs_size), device=device)
-            for _ in AGENT_KEYS
+            for _ in agent_keys
         ]
         if bijepa is not None
         else None
     )
-    builder = LatentInputBuilder(bijepa, device) if bijepa is not None else None
+    builder = (
+        LatentInputBuilder(bijepa, device, agent_keys=agent_keys) if bijepa is not None else None
+    )
 
     stop_requested = False
 
@@ -1149,7 +1236,7 @@ def train(
             dones[step] = next_done
             env_actions: dict[str, np.ndarray] = {}
             with torch.no_grad():
-                for index, (name, policy) in enumerate(zip(AGENT_KEYS, policies)):
+                for index, (name, policy) in enumerate(zip(agent_keys, policies)):
                     obs_buf[index][step] = inputs_t[name]
                     if obs_hist_buf is not None and builder is not None:
                         obs_hist_buf[index][step] = builder.history[name]
@@ -1178,7 +1265,7 @@ def train(
                     final_inputs = (
                         builder.history_inputs(final_obs_t) if builder is not None else final_obs_t
                     )
-                    for index, (name, policy) in enumerate(zip(AGENT_KEYS, policies)):
+                    for index, (name, policy) in enumerate(zip(agent_keys, policies)):
                         final_values[index][step, truncated] = policy.get_value(
                             final_inputs[name][truncated]
                         ).view(-1)
@@ -1194,7 +1281,7 @@ def train(
 
         # --- Advantages and per-policy PPO updates -------------------------------------
         losses: list[dict[str, float]] = []
-        for index, (name, policy) in enumerate(zip(AGENT_KEYS, policies)):
+        for index, (name, policy) in enumerate(zip(agent_keys, policies)):
             with torch.no_grad():
                 next_value = policy.get_value(inputs_t[name]).reshape(1, -1)
                 advantages, returns = compute_advantages(
@@ -1210,7 +1297,7 @@ def train(
                 )
             batch = {
                 "obs": obs_buf[index].reshape(-1, obs_dim),
-                "actions": act_buf[index].reshape(-1, _WRENCH_SIZE),
+                "actions": act_buf[index].reshape(-1, action_size),
                 "logprobs": logprob_buf[index].reshape(-1),
                 "advantages": advantages.reshape(-1),
                 "returns": returns.reshape(-1),
@@ -1252,6 +1339,7 @@ def train(
                 device=device,
                 seed=cfg.seed + EVAL_SEED_OFFSET + 1_000_003 * update,
                 bijepa=bijepa,
+                agent_keys=agent_keys,
             )
             eval_metrics = {
                 "success_rate": summary.success_rate,
@@ -1278,6 +1366,7 @@ def train(
                 eval_metrics,
                 bijepa=bijepa,
                 bijepa_optimizer=bijepa_optimizer,
+                agent_keys=agent_keys,
             )
             print(f"saved {run_dir / 'latest.pt'} (update {update})", flush=True)
 

@@ -93,7 +93,12 @@
 
 Архитектура: новый пакет `callosum/envs/coop/` (base env + MJCF + per-task configs), общий `callosum/envs/_coop_logic.py` (obs/visibility/success/reward/randomization, pure logic, mac-тесты), интеграция в тренер через `--task {cube,cartpole,pendulum,toss}` (по умолчанию cube, старый путь не меняется), `scripts/smoke_coop.py`/eval. GPU-бэкенд `mujoco_warp` пока только для куба (задачи suite — CPU; 96 ядер пода хватает на 8 параллельных прогонов). Приоритет реализации: харнесс + cart-pole + pendulum, затем toss&catch. Критерий качества задачи: на раннем фиксированном бюджете измеримый `oracle−none` (иначе задача реактивно тривиальна — урок куба).
 
-## Compute
+**Статус харнесса и задач (2026-11-21, реализовано локально, под не запускался):**
+- **Сделано:** `callosum/envs/coop/` (`base.CoopTaskEnv`, `CartPoleCoop-v0`, `PendulumPump-v0`, скриптовые oracle), `callosum/envs/_coop_logic.py`, `callosum/configs/coop_tasks.py`, MJCF-ассеты, `callosum/training/_vec_coop.py`, `--task` в `WrenchPPOConfig`/тренере (`cube` — дефолт, старый путь не изменён; Bi-JEPA `predicted` работает через ширину obs из env), `scripts/smoke_coop.py`, `scripts/eval_coop.py`, `tests/test_coop_logic.py` + `tests/test_coop_envs.py`. `toss&catch` — следующий агент.
+- **Локальные проверки:** smoke `oracle` — cartpole success 1.00 / only-left 0.00 (mean 89 шагов), pendulum oracle 1.00 / only-left 0.00 (mean 116 шагов), gap +1.00; `pytest -q` 595 passed, 5 skipped; cube-путь не тронут: `smoke_wrench_cube` oracle 1.0, rotator-only 0.0 (дрейф 29.8° > 28.6°); реальные trainer-пробы 2 env × 1 update для `none`/`oracle`/`predicted`.
+- **Не проверено (сервер):** обучение до сходимости и разрыв `oracle−none` на 256 env × ≥3 сида; throughput `_vec_coop`. Команды — в отчёте шага.
+- **Отступления (осознанные):** oracle cart-pole — LQR-стейт-фидбек + Smith-predictor задержки (чистый PD неустойчив при латентности до 0.3 с); PendulumPump: target 65° (а не 60°), damping 0.11–0.15 — так only-left стабильно не добирает амплитуду, а oracle добирает; бюджет/награда — в `configs/coop_tasks.py`.
+
 ## Compute
 
 - **Локально (мак):** ruff, чистые unit-тесты, **1–2-средовые CPU-пробы MuJoCo** (короткие; тяжёлое — нет). MuJoCo 4.0.1 на macOS arm64 проверен.

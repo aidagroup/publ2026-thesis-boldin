@@ -1,9 +1,12 @@
 """Config and CLI of the continuous-wrench IPPO trainer (PLAN.md steps 2 and 3, `wrench_ppo`).
 
-The reduced model (`CubeWrench-v0`) is CPU-only MuJoCo, so its trainer is a small
-CPU-side IPPO: two independent Gaussian policies (holder, rotator) on one shared team
-reward, a Python-loop vectorisation of the single-instance env, clipped PPO updates,
-TensorBoard logs, greedy evaluation and `latest.pt` checkpoints with `--resume`.
+The reduced models (`CubeWrench-v0` and, via `--task`, the two-agent coop suite of
+`callosum.envs.coop`) are CPU-only MuJoCo, so their trainer is a small CPU-side IPPO: two
+independent Gaussian policies on one shared team reward, a Python-loop vectorisation of the
+single-instance env, clipped PPO updates, TensorBoard logs, greedy evaluation and
+`latest.pt` checkpoints with `--resume`. `task` selects the environment and therefore its
+observation width, action width and agent keys; `"cube"` is the default and keeps the
+original path unchanged.
 
 Step 3 adds the `predicted` ablation arm on top of the env's `none`/`oracle` partner
 visibility: with `use_bijepa=True` the env stays at `partner_mode="none"` (no privileged
@@ -52,12 +55,36 @@ from dataclasses import dataclass
 
 from callosum.configs._cli import build_dataclass_parser
 from callosum.configs.bijepa import BiJEPAConfig
+from callosum.configs.coop_tasks import (
+    TASKS as COOP_TASKS,
+)
+from callosum.configs.coop_tasks import (
+    CartPoleConfig,
+    PendulumConfig,
+    coop_action_size,
+    coop_config,
+    coop_obs_size,
+)
 from callosum.configs.wrench_cube import (
     RANDOMIZATION_PRESETS,
     WrenchCubeConfig,
     wrench_cube_config,
 )
-from callosum.envs._wrench_logic import PARTNER_MODES, obs_size, validate_partner_mode
+from callosum.envs._coop_logic import AGENT_KEYS as COOP_AGENT_KEYS
+from callosum.envs._wrench_logic import (
+    AGENT_KEYS as CUBE_AGENT_KEYS,
+)
+from callosum.envs._wrench_logic import (
+    PARTNER_MODES,
+    obs_size,
+    validate_partner_mode,
+)
+
+TASKS = ("cube",) + COOP_TASKS
+"""Environments of a run: the default `CubeWrench-v0` (`"cube"`, the unchanged path) or one
+of the reduced two-agent coop tasks (`"cartpole"`, `"pendulum"`). The coop suite runs on the
+CPU MuJoCo loop only (no mujoco_warp backend yet) and is vectorised by
+`callosum.training._vec_coop`; the cube keeps its original backend selection."""
 
 INPUT_MODES = ("none", "oracle", "predicted")
 """Policy-input modes: the env's partner visibility (`none`, `oracle`) plus the Bi-JEPA
@@ -67,6 +94,50 @@ partner latent to the agent's own observation."""
 BACKENDS = ("cpu", "warp")
 """Environment backends: the CPU MuJoCo loop (`callosum.training._vec_wrench`) or the batched
 mujoco_warp GPU env (`callosum.envs.wrench_cube.env_gpu`)."""
+
+
+def task_obs_size(task: str, partner_mode: str) -> int:
+    """Width of one agent's flat env observation of `task` under `partner_mode`.
+
+    Single place the trainer, the checkpoint-compatibility check and the evaluators ask for
+    a task's observation width (the cube via `_wrench_logic.obs_size`, the coop tasks via
+    `_coop_logic.obs_size`), so a task and its width cannot drift apart.
+
+    Args:
+        task: One of `TASKS`.
+        partner_mode: `"none"` or `"oracle"`.
+
+    Returns:
+        The flat observation width.
+
+    Raises:
+        ValueError: for an unknown task.
+    """
+    if task not in TASKS:
+        raise ValueError(f"task must be one of {TASKS}, got {task!r}")
+    if task == "cube":
+        return obs_size(partner_mode)
+    return coop_obs_size(task, partner_mode)
+
+
+def task_action_size(task: str) -> int:
+    """Width of one agent's action of `task` (6 for the cube, 1 for the coop tasks)."""
+    if task not in TASKS:
+        raise ValueError(f"task must be one of {TASKS}, got {task!r}")
+    return 6 if task == "cube" else coop_action_size(task)
+
+
+def checkpoint_task(payload: dict) -> str:
+    """The task recorded in a checkpoint payload (default `"cube"` for old checkpoints).
+
+    Checkpoints written before the task suite predate the `task` field; their runs are
+    the cube runs, so the fallback keeps them loadable.
+    """
+    config = payload.get("config") or {}
+    task = str(config.get("task", "cube"))
+    if task not in TASKS:
+        raise ValueError(f"checkpoint records unknown task {task!r}; known: {TASKS}")
+    return task
 
 
 @dataclass
@@ -96,6 +167,14 @@ class WrenchPPOConfig:
     saved optimizer and torch RNG state. A finished run returns immediately."""
 
     # --- Environment / rollout ------------------------------------------------------------
+    task: str = "cube"
+    """Environment of the run, one of `TASKS`: `"cube"` (CubeWrench-v0, the thesis main line
+    and the default -- the original trainer path, unchanged) or a reduced coop task
+    (`"cartpole"`, `"pendulum"`, PLAN.md "Two-robot task suite"). The coop tasks use the
+    `callosum.envs.coop` harness and the CPU-only vectorisation
+    `callosum.training._vec_coop`; their observation width/action width come from the env
+    (`coop_obs_size`/`coop_action_size`), so the Bi-JEPA `predicted` input works unchanged
+    (own observation + latent)."""
     partner_mode: str = "none"
     """Partner-visibility mode of the *env*: "none" (control) or "oracle" (upper bound); it
     also fixes the env observation width (`obs_size(partner_mode)`: 26 or 35). The third
@@ -183,12 +262,27 @@ class WrenchPPOConfig:
     def __post_init__(self) -> None:
         """Reject a config the trainer cannot run (the checks are the plan's sanity rules)."""
         validate_partner_mode(self.partner_mode)
+        if self.task not in TASKS:
+            raise ValueError(f"task must be one of {TASKS}, got {self.task!r}")
         if self.backend not in BACKENDS:
             raise ValueError(f"backend must be one of {BACKENDS}, got {self.backend!r}")
         if self.randomization not in RANDOMIZATION_PRESETS:
             raise ValueError(
                 f"randomization must be one of {RANDOMIZATION_PRESETS}, got {self.randomization!r}"
             )
+        # The coop suite's private randomisation is part of its task configs at this step
+        # (no `default`/`harsh` presets yet), and its vectorisation is the CPU MuJoCo loop.
+        if self.task != "cube":
+            if self.backend != "cpu":
+                raise ValueError(
+                    "the coop tasks run on the CPU MuJoCo backend only at this step "
+                    f"(the warp backend is cube-only), got backend={self.backend!r}"
+                )
+            if self.randomization != "default":
+                raise ValueError(
+                    "the coop tasks do not have randomisation presets yet at this step; "
+                    f"randomization must be 'default', got {self.randomization!r}"
+                )
         if self.seed < 0:
             raise ValueError(f"seed must be >= 0, got {self.seed}")
         if self.total_updates < 1:
@@ -286,8 +380,28 @@ class WrenchPPOConfig:
 
     @property
     def env_obs_size(self) -> int:
-        """Width of one agent's flat *env* observation under `partner_mode` (28 none, 45 oracle)."""
-        return obs_size(self.partner_mode)
+        """Width of one agent's flat *env* observation for this task and partner mode.
+
+        The cube: 28 (`none`) / 45 (`oracle`) fields. The coop tasks: 11/17 (cart-pole) and
+        10/16 (pendulum); see `coop_obs_size`. The policy input under `predicted` appends
+        `latent_dim` to this width.
+        """
+        return task_obs_size(self.task, self.partner_mode)
+
+    @property
+    def action_size(self) -> int:
+        """Width of one agent's action: 6 (6D wrench) for the cube, 1 for the coop tasks."""
+        return task_action_size(self.task)
+
+    @property
+    def agent_keys(self) -> tuple[str, str]:
+        """The two agents' dict keys, in the env's action-/observation-space order.
+
+        The cube keeps its historical `("holder", "rotator")`; the coop suite uses
+        `("left", "right")` (the one-sided pushers / torque actuators). The trainer indexes
+        its observation and action buffers by this tuple, so the same code drives both.
+        """
+        return CUBE_AGENT_KEYS if self.task == "cube" else COOP_AGENT_KEYS
 
     @property
     def obs_size(self) -> int:
@@ -304,13 +418,23 @@ class WrenchPPOConfig:
         return self.env_obs_size + (self.latent_dim if self.use_bijepa else 0)
 
     def env_config(self) -> WrenchCubeConfig:
-        """The `WrenchCubeConfig` of this run's randomisation preset.
+        """The `WrenchCubeConfig` of this run's randomisation preset (the cube task only).
 
         Both env backends (`VecWrenchCube`/`WrenchCubeEnv` and `WrenchCubeBatchGPU`) and the
         evaluator build their environment from this instance, so a run and its evaluation
         use the same episode randomness (the physics/timing/reward are preset-independent).
         """
         return wrench_cube_config(self.randomization)
+
+    def coop_env_config(self) -> CartPoleConfig | PendulumConfig:
+        """The validated per-task config of a coop run (raises for the cube task).
+
+        `callosum.training._vec_coop` and `scripts/eval_coop.py` build their envs from this
+        instance, so a run and its evaluation use the same task parameters.
+        """
+        if self.task == "cube":
+            raise ValueError("coop_env_config() is only defined for the coop tasks")
+        return coop_config(self.task)
 
     @property
     def input_mode(self) -> str:
@@ -338,8 +462,10 @@ def build_parser() -> argparse.ArgumentParser:
     """An argparse parser with one flag per `WrenchPPOConfig` field (`--field-name`)."""
     return build_dataclass_parser(
         WrenchPPOConfig,
-        "Train two independent Gaussian PPO policies (IPPO) on CubeWrench-v0.",
+        "Train two independent Gaussian PPO policies (IPPO) on CubeWrench-v0 or a "
+        "coop task (--task).",
         choices={
+            "task": TASKS,
             "partner_mode": PARTNER_MODES,
             "backend": BACKENDS,
             "randomization": RANDOMIZATION_PRESETS,
