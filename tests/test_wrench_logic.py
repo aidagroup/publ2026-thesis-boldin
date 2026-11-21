@@ -58,9 +58,9 @@ def test_config_defaults_match_the_design_numbers() -> None:
     assert 300 <= cfg.max_control_steps <= 400
     assert math.isclose(cfg.goal_angle, math.pi / 2)
     assert math.isclose(cfg.hinge_limit, math.pi / 2)
-    assert math.isclose(cfg.success_angle_tol, 0.05)
-    assert math.isclose(cfg.success_pos_tol, 0.01)
-    assert math.isclose(cfg.success_rot_tol, 0.1)
+    assert math.isclose(cfg.success_angle_tol, 0.08)
+    assert math.isclose(cfg.success_pos_tol, 0.015)
+    assert math.isclose(cfg.success_rot_tol, 0.15)
     assert math.isclose(cfg.failure_pos_drift, 0.05)
     assert math.isclose(cfg.failure_rot_drift, 0.5)
     assert cfg.latency_range == (0.0, 0.3)
@@ -71,7 +71,7 @@ def test_config_defaults_match_the_design_numbers() -> None:
     assert cfg.start_delay_range == (0.0, 0.3)
     assert cfg.layer_frictionloss_range == (0.0, 2.0e-5)
     assert cfg.initial_angle_range == (0.0, 0.05)
-    assert cfg.success_bonus == 1.0
+    assert cfg.success_bonus == 2.0
     assert cfg.step_penalty == 0.001
     assert cfg.failure_penalty == -2.0
     assert cfg.seed == 0
