@@ -467,6 +467,91 @@ def failure(drift_pos: float, drift_rot: float, *, pos_drift: float, rot_drift: 
     return drift_pos > pos_drift or drift_rot > rot_drift
 
 
+def angle_progress(angle: float, previous_angle: float, goal_angle: float) -> float:
+    """Normalised per-step progress toward the goal angle, in `[-1, 1]`.
+
+    Positive when `|angle - goal|` shrank since the previous control step; divided by
+    `goal_angle` so a full turn from 0 to the goal sums to ~1 over the episode. The env
+    gates the shaping term on the drift tolerances, so a turn that moves the core gets no
+    progress reward.
+
+    Args:
+        angle: Current layer hinge angle (rad).
+        previous_angle: Layer hinge angle at the previous control step (rad).
+        goal_angle: Target layer hinge angle (rad); non-positive disables the term.
+
+    Returns:
+        `(|previous - goal| - |angle - goal|) / goal`, or 0 for a non-positive goal.
+    """
+    if goal_angle <= 0:
+        return 0.0
+    return (abs(previous_angle - goal_angle) - abs(angle - goal_angle)) / goal_angle
+
+
+def drift_excess(
+    drift_pos: float,
+    drift_rot: float,
+    *,
+    pos_tol: float,
+    rot_tol: float,
+    pos_drift: float,
+    rot_drift: float,
+) -> float:
+    """Normalised core-drift excess over the success tolerances, clipped to `[0, 1]`.
+
+    Each axis contributes `max(0, drift - tol) / (failure_bound - tol)`, so 1 means the
+    axis is at its failure bound. Used as the shaping penalty that teaches the holder to
+    stabilise the core before the terminal failure is reached.
+
+    Args:
+        drift_pos: Core position drift from the initial pose (m).
+        drift_rot: Core rotation drift from the initial pose (rad).
+        pos_tol: Success position-drift tolerance (m).
+        rot_tol: Success rotation-drift tolerance (rad).
+        pos_drift: Failure position-drift bound (m), must exceed `pos_tol`.
+        rot_drift: Failure rotation-drift bound (rad), must exceed `rot_tol`.
+
+    Returns:
+        Sum of the two normalised excesses, clipped to [0, 1].
+    """
+    if pos_drift <= pos_tol or rot_drift <= rot_tol:
+        raise ValueError(
+            "failure bounds must exceed the success tolerances: "
+            f"pos {pos_drift} > {pos_tol}, rot {rot_drift} > {rot_tol}"
+        )
+    excess_pos = max(0.0, (drift_pos - pos_tol) / (pos_drift - pos_tol))
+    excess_rot = max(0.0, (drift_rot - rot_tol) / (rot_drift - rot_tol))
+    return min(excess_pos + excess_rot, 1.0)
+
+
+def shaping_reward(
+    *,
+    angle_progress_frac: float,
+    drift_excess_frac: float,
+    angle_coef: float,
+    drift_coef: float,
+) -> float:
+    """The shared potential-style shaping term of one control step.
+
+    `angle_coef * angle_progress_frac - drift_coef * drift_excess_frac`. Added to the
+    base `team_reward` on non-terminal steps only; terminal steps keep the pure
+    `success_bonus` / `failure_penalty` semantics, so the success condition stays exactly
+    the conjunction of `_wrench_logic.success`.
+
+    Args:
+        angle_progress_frac: Gated progress toward the goal angle (see `angle_progress`).
+        drift_excess_frac: Normalised drift excess (see `drift_excess`).
+        angle_coef: Weight of the progress term (>= 0; 0 disables).
+        drift_coef: Weight of the drift penalty (>= 0; 0 disables).
+
+    Returns:
+        The shaping reward of the step.
+    """
+    if angle_coef < 0 or drift_coef < 0:
+        raise ValueError(f"shaping coefficients must be >= 0, got {(angle_coef, drift_coef)}")
+    return angle_coef * angle_progress_frac - drift_coef * drift_excess_frac
+
+
 def team_reward(
     *,
     succeeded: bool,

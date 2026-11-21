@@ -28,8 +28,10 @@ from callosum.envs._wrench_logic import (
     OWN_WRENCH_FIELDS,
     PARTNER_FIELDS,
     PARTNER_MODES,
+    angle_progress,
     build_observation,
     delayed_command,
+    drift_excess,
     failure,
     injection_active,
     obs_fields,
@@ -38,6 +40,7 @@ from callosum.envs._wrench_logic import (
     partner_fields,
     partner_of,
     sample_episode_randomization,
+    shaping_reward,
     success,
     team_reward,
     validate_partner_mode,
@@ -530,5 +533,64 @@ def test_env_failure_step_pays_the_failure_penalty() -> None:
                 break
         assert terminated and not info["success"]
         assert reward == pytest.approx(cfg.failure_penalty)
+    finally:
+        env.close()
+
+
+# --- shaping reward (sparse-success probes did not learn without it) -----------------------
+
+
+def test_angle_progress_sign_and_scale() -> None:
+    goal = math.pi / 2
+    assert angle_progress(0.3, 0.2, goal) > 0
+    assert angle_progress(0.2, 0.3, goal) < 0
+    # A full quarter turn from 0 to the goal sums to ~1 over the episode.
+    steps = 157
+    total = sum(angle_progress((i + 1) * 0.01, i * 0.01, goal) for i in range(steps))
+    assert total == pytest.approx(1.0, abs=0.01)
+    assert angle_progress(0.1, 0.0, 0.0) == 0.0
+
+
+def test_drift_excess_bounds_and_validation() -> None:
+    kwargs = {"pos_tol": 0.001, "rot_tol": 0.1, "pos_drift": 0.05, "rot_drift": 0.5}
+    assert drift_excess(0.0, 0.0, **kwargs) == 0.0
+    assert drift_excess(0.05, 0.5, **kwargs) == pytest.approx(1.0)
+    assert drift_excess(0.03, 0.0, **kwargs) == pytest.approx((0.03 - 0.001) / (0.05 - 0.001))
+    with pytest.raises(ValueError):
+        drift_excess(0.0, 0.0, pos_tol=0.1, rot_tol=0.1, pos_drift=0.05, rot_drift=0.5)
+
+
+def test_shaping_reward_semantics_and_validation() -> None:
+    assert shaping_reward(
+        angle_progress_frac=0.5, drift_excess_frac=0.0, angle_coef=0.5, drift_coef=0.5
+    ) == pytest.approx(0.25)
+    assert shaping_reward(
+        angle_progress_frac=0.0, drift_excess_frac=1.0, angle_coef=0.5, drift_coef=0.5
+    ) == pytest.approx(-0.5)
+    with pytest.raises(ValueError):
+        shaping_reward(
+            angle_progress_frac=0.0, drift_excess_frac=0.0, angle_coef=-1.0, drift_coef=0.0
+        )
+
+
+def test_config_rejects_negative_shaping_coefficients() -> None:
+    with pytest.raises(ValueError):
+        WrenchCubeConfig(shaping_angle_coef=-0.1)
+    with pytest.raises(ValueError):
+        WrenchCubeConfig(shaping_drift_coef=-0.1)
+
+
+def test_env_shaping_adds_zero_for_a_still_cube() -> None:
+    pytest.importorskip("mujoco")
+    from callosum.envs.wrench_cube import WrenchCubeEnv
+
+    cfg = WrenchCubeConfig(shaping_angle_coef=1.0, shaping_drift_coef=1.0)
+    env = WrenchCubeEnv(config=cfg)
+    try:
+        env.reset(seed=0)
+        action = {key: np.zeros(6, dtype=np.float32) for key in AGENT_KEYS}
+        _obs, reward, terminated, _truncated, _info = env.step(action)
+        assert not terminated
+        assert reward == pytest.approx(-cfg.step_penalty)
     finally:
         env.close()

@@ -61,13 +61,16 @@ from callosum.envs._wrench_logic import (
     AGENT_KEYS,
     CUBE_STATE_FIELDS,
     EpisodeRandomization,
+    angle_progress,
     build_observation,
     delayed_command,
+    drift_excess,
     failure,
     injection_active,
     obs_size,
     param_value_fields,
     sample_episode_randomization,
+    shaping_reward,
     success,
     team_reward,
     validate_partner_mode,
@@ -229,6 +232,7 @@ class WrenchCubeEnv(gymnasium.Env):
         mujoco.mj_forward(self._model, self._data)
         self._initial_core_pos = self._data.qpos[0:3].copy()
         self._initial_core_quat = self._data.qpos[3:7].copy()
+        self._prev_angle = float(self._data.qpos[self._hinge_qpos])
         return self._observation(), self._info(succeeded=False)
 
     def step(
@@ -277,6 +281,37 @@ class WrenchCubeEnv(gymnasium.Env):
             step_penalty=self.config.step_penalty,
             failure_penalty=self.config.failure_penalty,
         )
+        # Potential-style shaping on non-terminal steps only: the success/failure steps
+        # keep the pure bonus/penalty semantics. The angle term is gated by the success
+        # drift tolerances, so a rotator that turns while the core drifts gets nothing --
+        # the non-additive success condition is unchanged.
+        diagnostics = self._diagnostics()
+        if not succeeded and not failed:
+            cfg = self.config
+            gated_progress = (
+                angle_progress(
+                    angle=math.radians(diagnostics["angle_deg"]),
+                    previous_angle=self._prev_angle,
+                    goal_angle=cfg.goal_angle,
+                )
+                if diagnostics["drift_pos"] <= cfg.success_pos_tol
+                and diagnostics["drift_rot"] <= cfg.success_rot_tol
+                else 0.0
+            )
+            reward += shaping_reward(
+                angle_progress_frac=gated_progress,
+                drift_excess_frac=drift_excess(
+                    diagnostics["drift_pos"],
+                    diagnostics["drift_rot"],
+                    pos_tol=cfg.success_pos_tol,
+                    rot_tol=cfg.success_rot_tol,
+                    pos_drift=cfg.failure_pos_drift,
+                    rot_drift=cfg.failure_rot_drift,
+                ),
+                angle_coef=cfg.shaping_angle_coef,
+                drift_coef=cfg.shaping_drift_coef,
+            )
+        self._prev_angle = math.radians(diagnostics["angle_deg"])
         terminated = succeeded or failed
         truncated = (not terminated) and self._step_index >= self.config.max_control_steps
         return self._observation(), reward, terminated, truncated, self._info(succeeded)

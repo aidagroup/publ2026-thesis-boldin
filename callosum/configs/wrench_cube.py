@@ -239,6 +239,25 @@ class WrenchCubeConfig:
     (`failure_penalty <= -step_penalty`). The success step keeps
     `success_bonus - step_penalty`."""
 
+    shaping_angle_coef: float = 0.5
+    """Coefficient of the potential-style angle-progress shaping term (shared reward).
+
+    Sparse `success_bonus` alone did not learn in the first server probes (success stayed
+    0 after 45k steps), so the team reward also pays `shaping_angle_coef * dphi`, where
+    `dphi` is the normalised decrease of `|angle - goal|` since the previous control step
+    divided by `goal_angle` (a full turn sums to ~1). The progress is GATED by the core
+    staying inside the success drift tolerances, so a rotator that turns while the core
+    drifts gets no angle reward -- the non-additivity of the success condition is kept
+    (see `_wrench_logic.shaping_reward`). 0 disables the term."""
+
+    shaping_drift_coef: float = 0.5
+    """Coefficient of the drift-excess penalty in the shaping term.
+
+    The penalty is the normalised excess of the core drift over the success tolerances,
+    clipped to [0, 1] (both axes summed). It is what teaches the holder to stabilise the
+    core: without it the shared reward has no gradient against drift until the terminal
+    failure. 0 disables the term."""
+
     # --- fallback seed --------------------------------------------------------------------
     seed: int = 0
     """Seed used when `reset(seed=None)`; each reset without an explicit seed advances it
@@ -366,6 +385,9 @@ class WrenchCubeConfig:
                 "failure_penalty must be no better than a step penalty "
                 f"(<= -step_penalty = {-self.step_penalty}), got {self.failure_penalty}"
             )
+        for name in ("shaping_angle_coef", "shaping_drift_coef"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
         if self.seed < 0:
             raise ValueError(f"seed must be >= 0, got {self.seed}")
 
