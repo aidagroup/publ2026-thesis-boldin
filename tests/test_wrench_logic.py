@@ -19,8 +19,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from callosum.configs.wrench_cube import WrenchCubeConfig
-from callosum.envs._wrench_logic import (
+from callosum.experiments.cube_wrench.config import WrenchCubeConfig
+from callosum.experiments.cube_wrench.logic import (
     AGENT_KEYS,
     CUBE_STATE_FIELDS,
     GOAL_FIELDS,
@@ -463,7 +463,7 @@ def test_team_reward_is_shared_and_penalises_time_and_failure() -> None:
 
 def test_env_writes_config_truth_to_the_model() -> None:
     pytest.importorskip("mujoco")
-    from callosum.envs.wrench_cube import WrenchCubeEnv
+    from callosum.experiments.cube_wrench import WrenchCubeEnv
 
     cfg = WrenchCubeConfig(hinge_limit=math.pi)
     env = WrenchCubeEnv(config=cfg)
@@ -482,7 +482,7 @@ def test_env_writes_config_truth_to_the_model() -> None:
 
 def test_env_applies_the_sampled_layer_friction_on_every_reset() -> None:
     pytest.importorskip("mujoco")
-    from callosum.envs.wrench_cube import WrenchCubeEnv
+    from callosum.experiments.cube_wrench import WrenchCubeEnv
 
     cfg = WrenchCubeConfig()
     env = WrenchCubeEnv(config=cfg)
@@ -501,7 +501,7 @@ def test_env_applies_the_sampled_layer_friction_on_every_reset() -> None:
 
 def test_env_observation_widths_and_initial_angle_inside_the_hinge_range() -> None:
     pytest.importorskip("mujoco")
-    from callosum.envs.wrench_cube import WrenchCubeEnv
+    from callosum.experiments.cube_wrench import WrenchCubeEnv
 
     for mode in PARTNER_MODES:
         env = WrenchCubeEnv(partner_mode=mode)
@@ -521,7 +521,7 @@ def test_env_observation_widths_and_initial_angle_inside_the_hinge_range() -> No
 
 def test_env_failure_step_pays_the_failure_penalty() -> None:
     pytest.importorskip("mujoco")
-    from callosum.envs.wrench_cube import WrenchCubeEnv
+    from callosum.experiments.cube_wrench import WrenchCubeEnv
 
     cfg = WrenchCubeConfig(
         failure_pos_drift=0.001,
@@ -612,7 +612,7 @@ def test_config_rejects_negative_shaping_coefficients() -> None:
 
 def test_env_shaping_adds_zero_for_a_still_cube() -> None:
     pytest.importorskip("mujoco")
-    from callosum.envs.wrench_cube import WrenchCubeEnv
+    from callosum.experiments.cube_wrench import WrenchCubeEnv
 
     cfg = WrenchCubeConfig(shaping_angle_coef=1.0, shaping_drift_coef=1.0)
     env = WrenchCubeEnv(config=cfg)

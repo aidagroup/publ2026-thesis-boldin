@@ -8,7 +8,7 @@ success/failure tolerances, the episode-randomisation ranges (the private random
 makes the partner only partially observable), the team reward, the optional shaping
 weights and the fallback seed.
 
-Like `callosum.configs.wrench_cube` this module is pure stdlib on purpose: it must import
+Like `callosum.experiments.cube_wrench.config` this module is pure stdlib on purpose: it must import
 and validate on macOS/CI, where the `sandbox` extra (mujoco) is absent, so the suite's
 logic and parameters are unit-testable without the simulator. The MuJoCo models are
 `callosum/envs/coop/assets/cartpole.xml` and `pendulum.xml`.

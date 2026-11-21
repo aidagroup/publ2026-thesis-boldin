@@ -11,10 +11,10 @@ Two independent PPO learners -- one Gaussian actor-critic per agent -- share one
 environment step and one **team** reward, so the coordination has to be learned from the
 decentralised observations alone (the `none` / `oracle` / `predicted` ablation of the
 plan). The default env backend (`--backend cpu`) is the single-instance MuJoCo CPU env
-(`callosum.envs.wrench_cube.WrenchCubeEnv`), so its vectorisation is a Python loop:
-`callosum.training._vec_wrench.VecWrenchCube` drives `num_envs` copies with auto-reset and
+(`callosum.experiments.cube_wrench.WrenchCubeEnv`), so its vectorisation is a Python loop:
+`callosum.experiments.cube_wrench.vec_env.VecWrenchCube` drives `num_envs` copies with auto-reset and
 the finished-episode statistics. The optional GPU backend (`--backend warp --device cuda`)
-replaces the loop with `callosum.envs.wrench_cube.env_gpu.WrenchCubeBatchGPU`, which steps
+replaces the loop with `callosum.experiments.cube_wrench.env_gpu.WrenchCubeBatchGPU`, which steps
 all `num_envs` worlds together through `mujoco_warp` (same env contract, same policies and
 checkpoints; see the config module for the manual install note). The trainer's rollout code
 is backend-agnostic: it only asks the vec env for its `torch_io` marker, so a GPU step
@@ -55,16 +55,16 @@ smoke) run on macOS/CI without the `sandbox` extra.
 Typical use (RunPod GPU pod, MuJoCo on the CPU; CPU simulation also works on a laptop but
 the plan forbids training there):
 
-    python -m callosum.training.wrench_ppo --partner-mode oracle --seed 0 \
+    python -m callosum.experiments.cube_wrench.train --partner-mode oracle --seed 0 \
         --exp-name wrench_oracle_s0 --total-updates 300
-    python -m callosum.training.wrench_ppo --partner-mode none --use-bijepa --seed 0 \
+    python -m callosum.experiments.cube_wrench.train --partner-mode none --use-bijepa --seed 0 \
         --exp-name wrench_pred_s0 --total-updates 300
 
 The optional GPU backend and the harder-randomness preset (install note in the config module;
 `uv pip install --python <venv>/bin/python mujoco-warp==4.0.1`, because a plain `uv sync --frozen`
 removes it):
 
-    python -m callosum.training.wrench_ppo --backend warp --device cuda --num-envs 1024 \
+    python -m callosum.experiments.cube_wrench.train --backend warp --device cuda --num-envs 1024 \
         --rollout-steps 64 --randomization harsh --partner-mode oracle --total-updates 300
 
 `--resume runs/<exp>` continues a killed run from its `latest.pt` (the saved config wins,
@@ -90,14 +90,14 @@ from torch import nn
 from callosum.common.bijepa import BiJEPA, latent_stats
 from callosum.common.logging import MetricLogger
 from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
-from callosum.configs.wrench_ppo import (
+from callosum.experiments.cube_wrench.logic import AGENT_KEYS, obs_size
+from callosum.experiments.cube_wrench.ppo_config import (
     INPUT_MODES,
     WrenchPPOConfig,
     checkpoint_task,
     parse_args_with_explicit,
     task_obs_size,
 )
-from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
 from callosum.training._bijepa_probe import ridge_probe
 
 CHECKPOINT_FORMAT = 1
@@ -138,7 +138,7 @@ def make_policies(
 ) -> list[ActorCritic]:
     """One independent Gaussian actor-critic per role, in the env's agent-key order.
 
-    The default input width is `callosum.envs._wrench_logic.obs_size(partner_mode) +
+    The default input width is `callosum.experiments.cube_wrench.logic.obs_size(partner_mode) +
     latent_dim` (the cube: 28 for `none`, 45 for `oracle`, plus the Bi-JEPA latent under
     `predicted`); the coop tasks pass their env observation width explicitly
     (`WrenchPPOConfig.env_obs_size`), so the same policy code serves both suites. The
@@ -402,7 +402,7 @@ def evaluate_greedy(
 
     Args:
         policies: `[holder_policy, rotator_policy]`.
-        vec: A `callosum.training._vec_wrench.VecWrenchCube`-like object (`reset`, `step`,
+        vec: A `callosum.experiments.cube_wrench.vec_env.VecWrenchCube`-like object (`reset`, `step`,
             `num_envs`, `config.max_control_steps`); typed loosely so this function needs
             no simulator import.
         episodes: Number of held-out episodes to evaluate (one episode per seed).
@@ -793,7 +793,7 @@ def env_partner_mode(input_mode: str) -> str:
     `none` and `oracle` are env modes and map onto themselves.
 
     Raises:
-        ValueError: if `input_mode` is not one of `callosum.configs.wrench_ppo.INPUT_MODES`.
+        ValueError: if `input_mode` is not one of `callosum.experiments.cube_wrench.ppo_config.INPUT_MODES`.
     """
     if input_mode not in INPUT_MODES:
         raise ValueError(f"input_mode must be one of {INPUT_MODES}, got {input_mode!r}")
@@ -999,7 +999,7 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
         env_config = cfg.env_config()
         if cfg.backend == "warp":
             # Lazy import: the GPU stack (mujoco_warp/warp) is only needed for this branch.
-            from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
+            from callosum.experiments.cube_wrench.env_gpu import WrenchCubeBatchGPU
 
             train_vec = WrenchCubeBatchGPU(
                 cfg.num_envs,
@@ -1016,7 +1016,7 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
                 device=cfg.device,
             )
         else:
-            from callosum.training._vec_wrench import VecWrenchCube
+            from callosum.experiments.cube_wrench.vec_env import VecWrenchCube
 
             train_vec = VecWrenchCube(
                 cfg.num_envs, cfg.partner_mode, config=env_config, seed=cfg.seed
@@ -1078,7 +1078,7 @@ def train(
 ) -> Path:
     """The update loop: rollout on `train_vec`, GAE, per-agent PPO, eval, checkpoint.
 
-    `train_vec` / `eval_vec` are `callosum.training._vec_wrench.VecWrenchCube` objects; they
+    `train_vec` / `eval_vec` are `callosum.experiments.cube_wrench.vec_env.VecWrenchCube` objects; they
     are typed loosely here so the training function itself does not import the simulator
     (only `run()` does). Under `predicted` every rollout step also builds the policy input
     `[own observation, ẑ_partner]` from the own-observation history, and every update takes
@@ -1425,7 +1425,7 @@ def _to_torch(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: `python -m callosum.training.wrench_ppo [flags]`.
+    """CLI entry point: `python -m callosum.experiments.cube_wrench.train [flags]`.
 
     A detached run has its stdout redirected to a file, so flush every line.
     """

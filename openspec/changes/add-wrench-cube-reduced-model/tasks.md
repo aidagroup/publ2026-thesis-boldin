@@ -3,8 +3,8 @@
 ## 0. Каркас
 
 - [x] 0.1 Extra `sandbox = ["mujoco"]` в `pyproject.toml`, `uv lock`; проверка `import mujoco` на macOS и Linux
-- [x] 0.2 `callosum/envs/wrench_cube/` (пакет, MJCF `assets/cube_wrench.xml`), `callosum/configs/wrench_cube.py`
-- [x] 0.3 `callosum/envs/_wrench_logic.py`: раскладка obs, видимость `none|oracle`, сэмплер рандомизации, success/reward/failure — без mujoco/torch
+- [x] 0.2 `callosum/experiments/cube_wrench/` (пакет, MJCF `assets/cube_wrench.xml`), `callosum/experiments/cube_wrench/config.py`
+- [x] 0.3 `callosum/experiments/cube_wrench/logic.py`: раскладка obs, видимость `none|oracle`, сэмплер рандомизации, success/reward/failure — без mujoco/torch
 - [x] 0.4 `tests/test_wrench_logic.py`: детерминизм/диапазоны рандомизации, видимость партнёра, граничные значения success/reward, валидация конфига
 - [x] 0.5 `openspec/changes/add-wrench-cube-reduced-model/` (proposal/design/tasks/specs); обновление `PLAN.md`, `openspec/project.md`
 
@@ -20,7 +20,7 @@
 
 - [x] 2.1 `callosum/training/wrench_ippo.py`: две гауссовы политики (`_ppo_core.ActorCritic`), GAE, клиппинг, TensorBoard, чекпоинты, resume
 - [x] 2.2 Векторизация MuJoCo (цикл по envs; при необходимости process pool), замер throughput
-- [x] 2.3 `scripts/eval_wrench_cube.py` поверх `callosum/common/metrics.py`
+- [x] 2.3 `callosum/experiments/cube_wrench/eval.py` поверх `callosum/common/metrics.py`
 - [x] 2.4 Прогоны `none`/`oracle`; подбор рандомизации
 - [ ] 2.5 **Гейт G2 (в работе):** `oracle` ≥0.9 и разрыв `oracle−none` ≥0.3 (иначе усилить рандомизацию, не идти дальше)
 

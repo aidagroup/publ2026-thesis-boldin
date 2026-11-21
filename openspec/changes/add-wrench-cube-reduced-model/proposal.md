@@ -8,9 +8,9 @@
 
 ## What Changes
 
-- Новый пакет `callosum/envs/wrench_cube/`: MJCF (core + активный слой), Gymnasium-среда `CubeWrench-v0` с непрерывными 6D-wrench действиями двух агентов.
-- Чистая логика `callosum/envs/_wrench_logic.py` (раскладка obs, видимость партнёра `none|oracle`, сэмплер рандомизации, success/reward) — без mujoco/torch, юнит-тесты на macOS.
-- Конфиг `callosum/configs/wrench_cube.py`; extra `sandbox = ["mujoco"]`.
+- Новый пакет `callosum/experiments/cube_wrench/`: MJCF (core + активный слой), Gymnasium-среда `CubeWrench-v0` с непрерывными 6D-wrench действиями двух агентов.
+- Чистая логика `callosum/experiments/cube_wrench/logic.py` (раскладка obs, видимость партнёра `none|oracle`, сэмплер рандомизации, success/reward) — без mujoco/torch, юнит-тесты на macOS.
+- Конфиг `callosum/experiments/cube_wrench/config.py`; extra `sandbox = ["mujoco"]`.
 - Скриптовый oracle-контроллер (валидация среды и верхняя граница), smoke-скрипт, затем тренер непрерывного IPPO и интеграция Bi-JEPA (`predicted`) из `step/3.1-bijepa-module`.
 - Ablation `none / oracle / predicted` (≥3 сида) и метрики координации; demo «момент помощи» (rotator без стабилизации → дрейф/провал).
 - Документы: `PLAN.md`, `openspec/project.md`, `docs/thesis/02` (prior art), `docs/thesis/03–04`, `README.md`.

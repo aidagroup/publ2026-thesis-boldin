@@ -9,9 +9,9 @@ action authority, the success/failure tolerances, the episode-randomisation rang
 private randomness that makes the partner only partially observable), the team reward
 and the fallback seed.
 
-Pure stdlib on purpose (same rule as `callosum.envs._wrench_logic`): the config must
+Pure stdlib on purpose (same rule as `callosum.experiments.cube_wrench.logic`): the config must
 import and validate on macOS, where mujoco is absent, so the env's logic is unit-testable
-without the simulator. The MuJoCo model is `callosum/envs/wrench_cube/assets/cube_wrench.xml`.
+without the simulator. The MuJoCo model is `callosum/experiments/cube_wrench/assets/cube_wrench.xml`.
 
 Config as truth for timing and DOF parameters: `WrenchCubeEnv` writes `dt` into
 `model.opt.timestep`, `hinge_limit` into `model.jnt_range`, and the damping/frictionloss/

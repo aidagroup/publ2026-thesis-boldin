@@ -37,7 +37,7 @@ sandbox = [
 # synced WITHOUT this extra, which removes it from the venv, so install it before a GPU run:
 #   uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1
 # (pinned: the env's API notes are verified against exactly 4.0.1; see
-# callosum/envs/wrench_cube/env_gpu.py).
+# callosum/experiments/cube_wrench/env_gpu.py).
 sandbox-gpu = [
     "mujoco-warp==4.0.1 ; sys_platform == 'linux'",
 ]

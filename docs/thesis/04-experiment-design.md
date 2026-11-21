@@ -189,7 +189,7 @@ Bi-JEPA «выигрывает», если под децентрализован
 
 | Параметр | Значение |
 | --- | --- |
-| Симулятор | MuJoCo 4.0.1 (CPU; на macOS и на RunPod), `callosum/envs/wrench_cube/` |
+| Симулятор | MuJoCo 4.0.1 (CPU; на macOS и на RunPod), `callosum/experiments/cube_wrench/` |
 | Сцена | «Парящий» куб: `core` (свободное тело, box 5.7 см, 0.2 кг) + `layer` на hinge `[0, 90°]`; без гравитации и контактов |
 | Шаг | физика 0.005 с × `control_every=8` = 0.04 с; эпизод ≤350 шагов; решение — каждый control step |
 | Действия | непрерывный 6D-wrench на агента (`[-1,1]` × лимит): holder → core, rotator → layer |
@@ -213,7 +213,7 @@ Bi-JEPA «выигрывает», если под децентрализован
 - Обучение: непрерывный IPPO (две независимые гауссовы политики), 96–128 сред, rollout 64, 500 апдейтов, ≥3 сида на режим; один поток torch на процесс (на 96-ядерном поде иначе oversubscription ~30×).
 - Метрики: success rate, угол, дрейф, время до успеха, закрытая доля разрыва `(S_pred−S_none)/(S_oracle−S_none)`, `aux/probe/*`, `latent/*`.
 - Гейты: **G1** (среда) — пройден 2026-11-21: oracle 0.988 на 256 эпизодах, rotator-only 0.000 (дрейф 29.8° > порога); **G2** — oracle ≥0.9 и разрыв ≥0.3; **G3** (2026-12-05) — измеримый `predicted`; **G4** (2026-12-10) — числа ≥3 сидов воспроизводимы.
-- Команды RunPod: `env UV_PROJECT_ENVIRONMENT=/root/.callosum/venv uv sync --frozen --extra train --extra sandbox`; тренер `python -m callosum.training.wrench_ppo --partner-mode none|oracle [--use-bijepa] --seed N --exp-name ... --total-updates 500`; eval `python scripts/eval_wrench_cube.py --checkpoint runs/<run>/latest.pt --input-mode none|oracle|predicted --episodes 128`.
+- Команды RunPod: `env UV_PROJECT_ENVIRONMENT=/root/.callosum/venv uv sync --frozen --extra train --extra sandbox`; тренер `python -m callosum.experiments.cube_wrench.train --partner-mode none|oracle [--use-bijepa] --seed N --exp-name ... --total-updates 500`; eval `python callosum/experiments/cube_wrench/eval.py --checkpoint runs/<run>/latest.pt --input-mode none|oracle|predicted --episodes 128`.
 
 ### Открытые вопросы reduced-модели
 

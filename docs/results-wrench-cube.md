@@ -79,20 +79,20 @@ cd ~/callosum && git fetch && git checkout -B step/2.4-wrench-cube origin/step/2
 env UV_PROJECT_ENVIRONMENT=/root/.callosum/venv uv sync --frozen --extra train --extra dev \
   --extra sandbox --extra sandbox-gpu
 # CPU-обучение (fallback):
-/root/.callosum/venv/bin/python -m callosum.training.wrench_ppo --partner-mode oracle \
+/root/.callosum/venv/bin/python -m callosum.experiments.cube_wrench.train --partner-mode oracle \
   --seed 0 --exp-name wrench_oracle_s0 --total-updates 300 --num-envs 96
 # GPU-обучение (1024 env):
-/root/.callosum/venv/bin/python -m callosum.training.wrench_ppo --backend warp --device cuda \
+/root/.callosum/venv/bin/python -m callosum.experiments.cube_wrench.train --backend warp --device cuda \
   --partner-mode oracle --seed 0 --exp-name wrench_warp_oracle_s0 \
   --total-updates 300 --num-envs 1024 --rollout-steps 64
 # GPU-обучение с Bi-JEPA:
 ... --backend warp --partner-mode none --use-bijepa --exp-name wrench_warp_pred_s0 ...
 # eval:
-/root/.callosum/venv/bin/python scripts/eval_wrench_cube.py \
+/root/.callosum/venv/bin/python callosum/experiments/cube_wrench/eval.py \
   --checkpoint runs/<run>/latest.pt --input-mode none|oracle|predicted \
   --episodes 128 --seed 0 --out results/<run>.json [--backend warp]
 # демо:
-MUJOCO_GL=egl /root/.callosum/venv/bin/python scripts/render_wrench_demo.py \
+MUJOCO_GL=egl /root/.callosum/venv/bin/python callosum/experiments/cube_wrench/render.py \
   --out /workspace/callosum-runs/render --scene policy-vs-oracle \
   --checkpoint runs/wrench_warp_none_s0/latest.pt --input-mode none
 ```

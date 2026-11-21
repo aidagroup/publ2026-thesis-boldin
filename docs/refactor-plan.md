@@ -27,13 +27,13 @@ callosum/
     bijepa.py                 # из agents/bijepa.py
     bijepa_config.py          # из configs/bijepa.py
     randomization.py          # общие хелперы (если выделяются)
-    mujoco.py                 # из scripts/_render_utils.py (загрузка MJCF/рендер-хелперы, без экспериментов)
+    mujoco.py                 # из callosum/common/render_utils.py (загрузка MJCF/рендер-хелперы, без экспериментов)
   experiments/
     cube_wrench/              # reduced MuJoCo cube (текущая линия)
       env.py, env_gpu.py, oracle.py, logic.py, config.py
       train.py                # из training/wrench_ppo.py
-      eval.py                 # из scripts/eval_wrench_cube.py
-      render.py               # из scripts/render_wrench_demo.py
+      eval.py                 # из callosum/experiments/cube_wrench/eval.py
+      render.py               # из callosum/experiments/cube_wrench/render.py
     coop_tasks/               # новый suite: cart-pole, pendulum, toss&catch
       base.py, cartpole.py, pendulum.py, toss_catch.py, logic.py, config.py, train.py, eval.py
     arm_skills/               # skill-level SO-ARM101 (заморожено до весны)
@@ -73,7 +73,7 @@ scripts/
 ## Порядок работ (после агентов)
 
 1. **S1. Common.** `git mv` общих модулей в `callosum/common/`, автоматическая замена импортов, прогон `pytest -q` + `ruff`.
-2. **S2. Cube experiment.** `callosum/envs/wrench_cube/*`, `_wrench_logic.py`, `configs/wrench_cube.py`, `wrench_ppo.py`, `eval/…` → `experiments/cube_wrench/`; обновить `python -m` команды и доки.
+2. **S2. Cube experiment.** `callosum/experiments/cube_wrench/*`, `_wrench_logic.py`, `configs/wrench_cube.py`, `wrench_ppo.py`, `eval/…` → `experiments/cube_wrench/`; обновить `python -m` команды и доки.
 3. **S3. Coop experiment.** Новые файлы агента → `experiments/coop_tasks/`; общий тренер/delegate.
 4. **S4. Arms.** skill-level и joint-level — в `experiments/arm_skills/` и `arm_joint_legacy/`; обновить `scripts/smoke_*`, runbook.
 5. **S5. Scripts/tests/docs.** Сгруппировать scripts/tests, обновить `README.md`, `PLAN.md`, `docs/*`, `openspec/*`, CI-импорт-тест; `pytest -q`, `ruff check/format`.

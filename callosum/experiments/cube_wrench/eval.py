@@ -1,6 +1,6 @@
 """Evaluate a trained `wrench_ppo` checkpoint on CubeWrench-v0 (PLAN.md steps 2 and 3).
 
-Loads a `latest.pt` checkpoint of `callosum.training.wrench_ppo` (weights + config) and runs
+Loads a `latest.pt` checkpoint of `callosum.experiments.cube_wrench.train` (weights + config) and runs
 the two deterministic (greedy) policies for `--episodes` episodes of the reduced wrench-level
 cube, writing the metrics the plan's ablation table needs: success rate, final layer angle,
 core position / rotation drift, steps to success and the failure count.
@@ -34,9 +34,9 @@ control-step count of this env.
 Run it on the server (MuJoCo is CPU-only but the plan forbids training/sim on the laptop
 outside the small smoke checks):
 
-    python scripts/eval_wrench_cube.py --checkpoint runs/wrench_oracle_s0/latest.pt \\
+    python callosum/experiments/cube_wrench/eval.py --checkpoint runs/wrench_oracle_s0/latest.pt \\
         --input-mode oracle --episodes 128 --seed 0 --out results_wrench_oracle_s0.json
-    python scripts/eval_wrench_cube.py --checkpoint runs/wrench_pred_s0/latest.pt \\
+    python callosum/experiments/cube_wrench/eval.py --checkpoint runs/wrench_pred_s0/latest.pt \\
         --input-mode predicted --episodes 128 --seed 0 --out results_wrench_pred_s0.json
 """
 
@@ -50,10 +50,10 @@ import numpy as np
 import torch
 
 from callosum.common.metrics import EpisodeRecord, success_rate, time_to_success_stats
-from callosum.configs.wrench_ppo import BACKENDS, INPUT_MODES
-from callosum.envs._wrench_logic import AGENT_KEYS, PARTNER_MODES, obs_size
-from callosum.envs.wrench_cube import WrenchCubeEnv
-from callosum.training.wrench_ppo import (
+from callosum.experiments.cube_wrench import WrenchCubeEnv
+from callosum.experiments.cube_wrench.logic import AGENT_KEYS, PARTNER_MODES, obs_size
+from callosum.experiments.cube_wrench.ppo_config import BACKENDS, INPUT_MODES
+from callosum.experiments.cube_wrench.train import (
     EVAL_SEED_OFFSET,
     LatentInputBuilder,
     check_checkpoint_compat,
@@ -337,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     if args.backend == "warp":
-        from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
+        from callosum.experiments.cube_wrench.env_gpu import WrenchCubeBatchGPU
 
         env = WrenchCubeBatchGPU(
             min(args.episodes, args.num_envs),

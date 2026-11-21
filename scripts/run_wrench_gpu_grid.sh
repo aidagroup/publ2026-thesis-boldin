@@ -73,7 +73,7 @@ train_one() {  # $1 preset, $2 mode, $3 seed, $4 updates
   local extra=() env_partner="$mode"
   if [ "$mode" = "predicted" ]; then env_partner="none"; extra=(--use-bijepa); fi
   echo "launch $name $(date -u +%H:%M:%S)"
-  "$PY" -m callosum.training.wrench_ppo \
+  "$PY" -m callosum.experiments.cube_wrench.train \
     --backend warp --device cuda --randomization "$preset" \
     --partner-mode "$env_partner" "${extra[@]}" \
     --seed "$seed" --exp-name "$name" --total-updates "$updates" \
@@ -88,7 +88,7 @@ sweep_one() {  # $1 history_len, $2 aux_coef tag (003/010)
   if [ "$aux_tag" = "003" ]; then aux="0.03"; else aux="0.1"; fi
   local name="wrench_gpu_sweep_h${history}_aux${aux_tag}_s0"
   echo "launch $name (history_len=$history aux_coef=$aux) $(date -u +%H:%M:%S)"
-  "$PY" -m callosum.training.wrench_ppo \
+  "$PY" -m callosum.experiments.cube_wrench.train \
     --backend warp --device cuda --randomization default \
     --partner-mode none --use-bijepa --history-len "$history" --aux-coef "$aux" \
     --seed 0 --exp-name "$name" --total-updates "$SWEEP_UPDATES" \
@@ -106,7 +106,7 @@ eval_one() {  # $1 run name, $2 eval seed
     return 0
   fi
   mode="$(mode_of "$name")"
-  "$PY" scripts/eval_wrench_cube.py \
+  "$PY" callosum/experiments/cube_wrench/eval.py \
     --checkpoint "runs/$name/latest.pt" --input-mode "$mode" \
     --backend warp --device cuda --num-envs "$EVAL_EPISODES" \
     --episodes "$EVAL_EPISODES" --seed "$seed" --out "$out" \

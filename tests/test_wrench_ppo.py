@@ -14,10 +14,10 @@ import pytest
 
 torch = pytest.importorskip("torch")  # CI installs only the dev extra; run with `make dev`
 
-from callosum.configs.wrench_ppo import WrenchPPOConfig
-from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
-from callosum.training import wrench_ppo
-from callosum.training.wrench_ppo import (
+from callosum.experiments.cube_wrench import train as wrench_ppo
+from callosum.experiments.cube_wrench.logic import AGENT_KEYS, obs_size
+from callosum.experiments.cube_wrench.ppo_config import WrenchPPOConfig
+from callosum.experiments.cube_wrench.train import (
     CHECKPOINT_FORMAT,
     EvalSummary,
     compute_advantages,

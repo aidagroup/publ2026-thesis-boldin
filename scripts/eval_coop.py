@@ -1,9 +1,9 @@
 """Evaluate a trained `wrench_ppo` checkpoint on the reduced two-agent coop suite.
 
-Loads a `latest.pt` checkpoint of `callosum.training.wrench_ppo` (weights + config) and runs
+Loads a `latest.pt` checkpoint of `callosum.experiments.cube_wrench.train` (weights + config) and runs
 the two deterministic (greedy) policies for `--episodes` episodes of the checkpoint's coop
 task (`--task cartpole`/`--task pendulum` is recorded in the checkpoint config; the cube has
-its own `scripts/eval_wrench_cube.py`). The metrics the task-suite comparison needs are
+its own `callosum/experiments/cube_wrench/eval.py`). The metrics the task-suite comparison needs are
 written as JSON: success rate, steps / steps to success and the task diagnostics (the final
 pole angle for the cart-pole, the achieved amplitude and completed hold cycles for the
 pendulum).
@@ -41,9 +41,9 @@ import numpy as np
 import torch
 
 from callosum.common.metrics import EpisodeRecord, success_rate, time_to_success_stats
-from callosum.configs.wrench_ppo import BACKENDS, INPUT_MODES, TASKS
 from callosum.envs.coop import make_coop_env
-from callosum.training.wrench_ppo import (
+from callosum.experiments.cube_wrench.ppo_config import BACKENDS, INPUT_MODES, TASKS
+from callosum.experiments.cube_wrench.train import (
     EVAL_SEED_OFFSET,
     LatentInputBuilder,
     check_checkpoint_compat,
@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.task not in _COOP_TASKS:
         raise ValueError(
             f"checkpoint task is {cfg.task!r}; scripts/eval_coop.py evaluates the coop tasks "
-            f"{_COOP_TASKS} (the cube has scripts/eval_wrench_cube.py)"
+            f"{_COOP_TASKS} (the cube has callosum/experiments/cube_wrench/eval.py)"
         )
     input_mode = resolve_input_mode(payload, args)
     env_mode, latent_dim = check_checkpoint_compat(payload, input_mode)

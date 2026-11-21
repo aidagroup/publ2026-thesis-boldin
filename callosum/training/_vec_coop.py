@@ -3,11 +3,11 @@
 `callosum.envs.coop.base.CoopTaskEnv` is single-instance and CPU-only (the vectorisation is
 the trainer's job, exactly as for `CubeWrench-v0`), and the plan keeps the coop suite on the
 CPU loop until the GPU-server throughput says otherwise. This module is that loop: it drives
-`num_envs` copies of one coop task, so `callosum.training.wrench_ppo` can train the new
+`num_envs` copies of one coop task, so `callosum.experiments.cube_wrench.train` can train the new
 tasks with the same PPO code and the same vec-env contract as `VecWrenchCube`.
 
 It is the only place in the training package that imports the coop simulator package:
-`callosum.training.wrench_ppo` imports this module lazily inside `run()`, so the trainer's
+`callosum.experiments.cube_wrench.train` imports this module lazily inside `run()`, so the trainer's
 pure-torch parts (policies, GAE, the PPO step, checkpoints) stay importable on macOS/CI
 without the `sandbox` extra.
 
@@ -41,7 +41,7 @@ from callosum.envs.coop import make_coop_env
 class VecCoopStep:
     """One control step of all coop envs (the auto-reset contract is in the module docstring).
 
-    The field names mirror `callosum.training._vec_wrench.VecStep`, so
+    The field names mirror `callosum.experiments.cube_wrench.vec_env.VecStep`, so
     `wrench_ppo.evaluate_greedy`/`train` consume both backends through the same duck-typed
     contract (a coop env defines no `torch_io`, so the trainer treats it as numpy, like the
     cube CPU backend).

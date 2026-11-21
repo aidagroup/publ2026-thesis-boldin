@@ -1,6 +1,6 @@
 """Render and encode helpers for the CubeWrench-v0 demo videos (`render_wrench_demo.py`).
 
-The reduced env (`callosum.envs.wrench_cube`) renders nothing on its own, so the demo
+The reduced env (`callosum.experiments.cube_wrench`) renders nothing on its own, so the demo
 builds a **render-only copy** of the same MJCF scene through `mujoco.MjSpec`: the copied
 model gets colours, markers, a skybox and lights, and the physics model of the env is never
 touched. The state of the env is copied into the copy's `qpos`/`qvel` before every frame,

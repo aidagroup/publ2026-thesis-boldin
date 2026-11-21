@@ -20,7 +20,7 @@
 
 ## Среда `CubeWrench-v0`
 
-- **MJCF** `callosum/envs/wrench_cube/assets/cube_wrench.xml`: core — свободное тело, box 5.7 см, масса ~0.2 кг; активный слой — дочернее тело на hinge `[0, 90°]` с трением/демпфированием; `<compiler angle="radian">`, `timestep=0.005`, `integrator=implicitfast`, без гравитации (куб «парит»).
+- **MJCF** `callosum/experiments/cube_wrench/assets/cube_wrench.xml`: core — свободное тело, box 5.7 см, масса ~0.2 кг; активный слой — дочернее тело на hinge `[0, 90°]` с трением/демпфированием; `<compiler angle="radian">`, `timestep=0.005`, `integrator=implicitfast`, без гравитации (куб «парит»).
 - **Шаг управления** = 8–10 физических подшагов (0.04–0.05 с); эпизод 300–400 шагов управления (решение — в конфиге).
 - **Действие агента**: 6D-wrench (force + torque), нормализованный в `[-1,1]`, масштабируется лимитом; holder применяет к core, rotator — к layer (`xfrc_applied`).
 - **Наблюдение агента**: свой wrench и лимиты, свои приватные параметры (латентность/жёсткость/сlip), состояние куба (поза/скорости ядра, угол/скорость слоя), цель (90°), доля времени эпизода. Данные партнёра — только по режиму.
@@ -40,10 +40,10 @@
 
 ### 0. Каркас (главный поток + implementer)
 - Extra `sandbox = ["mujoco"]` в `pyproject.toml`, `uv lock`, проверка `import mujoco` (macOS 4.0.1 уже проверен).
-- Новый пакет `callosum/envs/wrench_cube/` (env, assets), `callosum/configs/wrench_cube.py`, `scripts/smoke_wrench_cube.py`.
-- Чистая логика `callosum/envs/_wrench_logic.py` (без mujoco/torch): раскладка obs, видимость партнёра, сэмплер рандомизации, success/reward — юнит-тесты на маке.
+- Новый пакет `callosum/experiments/cube_wrench/` (env, assets), `callosum/experiments/cube_wrench/config.py`, `scripts/smoke_wrench_cube.py`.
+- Чистая логика `callosum/experiments/cube_wrench/logic.py` (без mujoco/torch): раскладка obs, видимость партнёра, сэмплер рандомизации, success/reward — юнит-тесты на маке.
 - openspec change `add-wrench-cube-reduced-model` (proposal/design/tasks; specs — при стабилизации).
-- Критерий: `uv run ruff check .`, `uv run pytest -q` зелёные; `import callosum.envs._wrench_logic` на маке.
+- Критерий: `uv run ruff check .`, `uv run pytest -q` зелёные; `import callosum.experiments.cube_wrench.logic` на маке.
 
 ### 1. Среда MVP + скриптовый oracle-контроллер
 - MJCF + `WrenchCubeEnv` (Gymnasium API: `reset(seed)`, `step({a,b})`, dict obs/action, info).
@@ -53,7 +53,7 @@
 
 ### 2. Тренер непрерывного IPPO (none/oracle)
 - `callosum/training/wrench_ippo.py`: две независимые гауссовы политики (переиспользовать `callosum/common/ppo_core.py`: `ActorCritic`, GAE, clipped update), MuJoCo-векторизация циклом по envs (измерить throughput; при необходимости process pool), TensorBoard, чекпоинты, resume.
-- Конфиг `callosum/configs/wrench_ippo.py`; `scripts/eval_wrench_cube.py` поверх `callosum/common/metrics.py` (success, угол, дрейф, время; `cross_play`/`recovery` — позже).
+- Конфиг `callosum/configs/wrench_ippo.py`; `callosum/experiments/cube_wrench/eval.py` поверх `callosum/common/metrics.py` (success, угол, дрейф, время; `cross_play`/`recovery` — позже).
 - **Гейт G2:** `oracle` ≥ 0.9 и разрыв `oracle−none` ≥ 0.3 (абсолютный) после подбора рандомизации; иначе усилить рандомизацию, а не двигаться дальше.
 
 ### 3. Интеграция Bi-JEPA (`predicted`)

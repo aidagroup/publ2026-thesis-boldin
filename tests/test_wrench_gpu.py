@@ -5,7 +5,7 @@ Two layers, so the Mac/CI run stays green without the GPU stack:
 * **no GPU**: the trainer config's `backend` validation (pure stdlib) and -- under the
   locally installed torch+mujoco -- the pure-tensor pieces of the backend: the
   randomisation packer vs the CPU sampler, and the observation block mapping vs the pure
-  `_wrench_logic.build_observation` layout. These import `callosum.envs.wrench_cube` (which
+  `_wrench_logic.build_observation` layout. These import `callosum.experiments.cube_wrench` (which
   needs `mujoco`), so they skip where the simulator extra is absent;
 * **GPU**: the batch env itself (`WrenchCubeBatchGPU`) is only built when `mujoco_warp`
   imports AND a CUDA device exists; the shape/validation/one-step-parity tests skip
@@ -23,7 +23,7 @@ import math
 import numpy as np
 import pytest
 
-from callosum.configs.wrench_ppo import BACKENDS, WrenchPPOConfig, parse_args
+from callosum.experiments.cube_wrench.ppo_config import BACKENDS, WrenchPPOConfig, parse_args
 
 # --- config / CLI (no torch, no simulator) ------------------------------------------------
 
@@ -53,7 +53,7 @@ def test_warp_backend_requires_a_cuda_device() -> None:
 
 def test_randomization_presets_build_the_documented_env_configs() -> None:
     """`env_config()` is the single source of the env randomisation of a run."""
-    from callosum.configs.wrench_cube import WrenchCubeConfig, wrench_cube_config
+    from callosum.experiments.cube_wrench.config import WrenchCubeConfig, wrench_cube_config
 
     assert WrenchPPOConfig().randomization == "default"
     default_env = WrenchPPOConfig().env_config()
@@ -94,7 +94,7 @@ def test_cli_exposes_the_randomization_preset() -> None:
 
 
 def test_parse_args_with_explicit_reports_the_given_flags() -> None:
-    from callosum.configs.wrench_ppo import parse_args_with_explicit
+    from callosum.experiments.cube_wrench.ppo_config import parse_args_with_explicit
 
     cfg, explicit = parse_args_with_explicit(["--backend", "warp", "--device", "cuda"])
     assert cfg.backend == "warp" and cfg.device == "cuda"
@@ -104,7 +104,7 @@ def test_parse_args_with_explicit_reports_the_given_flags() -> None:
 
 
 def test_resume_keeps_saved_hyperparameters_but_takes_runtime_resources_from_cli() -> None:
-    from callosum.training.wrench_ppo import apply_runtime_overrides
+    from callosum.experiments.cube_wrench.train import apply_runtime_overrides
 
     saved = WrenchPPOConfig(
         backend="cpu", device="cpu", num_envs=1024, rollout_steps=64, total_updates=300
@@ -146,15 +146,15 @@ def _gpu_module():
     """Import `env_gpu` (and its package, i.e. mujoco) or skip without the simulator extra."""
     pytest.importorskip("torch")
     pytest.importorskip("mujoco")
-    from callosum.envs.wrench_cube import env_gpu
+    from callosum.experiments.cube_wrench import env_gpu
 
     return env_gpu
 
 
 def _values_dict(seed: int = 0) -> dict[str, float]:
     """A role-tagged values dict like the CPU env's `_values` (all fields distinct)."""
-    from callosum.configs.wrench_cube import WrenchCubeConfig
-    from callosum.envs._wrench_logic import (
+    from callosum.experiments.cube_wrench.config import WrenchCubeConfig
+    from callosum.experiments.cube_wrench.logic import (
         AGENT_KEYS,
         CUBE_STATE_FIELDS,
         command_value_fields,
@@ -185,7 +185,7 @@ def _values_dict(seed: int = 0) -> dict[str, float]:
 def test_observation_blocks_reproduce_the_pure_layout(partner_mode: str) -> None:
     """Concatenating the GPU block tensors must give exactly `build_observation`'s vector."""
     env_gpu = _gpu_module()
-    from callosum.envs._wrench_logic import (
+    from callosum.experiments.cube_wrench.logic import (
         AGENT_KEYS,
         CUBE_STATE_FIELDS,
         GOAL_FIELDS,
@@ -223,8 +223,8 @@ def test_observation_blocks_reproduce_the_pure_layout(partner_mode: str) -> None
 def test_randomization_packing_matches_the_cpu_sampler() -> None:
     """The GPU tensor pack holds exactly the CPU sampler's values, field by field."""
     env_gpu = _gpu_module()
-    from callosum.configs.wrench_cube import WrenchCubeConfig
-    from callosum.envs._wrench_logic import AGENT_KEYS, sample_episode_randomization
+    from callosum.experiments.cube_wrench.config import WrenchCubeConfig
+    from callosum.experiments.cube_wrench.logic import AGENT_KEYS, sample_episode_randomization
 
     config = WrenchCubeConfig()
     seeds = [3, 11, 29]
@@ -274,7 +274,7 @@ def _gpu_env(nworld: int, partner_mode: str = "none", **kwargs):
 def test_batch_env_shapes_validation_and_one_step() -> None:
     import torch
 
-    from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
+    from callosum.experiments.cube_wrench.logic import AGENT_KEYS, obs_size
 
     _env_gpu, env = _gpu_env(4, partner_mode="oracle")
     try:
@@ -344,9 +344,9 @@ def test_batch_env_matches_the_cpu_env_one_step() -> None:
     """One-step parity sentinel (the full multi-step check is the pod parity script)."""
     import torch
 
-    from callosum.configs.wrench_cube import WrenchCubeConfig
-    from callosum.envs._wrench_logic import AGENT_KEYS
-    from callosum.envs.wrench_cube import WrenchCubeEnv
+    from callosum.experiments.cube_wrench import WrenchCubeEnv
+    from callosum.experiments.cube_wrench.config import WrenchCubeConfig
+    from callosum.experiments.cube_wrench.logic import AGENT_KEYS
 
     _env_gpu, env = _gpu_env(2, partner_mode="oracle")
     config = WrenchCubeConfig()
@@ -390,7 +390,7 @@ def test_batch_env_matches_the_cpu_env_one_step() -> None:
 def test_checkpoint_keeps_the_backend_field(tmp_path) -> None:
     """A checkpoint records the backend config; the weights/policy widths stay shared."""
     torch = pytest.importorskip("torch")
-    from callosum.training.wrench_ppo import (
+    from callosum.experiments.cube_wrench.train import (
         config_from_payload,
         load_checkpoint,
         make_policies,
@@ -430,8 +430,8 @@ def test_evaluate_greedy_hands_cuda_style_tensors_to_a_torch_io_env() -> None:
     import types
 
     torch = pytest.importorskip("torch")
-    from callosum.envs._wrench_logic import AGENT_KEYS
-    from callosum.training.wrench_ppo import evaluate_greedy, make_policies
+    from callosum.experiments.cube_wrench.logic import AGENT_KEYS
+    from callosum.experiments.cube_wrench.train import evaluate_greedy, make_policies
 
     class _FakeTorchVec:
         torch_io = True
@@ -481,7 +481,7 @@ def test_cuda_graph_replay_is_bit_identical_to_the_eager_loop() -> None:
     """S3: graph capture is only a launch optimisation, not a different physics path."""
     import torch
 
-    from callosum.envs._wrench_logic import AGENT_KEYS
+    from callosum.experiments.cube_wrench.logic import AGENT_KEYS
 
     _env_gpu, graph_env = _gpu_env(3, partner_mode="oracle")
     _env_gpu, eager_env = _gpu_env(3, partner_mode="oracle", use_cuda_graph=False)
@@ -508,7 +508,7 @@ def test_two_envs_with_the_same_seed_and_actions_are_bit_identical() -> None:
     """S8: the same seed + action sequence must reproduce the trajectory exactly."""
     import torch
 
-    from callosum.envs._wrench_logic import AGENT_KEYS
+    from callosum.experiments.cube_wrench.logic import AGENT_KEYS
 
     _env_gpu, first = _gpu_env(4, partner_mode="oracle")
     _env_gpu, second = _gpu_env(4, partner_mode="oracle")
@@ -539,7 +539,7 @@ def test_checkpoint_restores_the_cuda_rng_state(tmp_path) -> None:
     pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
-    from callosum.training.wrench_ppo import (
+    from callosum.experiments.cube_wrench.train import (
         _restore_rng,
         _rng_payload,
         load_checkpoint,
@@ -646,8 +646,8 @@ _AGENT_KEYS_IMPORT = ("holder", "rotator")
 def test_training_loop_torch_io_vec_runs_with_truncation_bootstrap(tmp_path) -> None:
     """S6/NIT: the GPU (tensor) rollout branch, incl. the GAE truncation bootstrap, runs."""
     torch = pytest.importorskip("torch")
-    from callosum.envs._wrench_logic import obs_size
-    from callosum.training import wrench_ppo
+    from callosum.experiments.cube_wrench import train as wrench_ppo
+    from callosum.experiments.cube_wrench.logic import obs_size
 
     torch.manual_seed(0)
     cfg = WrenchPPOConfig(

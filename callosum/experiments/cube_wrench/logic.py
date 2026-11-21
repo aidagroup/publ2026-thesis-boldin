@@ -3,7 +3,7 @@ randomisation, and the success/reward/failure rules.
 
 Deliberately has zero mujoco/torch dependency (the same macOS rule as
 `callosum.common.visibility` and `callosum.envs._skills`): the simulator lives in
-`callosum.envs.wrench_cube.env`, which cannot even be imported on macOS/CI, while
+`callosum.experiments.cube_wrench.env`, which cannot even be imported on macOS/CI, while
 everything that can be decided without the simulator lives here and is unit-tested
 locally (`tests/test_wrench_logic.py`).
 
@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from callosum.configs.wrench_cube import WrenchCubeConfig
+    from callosum.experiments.cube_wrench.config import WrenchCubeConfig
 
 AGENT_KEYS = ("holder", "rotator")
 """The two role keys, in the env's action-/observation-space order."""

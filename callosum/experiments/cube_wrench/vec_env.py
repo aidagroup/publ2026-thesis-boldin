@@ -1,12 +1,12 @@
 """Vectorised CubeWrench-v0: N single-instance MuJoCo envs stepped in a Python loop.
 
-`callosum.envs.wrench_cube.WrenchCubeEnv` is deliberately single-instance and CPU-only
+`callosum.experiments.cube_wrench.WrenchCubeEnv` is deliberately single-instance and CPU-only
 (see its docstring: "the trainer (phase 2) does the vectorisation"), and the plan keeps
 the vectorisation a plain loop for the reduced model until the GPU-server throughput
 measurement says otherwise (PLAN.md "Throughput"). This module is that loop.
 
 It is also the only place in the training package that imports the simulator:
-`callosum.training.wrench_ppo` imports this module lazily inside `run()`, so the
+`callosum.experiments.cube_wrench.train` imports this module lazily inside `run()`, so the
 trainer's pure-torch parts (policies, GAE, the PPO step, checkpoints) stay importable on
 macOS/CI without the `sandbox` extra.
 
@@ -29,9 +29,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from callosum.configs.wrench_cube import WrenchCubeConfig
-from callosum.envs._wrench_logic import AGENT_KEYS, validate_partner_mode
-from callosum.envs.wrench_cube import WrenchCubeEnv
+from callosum.experiments.cube_wrench import WrenchCubeEnv
+from callosum.experiments.cube_wrench.config import WrenchCubeConfig
+from callosum.experiments.cube_wrench.logic import AGENT_KEYS, validate_partner_mode
 
 _WRENCH_SIZE = 6
 

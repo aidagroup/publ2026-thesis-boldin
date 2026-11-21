@@ -25,11 +25,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from callosum.configs.wrench_ppo import INPUT_MODES, WrenchPPOConfig
-from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
-from callosum.training import wrench_ppo
-from callosum.training._bijepa_probe import ridge_probe
-from callosum.training.wrench_ppo import (
+from callosum.experiments.cube_wrench import train as wrench_ppo
+from callosum.experiments.cube_wrench.logic import AGENT_KEYS, obs_size
+from callosum.experiments.cube_wrench.ppo_config import INPUT_MODES, WrenchPPOConfig
+from callosum.experiments.cube_wrench.train import (
     LatentInputBuilder,
     aux_update,
     check_checkpoint_compat,
@@ -46,6 +45,7 @@ from callosum.training.wrench_ppo import (
     ppo_step,
     save_checkpoint,
 )
+from callosum.training._bijepa_probe import ridge_probe
 
 _ACTION_DIM = 6
 

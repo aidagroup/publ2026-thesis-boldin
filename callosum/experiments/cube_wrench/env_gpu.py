@@ -1,6 +1,6 @@
 """Batched GPU backend of CubeWrench-v0 (`mujoco_warp`; optional `sandbox-gpu` extra).
 
-The CPU env (`callosum.envs.wrench_cube.env.WrenchCubeEnv`) is single-instance and driven by a
+The CPU env (`callosum.experiments.cube_wrench.env.WrenchCubeEnv`) is single-instance and driven by a
 Python loop of `mj_step` calls, which caps the trainer at a few thousand environment steps per
 second no matter how small the reduced model is. This module is the batched GPU twin: all
 `nworld` worlds live in ONE MuJoCo-Warp `Model`/`Data` pair, the whole control step (latency
@@ -56,7 +56,7 @@ Known limits of this backend: one GPU/one device per instance; `torch.float32` p
 tolerances above, so the two backends are interchangeable for training/evaluation but a curve
 cannot be expected to be bit-identical across them. The layout of `assets/cube_wrench.xml`
 (nq=8: free core joint + one hinge; `hinge_qpos == 7`) and of
-`callosum.envs._wrench_logic` (field blocks) is asserted at construction, so a layout change
+`callosum.experiments.cube_wrench.logic` (field blocks) is asserted at construction, so a layout change
 fails loudly instead of silently producing a wrong observation.
 """
 
@@ -73,8 +73,8 @@ try:  # `torch` is part of the `train` extra; the module must still import witho
 except ImportError:  # pragma: no cover - the GPU backend itself always needs torch
     torch = None  # type: ignore[assignment]
 
-from callosum.configs.wrench_cube import WrenchCubeConfig
-from callosum.envs._wrench_logic import (
+from callosum.experiments.cube_wrench.config import WrenchCubeConfig
+from callosum.experiments.cube_wrench.logic import (
     AGENT_KEYS,
     CUBE_STATE_FIELDS,
     GOAL_FIELDS,
@@ -243,10 +243,10 @@ def observation_blocks(partner_mode: str) -> dict[str, tuple[tuple[str, str | No
     expected = tuple(expected_fields)
     if expected != obs_fields(partner_mode):
         raise RuntimeError(
-            "the GPU observation blocks and callosum.envs._wrench_logic.obs_fields disagree: "
+            "the GPU observation blocks and callosum.experiments.cube_wrench.logic.obs_fields disagree: "
             f"blocks concatenate to {len(expected)} fields, obs_fields has "
             f"{len(obs_fields(partner_mode))} ({obs_fields(partner_mode)}); update "
-            "callosum/envs/wrench_cube/env_gpu.py next to the logic module"
+            "callosum/experiments/cube_wrench/env_gpu.py next to the logic module"
         )
     blocks: dict[str, tuple[tuple[str, str | None], ...]] = {}
     for role in AGENT_KEYS:
@@ -335,7 +335,7 @@ class WrenchCubeBatchGPU:
     observations, shared team reward, success/failure/truncation, auto-reset) is the CPU
     `WrenchCubeEnv`'s; the difference is that every value is a `(nworld, ...)` tensor and one
     `step` advances all worlds. `torch_io = True` marks the tensor contract for
-    `callosum.training.wrench_ppo` / `evaluate_greedy`, which then pass CUDA tensors instead
+    `callosum.experiments.cube_wrench.train` / `evaluate_greedy`, which then pass CUDA tensors instead
     of numpy arrays.
 
     The class is not a `gymnasium.Env` on purpose: there is no vector-of-envs observation

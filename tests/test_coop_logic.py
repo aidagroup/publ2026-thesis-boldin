@@ -512,7 +512,7 @@ def test_randomization_override_helper_keeps_the_config_valid() -> None:
 
 
 def test_wrench_ppo_config_is_task_aware() -> None:
-    from callosum.configs.wrench_ppo import (
+    from callosum.experiments.cube_wrench.ppo_config import (
         TASKS,
         WrenchPPOConfig,
         checkpoint_task,
@@ -545,7 +545,7 @@ def test_wrench_ppo_config_is_task_aware() -> None:
 
 
 def test_wrench_ppo_config_restricts_the_coop_task_backend_and_preset() -> None:
-    from callosum.configs.wrench_ppo import WrenchPPOConfig
+    from callosum.experiments.cube_wrench.ppo_config import WrenchPPOConfig
 
     with pytest.raises(ValueError, match="CPU MuJoCo backend"):
         WrenchPPOConfig(task="cartpole", backend="warp")
@@ -554,7 +554,10 @@ def test_wrench_ppo_config_restricts_the_coop_task_backend_and_preset() -> None:
 
 
 def test_task_flag_is_exposed_on_the_trainer_cli() -> None:
-    from callosum.configs.wrench_ppo import WrenchPPOConfig, parse_args_with_explicit
+    from callosum.experiments.cube_wrench.ppo_config import (
+        WrenchPPOConfig,
+        parse_args_with_explicit,
+    )
 
     cfg, explicit = parse_args_with_explicit(["--task", "pendulum", "--seed", "3"])
     assert cfg.task == "pendulum" and cfg.seed == 3
@@ -565,7 +568,7 @@ def test_task_flag_is_exposed_on_the_trainer_cli() -> None:
 def test_checkpoint_compatibility_is_task_aware() -> None:
     torch = pytest.importorskip("torch")  # the trainer module imports torch
     del torch
-    from callosum.training.wrench_ppo import check_checkpoint_compat
+    from callosum.experiments.cube_wrench.train import check_checkpoint_compat
 
     cartpole_payload = {
         "config": {"task": "cartpole"},

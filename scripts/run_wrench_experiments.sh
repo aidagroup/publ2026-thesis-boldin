@@ -40,7 +40,7 @@ run_one() {  # $1 mode, $2 seed -> launch one detached trainer
   fi
   echo "launch $name (updates=$UPDATES, envs=$NUM_ENVS)"
   WRENCH_TORCH_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-    setsid nohup "$PYTHON" -m callosum.training.wrench_ppo \
+    setsid nohup "$PYTHON" -m callosum.experiments.cube_wrench.train \
       --partner-mode "$partner_mode" "${bijepa[@]}" \
       --seed "$seed" --exp-name "$name" \
       --total-updates "$UPDATES" --num-envs "$NUM_ENVS" \
@@ -56,7 +56,7 @@ done
 
 # Wait for every launched trainer before evaluating (the script is a foreground driver).
 echo "waiting for trainers..."
-while pgrep -f 'callosum.training.wrench_ppo' >/dev/null 2>&1; do
+while pgrep -f 'callosum.experiments.cube_wrench.train' >/dev/null 2>&1; do
   sleep 15
 done
 echo "all trainers finished"
@@ -64,7 +64,7 @@ echo "all trainers finished"
 for seed in $SEEDS; do
   for mode in $MODES; do
     name="wrench_${mode}_s${seed}"
-    "$PYTHON" scripts/eval_wrench_cube.py \
+    "$PYTHON" callosum/experiments/cube_wrench/eval.py \
       --checkpoint "$RUNS_DIR/$name/latest.pt" \
       --input-mode "$mode" --episodes "$EVAL_EPISODES" --seed 0 \
       --out "$RESULTS_DIR/$name.json"

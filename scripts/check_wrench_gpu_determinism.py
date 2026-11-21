@@ -55,9 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     import torch
 
-    from callosum.configs.wrench_cube import wrench_cube_config
-    from callosum.envs._wrench_logic import AGENT_KEYS
-    from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
+    from callosum.experiments.cube_wrench.config import wrench_cube_config
+    from callosum.experiments.cube_wrench.env_gpu import WrenchCubeBatchGPU
+    from callosum.experiments.cube_wrench.logic import AGENT_KEYS
 
     config = wrench_cube_config("default")
     envs = {

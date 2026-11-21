@@ -22,11 +22,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from callosum.configs.wrench_cube import WrenchCubeConfig
-from callosum.envs._wrench_logic import injection_active
+from callosum.experiments.cube_wrench.config import WrenchCubeConfig
+from callosum.experiments.cube_wrench.logic import injection_active
 
 if TYPE_CHECKING:
-    from callosum.envs.wrench_cube.env import WrenchCubeEnv
+    from callosum.experiments.cube_wrench.env import WrenchCubeEnv
 
 _WRENCH_SIZE = 6
 _HINGE_TORQUE_AXIS = 5

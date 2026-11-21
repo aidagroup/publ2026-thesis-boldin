@@ -27,7 +27,7 @@ Controllers: `random` (torch-random normalized wrenches, physics/obs parity) and
 success/failure so the terminal reward and the final observation are compared too).
 
 Randomisation: `--randomization default|harsh` selects the episode-randomness preset of
-BOTH envs (`callosum.configs.wrench_cube.wrench_cube_config`); the physics/timing/reward are
+BOTH envs (`callosum.experiments.cube_wrench.config.wrench_cube_config`); the physics/timing/reward are
 identical between the presets, only the private-randomness ranges differ.
 
 Friction: `--friction sampled` (the production path: the per-episode Coulomb friction the CPU
@@ -74,7 +74,7 @@ import sys
 
 import numpy as np
 
-from callosum.configs.wrench_cube import RANDOMIZATION_PRESETS, wrench_cube_config
+from callosum.experiments.cube_wrench.config import RANDOMIZATION_PRESETS, wrench_cube_config
 
 TOLERANCES = {
     "qpos": 1e-5,
@@ -110,7 +110,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="default",
         help=(
             "episode-randomness preset of both envs (default: the dataclass defaults; harsh: "
-            "the harder private-randomness ranges of callosum.configs.wrench_cube)"
+            "the harder private-randomness ranges of callosum.experiments.cube_wrench.config)"
         ),
     )
     parser.add_argument(
@@ -209,7 +209,7 @@ def _max_abs_diff(expected: np.ndarray, actual: np.ndarray) -> float:
 
 def _check_randomization(env: object, seeds: list[int]) -> list[str]:
     """Compare the GPU randomisation tensors with fresh CPU samples of the same seeds."""
-    from callosum.envs._wrench_logic import AGENT_KEYS, sample_episode_randomization
+    from callosum.experiments.cube_wrench.logic import AGENT_KEYS, sample_episode_randomization
 
     failures: list[str] = []
     agents = env.randomization_tensors()
@@ -244,8 +244,8 @@ def run_parity(args: argparse.Namespace) -> int:
     """Run the scenario; print the comparison table and return the process exit code."""
     import torch
 
-    from callosum.envs.wrench_cube import OracleController, WrenchCubeEnv
-    from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
+    from callosum.experiments.cube_wrench import OracleController, WrenchCubeEnv
+    from callosum.experiments.cube_wrench.env_gpu import WrenchCubeBatchGPU
 
     torch.manual_seed(args.seed)
     roles = ("holder", "rotator")

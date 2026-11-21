@@ -1,7 +1,7 @@
 """Render the CubeWrench-v0 demo videos: oracle success, rotator-only failure, learned policy.
 
 Clips rendered by one run (all from the env's own physics, rendered with `mujoco.Renderer`
-on a render-only copy of the scene, see `scripts/_render_utils.py`):
+on a render-only copy of the scene, see `callosum/common/render_utils.py`):
 
 1. ``demo_oracle.mp4`` -- the scripted oracle: the holder PD-stabilises the core while the
    rotator PD-turns the layer to 90 degrees -> SUCCESS (~50 control steps at the defaults).
@@ -16,7 +16,7 @@ on a render-only copy of the scene, see `scripts/_render_utils.py`):
    control steps, so the oracle would otherwise sit frozen for most of the clip). The policy
    input mode comes from ``--input-mode`` (or the checkpoint):
    ``none`` / ``oracle`` engine observations or ``predicted`` (Bi-JEPA ``ẑ_partner``, built by
-   `callosum.training.wrench_ppo.LatentInputBuilder`).
+   `callosum.experiments.cube_wrench.train.LatentInputBuilder`).
 5. ``demo_wrench_arrows.mp4`` -- only with ``--scene policy-vs-rotator``: the learned policy
    (both agents) next to the rotator-only failure, again with the wrench overlay; the
    clearest "who does what" clip (green holder arrows on the left, none on the right).
@@ -38,7 +38,7 @@ construction, because the slow-motion expansion holds frame 0), a middle frame (
 and the final frame (``*_final.png``) of every clip, and ``demo_summary.json`` with the episode
 metrics, the still md5s and the video probe results.
 
-The learned-policy path reuses `scripts/eval_wrench_cube.py` (checkpoint loading, input-mode
+The learned-policy path reuses `callosum/experiments/cube_wrench/eval.py` (checkpoint loading, input-mode
 resolution, greedy inference and the Bi-JEPA input builder) instead of duplicating it, so the
 clip shows exactly what the ablation evaluates.
 
@@ -48,24 +48,24 @@ selects ``MUJOCO_GL=egl`` on Linux and ``cgl`` on macOS, unless ``MUJOCO_GL`` is
 
 Run on the pod (from the repo root):
 
-    MUJOCO_GL=egl /root/.callosum/venv/bin/python scripts/render_wrench_demo.py \
+    MUJOCO_GL=egl /root/.callosum/venv/bin/python callosum/experiments/cube_wrench/render.py \
         --out /workspace/callosum-runs/render --seed 0 --width 640 --height 640 \
         --fps 30 --controller oracle
 
-    MUJOCO_GL=egl /root/.callosum/venv/bin/python scripts/render_wrench_demo.py \
+    MUJOCO_GL=egl /root/.callosum/venv/bin/python callosum/experiments/cube_wrench/render.py \
         --checkpoint /workspace/callosum-runs/wrench_v3_none_s0/latest.pt \
         --input-mode none --out /workspace/callosum-runs/render_policy \
         --seed 0 --width 640 --height 640 --fps 30
 
 Quick metric-only checks (no rendering, no OpenGL):
 
-    python scripts/render_wrench_demo.py --out /tmp/render --dry-run
-    python scripts/render_wrench_demo.py --out /tmp/render --dry-run \
+    python callosum/experiments/cube_wrench/render.py --out /tmp/render --dry-run
+    python callosum/experiments/cube_wrench/render.py --out /tmp/render --dry-run \
         --checkpoint /path/latest.pt --input-mode none --scene policy-vs-oracle
 
 Single scene / holder-off variant:
 
-    python scripts/render_wrench_demo.py --out /tmp/render --scene oracle --holder-off
+    python callosum/experiments/cube_wrench/render.py --out /tmp/render --scene oracle --holder-off
 """
 
 from __future__ import annotations
@@ -82,7 +82,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from _render_utils import (
+from PIL import Image
+
+from callosum.common.render_utils import (
     FAILURE_COLOR,
     HOLDER_COLOR,
     MUTED_COLOR,
@@ -100,10 +102,9 @@ from _render_utils import (
     write_gif,
     write_mp4,
 )
-from PIL import Image
 
 if TYPE_CHECKING:
-    from callosum.envs.wrench_cube import WrenchCubeEnv
+    from callosum.experiments.cube_wrench import WrenchCubeEnv
 
 TITLE_ORACLE = "hold + turn (both agents)"
 """Caption of scene 1 (the oracle's coordinated two-agent turn)."""
@@ -208,7 +209,7 @@ class DemoEpisode:
 
 
 class OracleDemoController:
-    """The scripted oracle (`callosum.envs.wrench_cube.OracleController`) behind the demo.
+    """The scripted oracle (`callosum.experiments.cube_wrench.OracleController`) behind the demo.
 
     It is a centralised script that reads the whole `env.state()`; the demo uses it as the
     upper bound, not as a policy. The adapter gives it the demo's `reset`/`act`/`observe`
@@ -222,7 +223,7 @@ class OracleDemoController:
 
     def __init__(self, config: Any) -> None:
         """Wrap a `WrenchCubeConfig` with the scripted oracle."""
-        from callosum.envs.wrench_cube import OracleController
+        from callosum.experiments.cube_wrench import OracleController
 
         self._oracle = OracleController(config)
 
@@ -243,7 +244,7 @@ class OracleDemoController:
 class PolicyDemoController:
     """Greedy `wrench_ppo` checkpoint policies behind the demo's controller protocol.
 
-    Loading and inference reuse `scripts/eval_wrench_cube.py` / `callosum.training.wrench_ppo`:
+    Loading and inference reuse `callosum/experiments/cube_wrench/eval.py` / `callosum.experiments.cube_wrench.train`:
     `load_checkpoint` reads the payload, `eval_wrench_cube.resolve_input_mode` decides the
     policy input mode (flag or checkpoint), `check_checkpoint_compat` validates it, and the
     `predicted` input is built by `LatentInputBuilder` with exactly the `reset`/`step` seam of
@@ -264,7 +265,7 @@ class PolicyDemoController:
         import eval_wrench_cube
         import torch
 
-        from callosum.training.wrench_ppo import (
+        from callosum.experiments.cube_wrench.train import (
             LatentInputBuilder,
             check_checkpoint_compat,
             config_from_payload,
@@ -307,7 +308,7 @@ class PolicyDemoController:
             bijepa.eval()
             self._builder = LatentInputBuilder(bijepa, device="cpu")
         self._policy_obs: dict[str, Any] | None = None
-        from callosum.envs._wrench_logic import AGENT_KEYS
+        from callosum.experiments.cube_wrench.logic import AGENT_KEYS
 
         self._agent_keys = tuple(AGENT_KEYS)
 
@@ -1038,7 +1039,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _configure_gl()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    from callosum.envs.wrench_cube import WrenchCubeEnv
+    from callosum.experiments.cube_wrench import WrenchCubeEnv
 
     want_oracle, want_rotator, want_oracle_sbs = _scene_wanted(args.scene)
     policy_controller = _load_policy_controller(args)

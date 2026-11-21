@@ -13,13 +13,13 @@ visibility: with `use_bijepa=True` the env stays at `partner_mode="none"` (no pr
 partner block) and each policy additionally receives the Bi-JEPA predicted partner latent
 `ẑ_j`, so its input width is `obs_size("none") + latent_dim` (28 + 32 = 60 by default)
 instead of 26/35. The Bi-JEPA module itself is trained by an auxiliary latent loss in
-`callosum.training.wrench_ppo`; its hyperparameters are flattened into this dataclass (one
+`callosum.experiments.cube_wrench.train`; its hyperparameters are flattened into this dataclass (one
 CLI flag each) because the shared argparse helper only supports scalar fields.
 
-This module is pure stdlib on purpose (same rule as `callosum.configs.wrench_cube` and
-`callosum.envs._wrench_logic`): the config must import and validate on macOS/CI, where the
+This module is pure stdlib on purpose (same rule as `callosum.experiments.cube_wrench.config` and
+`callosum.experiments.cube_wrench.logic`): the config must import and validate on macOS/CI, where the
 sandbox extra (mujoco) is absent, so every trainer flag is testable without the simulator.
-Torch is imported only by `callosum.training.wrench_ppo`.
+Torch is imported only by `callosum.experiments.cube_wrench.train`.
 
 The field groups follow the plan's step-2/3 description: the run identity, the environment /
 rollout shape, the Bi-JEPA block, the PPO hyperparameters, and the logging / evaluation /
@@ -41,7 +41,7 @@ control steps; the validation below only enforces the hard sanity conditions, so
                       or sync with `--extra sandbox-gpu`.
 
 `randomization` selects the episode-randomness level of the *environment* the run uses
-(`callosum.configs.wrench_cube.RANDOMIZATION_PRESETS`): `"default"` keeps the learnable
+(`callosum.experiments.cube_wrench.config.RANDOMIZATION_PRESETS`): `"default"` keeps the learnable
 ranges, `"harsh"` restores the harder private randomness (gain/authority spread, slips,
 start delays). The trainer and the evaluator both build their env from
 `WrenchPPOConfig.env_config()`, so a checkpoint's run preset is applied on every evaluation;
@@ -65,16 +65,16 @@ from callosum.configs.coop_tasks import (
     coop_config,
     coop_obs_size,
 )
-from callosum.configs.wrench_cube import (
+from callosum.envs._coop_logic import AGENT_KEYS as COOP_AGENT_KEYS
+from callosum.experiments.cube_wrench.config import (
     RANDOMIZATION_PRESETS,
     WrenchCubeConfig,
     wrench_cube_config,
 )
-from callosum.envs._coop_logic import AGENT_KEYS as COOP_AGENT_KEYS
-from callosum.envs._wrench_logic import (
+from callosum.experiments.cube_wrench.logic import (
     AGENT_KEYS as CUBE_AGENT_KEYS,
 )
-from callosum.envs._wrench_logic import (
+from callosum.experiments.cube_wrench.logic import (
     PARTNER_MODES,
     obs_size,
     validate_partner_mode,
@@ -92,8 +92,8 @@ INPUT_MODES = ("none", "oracle", "predicted")
 partner latent to the agent's own observation."""
 
 BACKENDS = ("cpu", "warp")
-"""Environment backends: the CPU MuJoCo loop (`callosum.training._vec_wrench`) or the batched
-mujoco_warp GPU env (`callosum.envs.wrench_cube.env_gpu`)."""
+"""Environment backends: the CPU MuJoCo loop (`callosum.experiments.cube_wrench.vec_env`) or the batched
+mujoco_warp GPU env (`callosum.experiments.cube_wrench.env_gpu`)."""
 
 
 def task_obs_size(task: str, partner_mode: str) -> int:
@@ -182,7 +182,7 @@ class WrenchPPOConfig:
     `use_bijepa=True` (see :attr:`input_mode`)."""
     num_envs: int = 128
     """Envs stepped in one Python loop per control step (the plan's training range is
-    64-256; the vectorisation is a loop, see `callosum.training._vec_wrench`)."""
+    64-256; the vectorisation is a loop, see `callosum.experiments.cube_wrench.vec_env`)."""
     rollout_steps: int = 64
     """Control steps per env per update (the plan's range is 32-128). One update therefore
     consumes `num_envs * rollout_steps` transitions."""
@@ -194,7 +194,7 @@ class WrenchPPOConfig:
     other."""
     randomization: str = "default"
     """Episode-randomness preset of the environment (`"default"` or `"harsh"`), see
-    `callosum.configs.wrench_cube.RANDOMIZATION_PRESETS`. It is part of the checkpoint's
+    `callosum.experiments.cube_wrench.config.RANDOMIZATION_PRESETS`. It is part of the checkpoint's
     config, so the evaluator rebuilds the env with the same preset as the run; only the
     private-randomness ranges differ between the presets."""
 
@@ -478,7 +478,7 @@ def parse_args(argv: Sequence[str] | None = None) -> WrenchPPOConfig:
 
     With `--resume <path>` the flags are still parsed and validated, but the training run
     itself continues with the config saved in the checkpoint (see
-    `callosum.training.wrench_ppo.run`); the runtime resources (`--backend`, `--device`)
+    `callosum.experiments.cube_wrench.train.run`); the runtime resources (`--backend`, `--device`)
     are the exception -- they are taken from the CLI, see
     `wrench_ppo.apply_runtime_overrides`.
     """

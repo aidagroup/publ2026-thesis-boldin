@@ -8,7 +8,7 @@ one-sided actuators pump a pendulum to a target amplitude and hold it). Both sha
 module and the harness in `callosum.envs.coop`.
 
 Deliberately has zero mujoco/torch dependency (the same macOS/CI rule as
-`callosum.envs._wrench_logic` and `callosum.common.visibility`): the simulator lives in
+`callosum.experiments.cube_wrench.logic` and `callosum.common.visibility`): the simulator lives in
 `callosum.envs.coop`, which CI cannot import, while everything that can be decided
 without the simulator lives here and is unit-tested locally (`tests/test_coop_logic.py`).
 

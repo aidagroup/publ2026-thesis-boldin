@@ -31,7 +31,7 @@ import sys
 
 import numpy as np
 
-from callosum.envs.wrench_cube import OracleController, WrenchCubeEnv
+from callosum.experiments.cube_wrench import OracleController, WrenchCubeEnv
 
 _ORACLE_SUCCESS_FLOOR = 0.8
 _ROTATOR_ONLY_SUCCESS_CEIL = 0.1

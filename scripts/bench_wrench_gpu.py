@@ -26,7 +26,7 @@ import time
 
 import numpy as np
 
-from callosum.envs._wrench_logic import AGENT_KEYS
+from callosum.experiments.cube_wrench.logic import AGENT_KEYS
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -88,7 +88,7 @@ def _fixed_actions(nworld: int, device: str | None = None):
 
 def bench_cpu(nworld: int, steps: int, partner_mode: str, seed: int) -> float:
     """Control steps per second of the CPU Python-loop vectorisation."""
-    from callosum.training._vec_wrench import VecWrenchCube
+    from callosum.experiments.cube_wrench.vec_env import VecWrenchCube
 
     vec = VecWrenchCube(nworld, partner_mode, seed=seed)
     try:
@@ -113,7 +113,7 @@ def bench_warp(
     use_cuda_graph: bool = True,
 ) -> tuple[float, float, bool]:
     """`(control steps/s, seconds per batch step, cuda-graph-enabled)` of the GPU backend."""
-    from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
+    from callosum.experiments.cube_wrench.env_gpu import WrenchCubeBatchGPU
 
     env = WrenchCubeBatchGPU(
         nworld,

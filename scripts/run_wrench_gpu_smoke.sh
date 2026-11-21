@@ -57,7 +57,7 @@ echo "== 2. throughput: CPU loop vs warp batch"
   --nworld 256 1024 4096 --steps "$BENCH_STEPS" --device "$DEVICE"
 
 echo "== 3. smoke training: backend=warp, 2 updates"
-WRENCH_TORCH_THREADS=1 "$PYTHON" -m callosum.training.wrench_ppo \
+WRENCH_TORCH_THREADS=1 "$PYTHON" -m callosum.experiments.cube_wrench.train \
   --backend warp --device "$DEVICE" --partner-mode oracle \
   --num-envs "$SMOKE_ENVS" --rollout-steps "$SMOKE_ROLLOUT" --total-updates 2 \
   --eval-every 1 --eval-episodes 8 --eval-envs 8 --checkpoint-every 1 \
@@ -81,7 +81,7 @@ for seed in $SEEDS; do
     fi
     echo "launch $name"
     WRENCH_TORCH_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-      setsid nohup "$PYTHON" -m callosum.training.wrench_ppo \
+      setsid nohup "$PYTHON" -m callosum.experiments.cube_wrench.train \
         --backend warp --device "$DEVICE" --partner-mode "$partner_mode" "${bijepa[@]}" \
         --seed "$seed" --exp-name "$name" --total-updates "$UPDATES" \
         --num-envs "$NUM_ENVS" --rollout-steps "$ROLLOUT_STEPS" \
@@ -92,14 +92,14 @@ done
 
 if [ "${WAIT_FULL:-0}" = "1" ]; then
   echo "waiting for warp trainers..."
-  while pgrep -f 'callosum.training.wrench_ppo.*--backend warp' >/dev/null 2>&1; do
+  while pgrep -f 'callosum.experiments.cube_wrench.train.*--backend warp' >/dev/null 2>&1; do
     sleep 15
   done
   echo "all warp trainers finished"
   for seed in $SEEDS; do
     for mode in $MODES; do
       name="wrench_warp_${mode}_s${seed}"
-      "$PYTHON" scripts/eval_wrench_cube.py \
+      "$PYTHON" callosum/experiments/cube_wrench/eval.py \
         --checkpoint "$RUNS_DIR/$name/latest.pt" --input-mode "$mode" \
         --backend warp --device "$DEVICE" --num-envs 64 \
         --episodes 128 --seed 0 --out "results_${name}.json"

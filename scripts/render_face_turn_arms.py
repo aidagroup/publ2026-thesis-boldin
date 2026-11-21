@@ -74,7 +74,9 @@ import time
 from pathlib import Path
 
 import numpy as np
-from _render_utils import (
+from PIL import Image
+
+from callosum.common.render_utils import (
     FAILURE_COLOR,
     SUCCESS_COLOR,
     annotate_frame,
@@ -82,7 +84,6 @@ from _render_utils import (
     write_gif,
     write_mp4,
 )
-from PIL import Image
 
 LAVAPIPE_ICD = Path("/usr/share/vulkan/icd.d/lvp_icd.json")
 """Mesa software Vulkan ICD the pod installs with `apt-get install mesa-vulkan-drivers`."""

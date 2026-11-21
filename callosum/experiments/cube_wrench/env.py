@@ -24,7 +24,7 @@ episodes, so the write is per reset; a future GPU-vectorised trainer will need i
 per-env model copies -- the trainer of this step is the single-env loop).
 
 * observation: one flat `spaces.Box` per agent, built by the pure
-  `callosum.envs._wrench_logic.build_observation` from a role-tagged `values` dict (own
+  `callosum.experiments.cube_wrench.logic.build_observation` from a role-tagged `values` dict (own
   wrench + own private parameters + shared cube state + goal/time, plus the partner block
   under `partner_mode="oracle"`; the "none" mode never sees the partner keys);
 * reward: the shared team reward (`success_bonus - step_penalty` on the success step,
@@ -33,7 +33,7 @@ per-env model copies -- the trainer of this step is the single-env loop).
 * termination: success (`success`) or failure (`failure`); truncation at
   `max_control_steps`.
 
-The config (`callosum.configs.wrench_cube.WrenchCubeConfig`) is the source of truth for
+The config (`callosum.experiments.cube_wrench.config.WrenchCubeConfig`) is the source of truth for
 the decision timing, the hinge range and the DOF parameters written into the model
 (`model.opt.timestep`, `model.jnt_range`, `model.dof_*`); the XML carries their defaults
 and owns the geometry and the two masses (see the config docstring: writing `body_mass` at
@@ -56,8 +56,8 @@ import mujoco
 import numpy as np
 from gymnasium import spaces
 
-from callosum.configs.wrench_cube import WrenchCubeConfig
-from callosum.envs._wrench_logic import (
+from callosum.experiments.cube_wrench.config import WrenchCubeConfig
+from callosum.experiments.cube_wrench.logic import (
     AGENT_KEYS,
     CUBE_STATE_FIELDS,
     EpisodeRandomization,
