@@ -21,7 +21,7 @@ but the pod checkout is usually synced WITHOUT that extra and `uv sync --frozen`
 package again (it is not in the selected extra set), so before a run either sync with the
 extra or install into the same `python` that runs the trainer (a ~10 s cached install):
 
-    uv pip install --python /root/.callosum/venv/bin/python mujoco-warp
+    uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1
 
 This module imports `mujoco`, `mujoco_warp`, `warp` and `torch` lazily from the constructor, so
 importing the package on a machine without the GPU stack fails only when an instance is built
@@ -62,11 +62,16 @@ fails loudly instead of silently producing a wrong observation.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import torch
+
+try:  # `torch` is part of the `train` extra; the module must still import without it.
+    import torch
+except ImportError:  # pragma: no cover - the GPU backend itself always needs torch
+    torch = None  # type: ignore[assignment]
 
 from callosum.configs.wrench_cube import WrenchCubeConfig
 from callosum.envs._wrench_logic import (
@@ -136,6 +141,8 @@ def pack_episode_randomization(
         `layer_initial_angle` (nworld,), `layer_frictionloss` (nworld,), `impulse_active`
         (nworld,) bool, `impulse_step` (nworld,) int64 and `impulse_force` (nworld, 3).
     """
+    if torch is None:  # pragma: no cover - only reachable without the train extra
+        raise ImportError("pack_episode_randomization needs torch; install the `train` extra")
     if not records:
         raise ValueError("records must contain at least one EpisodeRandomization")
     device = torch.device(device)
@@ -365,6 +372,8 @@ class WrenchCubeBatchGPU:
             ValueError: on a non-positive `nworld`, a bad partner mode or a non-CUDA device.
             RuntimeError: if the model layout does not match this backend's assumptions.
         """
+        if torch is None:  # pragma: no cover - only reachable without the train extra
+            raise ImportError("WrenchCubeBatchGPU needs torch; install the `train` extra")
         if nworld < 1:
             raise ValueError(f"nworld must be >= 1, got {nworld}")
         validate_partner_mode(partner_mode)
@@ -380,6 +389,12 @@ class WrenchCubeBatchGPU:
         wp.set_device(device)
         self._warp = wp
         self._mujoco_warp = mujoco_warp
+        self._software_versions = {
+            "mujoco": mujoco.__version__,
+            "mujoco_warp": getattr(mujoco_warp, "__version__", "unknown"),
+            "warp": wp.__version__,
+            "torch": torch.__version__,
+        }
 
         self.device = device
         self._torch_device = torch.device(device)
@@ -427,7 +442,14 @@ class WrenchCubeBatchGPU:
         self._qpos = wp.to_torch(self._data.qpos)
         self._qvel = wp.to_torch(self._data.qvel)
         self._xfrc = wp.to_torch(self._data.xfrc_applied)
+        self._qacc = wp.to_torch(self._data.qacc)
         self._qacc_warmstart = wp.to_torch(self._data.qacc_warmstart)
+        self._qfrc_applied = wp.to_torch(self._data.qfrc_applied)
+        self._time = wp.to_torch(self._data.time)
+        try:  # nu == 0 for the reduced model; keep the field optional across warp versions
+            self._ctrl = wp.to_torch(self._data.ctrl)
+        except (AttributeError, TypeError):  # pragma: no cover - warp-version dependent
+            self._ctrl = None
         self._friction = wp.to_torch(self._model.dof_frictionloss)
         if self._qpos.dtype != torch.float32:
             raise RuntimeError(f"unexpected qpos dtype {self._qpos.dtype}")
@@ -520,14 +542,30 @@ class WrenchCubeBatchGPU:
                     self._physics_step(self._model, self._data)
             return capture.graph
         except Exception as exc:  # noqa: BLE001  # pragma: no cover - toolkit-dependent
-            # A capture failure must never break the env: fall back to the eager loop.
+            # A capture failure must never break the env: warn once and fall back to eager.
             self._cuda_graph_error = f"{type(exc).__name__}: {exc}"
+            warnings.warn(
+                "CUDA graph capture of the physics substep loop failed "
+                f"({self._cuda_graph_error}); falling back to the eager loop, which is "
+                "~20x slower per control step",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return None
 
     @property
     def cuda_graph(self) -> bool:
         """Whether the physics substep loop is replayed from a captured CUDA graph."""
         return self._cuda_graph is not None
+
+    @property
+    def cuda_graph_error(self) -> str | None:
+        """Why the CUDA graph capture failed (`None` when the graph is active)."""
+        return self._cuda_graph_error
+
+    def software_versions(self) -> str:
+        """The simulator/GPU software versions of this env, for the trainer's startup log."""
+        return " | ".join(f"{name} {version}" for name, version in self._software_versions.items())
 
     # --- buffers ------------------------------------------------------------------------
     def _new_agent_randomization_buffers(self, nworld: int) -> dict[str, torch.Tensor]:
@@ -579,10 +617,7 @@ class WrenchCubeBatchGPU:
             self._qpos[:, 3] = 1.0
             self._qpos[:, self._hinge_qpos] = episode["layer_initial_angle"]
             self._qvel.zero_()
-            # The CPU env's `mj_resetData` also drops the solver warmstart; the Warp step
-            # starts the next world from it, so it must be zeroed on every reset to keep the
-            # physics identical to a freshly reset CPU env.
-            self._qacc_warmstart.zero_()
+            self._reset_solver_state(None)
             self._step.zero_()
             self._friction[:, self._hinge_dof].copy_(episode["layer_frictionloss"])
             self._write_pos = 0
@@ -597,7 +632,7 @@ class WrenchCubeBatchGPU:
             self._qpos[indices, 3] = 1.0
             self._qpos[indices, self._hinge_qpos] = episode["layer_initial_angle"]
             self._qvel[indices] = 0.0
-            self._qacc_warmstart[indices] = 0.0
+            self._reset_solver_state(indices)
             self._step[indices] = 0
             self._friction[:, self._hinge_dof].index_copy_(
                 0, indices, episode["layer_frictionloss"]
@@ -626,6 +661,31 @@ class WrenchCubeBatchGPU:
                 self._last_applied[role][indices] = 0.0
                 self._last_command[role][indices] = 0.0
                 self._delay[role][indices] = 0.0
+
+    def _reset_solver_state(self, indices: torch.Tensor | None) -> None:
+        """Zero the solver/actuator state the CPU env's `mj_resetData` clears on reset.
+
+        `mj_resetData` resets the whole `mjData`: besides `qpos`/`qvel` it drops the solver
+        warmstart, `qacc`, the applied generalised forces, the controls, `time` and the
+        external forces. A fresh episode must start from that state (otherwise a residual
+        `qacc_warmstart`/`qacc` of the old episode changes the first substep), so every reset
+        zeroes the corresponding Warp data fields too -- for all worlds or only the
+        auto-reset rows (`indices`).
+        """
+        data_fields = (
+            self._qacc,
+            self._qacc_warmstart,
+            self._qfrc_applied,
+            self._xfrc,
+            self._time,
+        )
+        if self._ctrl is not None:
+            data_fields = data_fields + (self._ctrl,)
+        for data_field in data_fields:
+            if indices is None:
+                data_field.zero_()
+            else:
+                data_field[indices] = 0.0
 
     @staticmethod
     def _agent_params(fields: dict[str, torch.Tensor]) -> torch.Tensor:

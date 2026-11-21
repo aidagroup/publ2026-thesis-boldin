@@ -20,8 +20,12 @@ checkpoint and the requested mode fails before anything is built
 (`wrench_ppo.check_checkpoint_compat`), including the policy input width.
 
 Greedy: the actions are the policies' distribution means, clipped to the env's `[-1, 1]`
-wrench box. The episode seeds are `--seed + i`, so a run is reproducible, and the env's
-randomisation (latency, gain, authority, slip, start delay, impulse) is the training one.
+wrench box. The evaluation is a FIXED held-out seed set: episode `k` uses the seed
+`--seed + EVAL_SEED_OFFSET + k` (`EVAL_SEED_OFFSET = 10_000_019`, outside the training seed
+stream) and only the FIRST episode of each world is recorded (success, failure or the
+350-step truncation), with `--num-envs` only controlling how many worlds step together. The
+env's randomisation preset is read from the checkpoint's config, so a run is evaluated with
+the same environment variant it was trained on.
 
 The aggregation reuses `callosum.eval.metrics` (`EpisodeRecord`, `success_rate`,
 `time_to_success_stats`) -- one record per episode, with the decision count equal to the
@@ -45,12 +49,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from callosum.configs.wrench_cube import WrenchCubeConfig
 from callosum.configs.wrench_ppo import BACKENDS, INPUT_MODES
 from callosum.envs._wrench_logic import AGENT_KEYS, PARTNER_MODES, obs_size
 from callosum.envs.wrench_cube import WrenchCubeEnv
 from callosum.eval.metrics import EpisodeRecord, success_rate, time_to_success_stats
 from callosum.training.wrench_ppo import (
+    EVAL_SEED_OFFSET,
     LatentInputBuilder,
     check_checkpoint_compat,
     config_from_payload,
@@ -94,8 +98,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--num-envs",
         type=int,
-        default=32,
-        help="worlds stepped together by --backend warp (the episode count is still --episodes)",
+        default=128,
+        help=(
+            "worlds stepped together by --backend warp; the evaluation covers --episodes "
+            "fixed seeds in batches of this size, so any value works"
+        ),
     )
     parser.add_argument("--out", default="results.json", help="JSON output file of the metrics")
     args = parser.parse_args(argv)
@@ -192,64 +199,88 @@ def run_batched(
     seed: int,
     builder: LatentInputBuilder | None = None,
 ) -> tuple[list[EpisodeRecord], list[dict]]:
-    """Run `episodes` greedy episodes in the batched GPU env, one lockstep batch at a time.
+    """Greedy episodes on a FIXED held-out seed set, one first episode per world.
 
-    The env is a `callosum.envs.wrench_cube.env_gpu.WrenchCubeBatchGPU` (typed loosely so
-    this module needs no mujoco_warp import): it auto-resets finished worlds and returns the
-    episode statistics of the worlds that ended on each step. The greedy policy input is the
-    same as in training (the env observation, plus the Bi-JEPA latent under `predicted`).
+    The old protocol collected the first `episodes` finished episodes of an auto-resetting
+    batch env; success-heavy short episodes then dominated (a world could contribute several
+    episodes) and 350-step truncations were almost never collected. This version resets world
+    `i` of a batch with exactly the seed `seed + <batch offset> + i` and records only that
+    world's FIRST episode; it steps until the first episode of every requested world has
+    finished (success, failure or truncation). `episodes > num_envs` is handled by covering
+    the seeds in consecutive batches of worlds, so `--num-envs` only controls the batch size.
 
     Args:
         env: The GPU batch env (`reset`, `step`, `num_envs`, `config`, `torch_io=True`).
         policies: `[holder_policy, rotator_policy]`, on the env's CUDA device.
-        episodes: Number of finished episodes to collect.
-        seed: Base episode seed of the evaluation (world `i` starts from `seed + i`).
+        episodes: Number of held-out episodes (one per seed).
+        seed: Base episode seed; episode `k` uses `seed + k` (the caller adds
+            `EVAL_SEED_OFFSET`).
         builder: The `predicted` run's `LatentInputBuilder`, or `None`.
 
     Returns:
-        `(records, infos)` exactly like the CPU path of this script (trimmed to `episodes`).
+        `(records, infos)` exactly like the CPU path of this script.
     """
-    obs = env.reset(seed=seed)
-    inputs = builder.reset(obs) if builder is not None else obs
+    num_envs = int(env.num_envs)
+    max_control_steps = int(env.config.max_control_steps)
     records: list[EpisodeRecord] = []
     infos: list[dict] = []
-    steps = 0
-    max_steps = (episodes // int(env.num_envs) + 2) * int(env.config.max_control_steps)
     while len(records) < episodes:
-        if steps >= max_steps:
-            raise RuntimeError(
-                f"evaluation did not finish {episodes} episodes in {max_steps} steps "
-                f"({len(records)} finished); the GPU env's episode budget is broken"
-            )
-        actions = {}
-        for name, policy in zip(AGENT_KEYS, policies):
-            action = policy.get_action(inputs[name], deterministic=True)
-            actions[name] = torch.clamp(action, -1.0, 1.0)
-        result = env.step(actions)
-        obs = result.obs
-        if builder is not None:
-            done = result.terminated | result.truncated
-            inputs = builder.step(obs, done.float())
-        else:
-            inputs = obs
-        for index, length in enumerate(result.finished_lengths):
-            success = bool(result.finished_successes[index])
-            records.append(
-                EpisodeRecord(
-                    success=success,
-                    time_to_success=int(length) if success else None,
-                    decisions=int(length),
+        batch = min(num_envs, episodes - len(records))
+        obs = env.reset(seed=seed + len(records))
+        inputs = builder.reset(obs) if builder is not None else obs
+        recorded = [False] * num_envs
+        for _step in range(max_control_steps + 1):
+            actions = {}
+            for name, policy in zip(AGENT_KEYS, policies):
+                action = policy.get_action(inputs[name], deterministic=True)
+                actions[name] = torch.clamp(action, -1.0, 1.0)
+            result = env.step(actions)
+            terminated = result.terminated.cpu().numpy().astype(bool)
+            truncated = result.truncated.cpu().numpy().astype(bool)
+            done = terminated | truncated
+            if builder is not None:
+                # The builder's history window lives on the CUDA device, so the done mask
+                # must stay a device tensor (the numpy mask is only for indexing/stats).
+                done_tensor = (result.terminated | result.truncated).float()
+                inputs = builder.step(result.obs, done_tensor)
+            else:
+                inputs = result.obs
+            done_indices = np.flatnonzero(done)
+            if len(done_indices) != len(result.finished_lengths):
+                raise RuntimeError(
+                    "GPU env contract broken: "
+                    f"{len(done_indices)} worlds finished but "
+                    f"{len(result.finished_lengths)} finished statistics reported"
                 )
+            for position, world in enumerate(done_indices):
+                if world >= batch or recorded[world]:
+                    continue
+                recorded[world] = True
+                success = bool(result.finished_successes[position])
+                length = int(result.finished_lengths[position])
+                records.append(
+                    EpisodeRecord(
+                        success=success,
+                        time_to_success=length if success else None,
+                        decisions=length,
+                    )
+                )
+                infos.append(
+                    {
+                        "angle_deg": float(result.finished_angles[position]),
+                        "drift_pos": float(result.finished_drift_pos[position]),
+                        "drift_rot": float(result.finished_drift_rot[position]),
+                    }
+                )
+            if all(recorded[:batch]):
+                break
+        else:
+            raise RuntimeError(
+                "evaluation did not finish the first episode of every world within "
+                f"{max_control_steps + 1} steps ({sum(recorded[:batch])}/{batch} recorded); "
+                "the GPU env's episode budget is broken"
             )
-            infos.append(
-                {
-                    "angle_deg": float(result.finished_angles[index]),
-                    "drift_pos": float(result.finished_drift_pos[index]),
-                    "drift_rot": float(result.finished_drift_rot[index]),
-                }
-            )
-        steps += 1
-    return records[:episodes], infos[:episodes]
+    return records, infos
 
 
 def summarize(records: list[EpisodeRecord], infos: list[dict]) -> dict:
@@ -284,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{latent_dim}) but its saved config has use_bijepa={cfg.use_bijepa} and "
             f"latent_dim={cfg.latent_dim}"
         )
+    env_config = cfg.env_config()
     policy_device = args.device if args.backend == "warp" else "cpu"
     policies = make_policies(env_mode, policy_device, latent_dim=latent_dim)
     load_weights(payload, policies)
@@ -298,8 +330,10 @@ def main(argv: list[str] | None = None) -> int:
     infos: list[dict] = []
     print(
         f"eval {args.checkpoint} | input_mode {input_mode} (env partner_mode {env_mode}) | "
-        f"backend {args.backend} | policy input {obs_size(env_mode) + latent_dim} | "
-        f"{args.episodes} episodes from seed {args.seed} | greedy policies",
+        f"backend {args.backend} | randomization {cfg.randomization} | "
+        f"policy input {obs_size(env_mode) + latent_dim} | "
+        f"{args.episodes} episodes from held-out seed {args.seed + EVAL_SEED_OFFSET} | "
+        f"greedy policies",
         flush=True,
     )
     if args.backend == "warp":
@@ -307,20 +341,24 @@ def main(argv: list[str] | None = None) -> int:
 
         env = WrenchCubeBatchGPU(
             min(args.episodes, args.num_envs),
-            config=WrenchCubeConfig(),
+            config=env_config,
             partner_mode=env_mode,
             seed=args.seed,
             device=args.device,
         )
         try:
-            records, infos = run_batched(env, policies, args.episodes, args.seed, builder)
+            records, infos = run_batched(
+                env, policies, args.episodes, args.seed + EVAL_SEED_OFFSET, builder
+            )
         finally:
             env.close()
     else:
-        env = WrenchCubeEnv(partner_mode=env_mode)
+        env = WrenchCubeEnv(config=env_config, partner_mode=env_mode)
         try:
             for episode in range(args.episodes):
-                record, info = run_episode(env, policies, args.seed + episode, builder)
+                record, info = run_episode(
+                    env, policies, args.seed + EVAL_SEED_OFFSET + episode, builder
+                )
                 records.append(record)
                 infos.append(info)
         finally:
@@ -332,9 +370,15 @@ def main(argv: list[str] | None = None) -> int:
         "input_mode": input_mode,
         "partner_mode": env_mode,
         "backend": args.backend,
+        "randomization": cfg.randomization,
         "policy_input_size": obs_size(env_mode) + latent_dim,
         "latent_dim": latent_dim,
         "seed": args.seed,
+        "eval_seed_offset": EVAL_SEED_OFFSET,
+        "episode_seed_range": [
+            args.seed + EVAL_SEED_OFFSET,
+            args.seed + EVAL_SEED_OFFSET + args.episodes - 1,
+        ],
         "format": payload.get("format"),
         "checkpoint_update": payload.get("update"),
         **summary,

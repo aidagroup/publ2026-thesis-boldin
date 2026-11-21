@@ -51,6 +51,75 @@ def test_warp_backend_requires_a_cuda_device() -> None:
     assert WrenchPPOConfig(backend="warp", device="cuda:1").device == "cuda:1"
 
 
+def test_randomization_presets_build_the_documented_env_configs() -> None:
+    """`env_config()` is the single source of the env randomisation of a run."""
+    from callosum.configs.wrench_cube import WrenchCubeConfig, wrench_cube_config
+
+    assert WrenchPPOConfig().randomization == "default"
+    default_env = WrenchPPOConfig().env_config()
+    assert isinstance(default_env, WrenchCubeConfig)
+    assert default_env == WrenchCubeConfig()
+    assert default_env.latency_range == (0.1, 0.3)
+
+    harsh = WrenchPPOConfig(randomization="harsh").env_config()
+    # The harsh preset is the previous (harder) private randomness; physics/reward unchanged.
+    assert harsh.latency_range == (0.1, 0.3)
+    assert harsh.gain_range == (0.5, 1.5)
+    assert harsh.limit_scale_range == (0.4, 1.6)
+    assert harsh.slip_prob_range == (0.2, 0.5)
+    assert harsh.slip_decisions_range == (2, 5)
+    assert harsh.start_delay_range == (0.0, 0.5)
+    for name in (
+        "dt",
+        "control_every",
+        "goal_angle",
+        "success_bonus",
+        "step_penalty",
+        "failure_penalty",
+        "core_ang_damping",
+        "hinge_damping",
+    ):
+        assert getattr(harsh, name) == getattr(default_env, name)
+    # `wrench_cube_config` is a factory and still validates a bad preset name.
+    assert wrench_cube_config("default") == default_env
+    with pytest.raises(ValueError, match="randomization"):
+        wrench_cube_config("insane")
+    with pytest.raises(ValueError, match="randomization"):
+        WrenchPPOConfig(randomization="insane")
+
+
+def test_cli_exposes_the_randomization_preset() -> None:
+    assert parse_args(["--randomization", "harsh"]).randomization == "harsh"
+    assert parse_args([]).randomization == "default"
+
+
+def test_parse_args_with_explicit_reports_the_given_flags() -> None:
+    from callosum.configs.wrench_ppo import parse_args_with_explicit
+
+    cfg, explicit = parse_args_with_explicit(["--backend", "warp", "--device", "cuda"])
+    assert cfg.backend == "warp" and cfg.device == "cuda"
+    assert explicit == frozenset({"backend", "device"})
+    cfg, explicit = parse_args_with_explicit([])
+    assert cfg.backend == "cpu" and explicit == frozenset()
+
+
+def test_resume_keeps_saved_hyperparameters_but_takes_runtime_resources_from_cli() -> None:
+    from callosum.training.wrench_ppo import apply_runtime_overrides
+
+    saved = WrenchPPOConfig(
+        backend="cpu", device="cpu", num_envs=1024, rollout_steps=64, total_updates=300
+    )
+    requested = WrenchPPOConfig(backend="warp", device="cuda", num_envs=2, total_updates=1)
+    merged = apply_runtime_overrides(saved, requested, frozenset({"backend", "device"}))
+    assert merged.backend == "warp" and merged.device == "cuda"  # runtime resources: CLI wins
+    assert merged.num_envs == 1024 and merged.total_updates == 300  # training setup: saved wins
+    # No explicit runtime flags -> the saved runtime is kept.
+    assert apply_runtime_overrides(saved, WrenchPPOConfig(), frozenset()).backend == "cpu"
+    # An invalid merged pair is rejected by the normal config validation (warp needs CUDA).
+    with pytest.raises(ValueError, match="CUDA"):
+        apply_runtime_overrides(saved, requested, frozenset({"backend"}))
+
+
 def test_unknown_backend_is_rejected() -> None:
     with pytest.raises(ValueError, match="backend"):
         WrenchPPOConfig(backend="gpu")
@@ -189,7 +258,7 @@ def test_randomization_packing_matches_the_cpu_sampler() -> None:
 # --- the batch env on a CUDA device -------------------------------------------------------
 
 
-def _gpu_env(nworld: int, partner_mode: str = "none"):
+def _gpu_env(nworld: int, partner_mode: str = "none", **kwargs):
     """Build a `WrenchCubeBatchGPU` or skip when the GPU stack/CUDA is unavailable."""
     env_gpu = _gpu_module()
     pytest.importorskip("mujoco_warp")
@@ -198,7 +267,7 @@ def _gpu_env(nworld: int, partner_mode: str = "none"):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     return env_gpu, env_gpu.WrenchCubeBatchGPU(
-        nworld, partner_mode=partner_mode, seed=0, device="cuda"
+        nworld, partner_mode=partner_mode, seed=0, device="cuda", **kwargs
     )
 
 
@@ -331,6 +400,7 @@ def test_checkpoint_keeps_the_backend_field(tmp_path) -> None:
     cfg = WrenchPPOConfig(
         backend="warp",
         device="cuda",
+        randomization="harsh",
         num_envs=4,
         rollout_steps=8,
         num_minibatches=2,
@@ -346,6 +416,12 @@ def test_checkpoint_keeps_the_backend_field(tmp_path) -> None:
     restored = config_from_payload(payload)
     assert restored.backend == "warp" and restored.device == "cuda"
     assert payload["config"]["backend"] == "warp"
+    assert restored.randomization == "harsh"
+    assert payload["config"]["randomization"] == "harsh"
+    # S1: the checkpoint stores the CUDA generator state too (None on a CPU-only machine).
+    assert "torch_cuda" in payload["rng"]
+    if torch.cuda.is_available():
+        assert payload["rng"]["torch_cuda"] is not None
     assert payload["policy_input_size"] == cfg.policy_input_size
 
 
@@ -381,11 +457,12 @@ def test_evaluate_greedy_hands_cuda_style_tensors_to_a_torch_io_env() -> None:
             self._elapsed += 1
             done = self._elapsed >= self._episode_steps
             finished = self.num_envs if done else 0
+            truncated = torch.full((self.num_envs,), bool(done), dtype=torch.bool)
             return types.SimpleNamespace(
                 obs=self._obs(),
                 reward=torch.zeros(self.num_envs),
                 terminated=torch.zeros(self.num_envs, dtype=torch.bool),
-                truncated=torch.zeros(self.num_envs, dtype=torch.bool),
+                truncated=truncated,
                 final_obs=self._obs(),
                 finished_returns=[1.0] * finished,
                 finished_lengths=[self._episode_steps] * finished,
@@ -398,3 +475,199 @@ def test_evaluate_greedy_hands_cuda_style_tensors_to_a_torch_io_env() -> None:
     summary = evaluate_greedy(policies, vec, episodes=2)
     assert summary.episodes == 2
     assert summary.success_rate == 1.0
+
+
+def test_cuda_graph_replay_is_bit_identical_to_the_eager_loop() -> None:
+    """S3: graph capture is only a launch optimisation, not a different physics path."""
+    import torch
+
+    from callosum.envs._wrench_logic import AGENT_KEYS
+
+    _env_gpu, graph_env = _gpu_env(3, partner_mode="oracle")
+    _env_gpu, eager_env = _gpu_env(3, partner_mode="oracle", use_cuda_graph=False)
+    assert graph_env.cuda_graph and eager_env.cuda_graph_error is None
+    try:
+        graph_env.reset(seed=11)
+        eager_env.reset(seed=11)
+        torch.manual_seed(99)
+        for _ in range(5):
+            actions = torch.rand((3, 6), device="cuda") * 2.0 - 1.0
+            graph_step = graph_env.step({role: actions for role in AGENT_KEYS})
+            eager_step = eager_env.step({role: actions for role in AGENT_KEYS})
+            for role in AGENT_KEYS:
+                assert torch.equal(graph_step.obs[role], eager_step.obs[role])
+            assert torch.equal(graph_step.reward, eager_step.reward)
+            for field in ("qpos", "qvel"):
+                assert torch.equal(graph_env.state()[field], eager_env.state()[field])
+    finally:
+        graph_env.close()
+        eager_env.close()
+
+
+def test_two_envs_with_the_same_seed_and_actions_are_bit_identical() -> None:
+    """S8: the same seed + action sequence must reproduce the trajectory exactly."""
+    import torch
+
+    from callosum.envs._wrench_logic import AGENT_KEYS
+
+    _env_gpu, first = _gpu_env(4, partner_mode="oracle")
+    _env_gpu, second = _gpu_env(4, partner_mode="oracle")
+    try:
+        first.reset(seed=5)
+        second.reset(seed=5)
+        torch.manual_seed(7)
+        for _ in range(10):
+            actions = torch.rand((4, 6), device="cuda") * 2.0 - 1.0
+            step_first = first.step({role: actions for role in AGENT_KEYS})
+            step_second = second.step({role: actions for role in AGENT_KEYS})
+            for role in AGENT_KEYS:
+                assert torch.equal(step_first.obs[role], step_second.obs[role])
+            assert torch.equal(step_first.reward, step_second.reward)
+            assert torch.equal(step_first.terminated, step_second.terminated)
+            assert torch.equal(step_first.truncated, step_second.truncated)
+            for field in ("qpos", "qvel"):
+                assert torch.equal(first.state()[field], second.state()[field])
+    finally:
+        first.close()
+        second.close()
+
+
+def test_checkpoint_restores_the_cuda_rng_state(tmp_path) -> None:
+    """S1: a warp run's GPU policy sampling is reproducible after `--resume`."""
+    import torch
+
+    pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    from callosum.training.wrench_ppo import (
+        _restore_rng,
+        _rng_payload,
+        load_checkpoint,
+        make_policies,
+        save_checkpoint,
+    )
+
+    cfg = WrenchPPOConfig(backend="warp", device="cuda", total_updates=1)
+    policies = make_policies("none")
+    optimizers = [torch.optim.Adam(policy.parameters(), lr=1e-3) for policy in policies]
+    torch.cuda.manual_seed(1234)
+    expected = torch.cuda.get_rng_state_all()
+    path = tmp_path / "latest.pt"
+    save_checkpoint(path, policies, optimizers, cfg, 1, 1)
+    payload = load_checkpoint(path)
+    torch.cuda.manual_seed(999)
+    assert not all(
+        torch.equal(left, right)
+        for left, right in zip(expected, torch.cuda.get_rng_state_all(), strict=True)
+    )
+    _restore_rng(payload["rng"])
+    restored = torch.cuda.get_rng_state_all()
+    assert all(torch.equal(left, right) for left, right in zip(expected, restored, strict=True))
+    # `_rng_payload` itself round-trips the CPU generator too.
+    rng = _rng_payload()
+    assert torch.equal(rng["torch"], torch.get_rng_state())
+
+
+# --- trainer rollout on a tensor (torch_io) vec env, with truncation bootstrap -------------
+
+
+class _ToyTorchVec:
+    """A mujoco-free tensor-contract (`torch_io`) vec env with truncation-only episodes.
+
+    Every world truncates after `episode_steps` steps (success flag True, so the evaluation
+    numbers are simple), returns CUDA-style tensors and exercises the trainer's `torch_io`
+    branch: actions arrive as tensors, observations/rewards/flags are tensors, and
+    `final_obs` is the true last observation of the truncated episode (the GAE bootstrap).
+    """
+
+    torch_io = True
+
+    def __init__(self, num_envs: int, obs_dim: int, episode_steps: int = 3) -> None:
+        import types
+
+        self.num_envs = num_envs
+        self.obs_dim = obs_dim
+        self.config = types.SimpleNamespace(max_control_steps=episode_steps)
+        self._episode_steps = episode_steps
+        self._elapsed = 0
+        self._episode_return = np.zeros(num_envs)
+        self._episode_length = np.zeros(num_envs, dtype=np.int64)
+
+    def reset(self, seed: int | None = None) -> dict:
+
+        del seed
+        self._elapsed = 0
+        self._episode_return[:] = 0.0
+        self._episode_length[:] = 0
+        return self._obs()
+
+    def _obs(self) -> dict:
+        import torch
+
+        return {name: torch.zeros(self.num_envs, self.obs_dim) for name in _AGENT_KEYS_IMPORT}
+
+    def step(self, actions: dict) -> object:
+        import types
+
+        import torch
+
+        assert all(torch.is_tensor(value) for value in actions.values())
+        self._elapsed += 1
+        truncated = np.full(self.num_envs, self._elapsed >= self._episode_steps)
+        terminated = np.zeros(self.num_envs, dtype=bool)
+        reward = np.full(self.num_envs, -0.01)
+        self._episode_return += reward
+        self._episode_length += 1
+        done = terminated | truncated
+        final_obs = self._obs()
+        obs = self._obs()
+        finished = int(done.sum())
+        returns = [float(value) for value in self._episode_return[done]]
+        lengths = [int(value) for value in self._episode_length[done]]
+        self._episode_return[done] = 0.0
+        self._episode_length[done] = 0
+        self._elapsed = 0 if done.all() else self._elapsed
+        return types.SimpleNamespace(
+            obs=obs,
+            reward=torch.as_tensor(reward, dtype=torch.float32),
+            terminated=torch.as_tensor(terminated),
+            truncated=torch.as_tensor(truncated),
+            final_obs=final_obs,
+            finished_returns=returns,
+            finished_lengths=lengths,
+            finished_successes=[True] * finished,
+            finished_angles=[90.0] * finished,
+        )
+
+
+_AGENT_KEYS_IMPORT = ("holder", "rotator")
+
+
+def test_training_loop_torch_io_vec_runs_with_truncation_bootstrap(tmp_path) -> None:
+    """S6/NIT: the GPU (tensor) rollout branch, incl. the GAE truncation bootstrap, runs."""
+    torch = pytest.importorskip("torch")
+    from callosum.envs._wrench_logic import obs_size
+    from callosum.training import wrench_ppo
+
+    torch.manual_seed(0)
+    cfg = WrenchPPOConfig(
+        exp_name="toy_torch",
+        num_envs=4,
+        rollout_steps=8,
+        num_minibatches=2,
+        update_epochs=1,
+        total_updates=1,
+        eval_every=1,
+        eval_episodes=2,
+        eval_envs=2,
+        checkpoint_every=1,
+        target_kl=None,
+    )
+    run_dir = tmp_path / "toy_torch"
+    run_dir.mkdir()
+    train_vec = _ToyTorchVec(cfg.num_envs, obs_size("none"))
+    eval_vec = _ToyTorchVec(cfg.eval_envs, obs_size("none"))
+    wrench_ppo.train(cfg, run_dir, train_vec, eval_vec)
+    payload = wrench_ppo.load_checkpoint(run_dir / "latest.pt")
+    assert payload["update"] == 1
+    assert payload["global_step"] == cfg.batch_size

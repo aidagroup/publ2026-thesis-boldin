@@ -35,10 +35,11 @@ sandbox = [
 # Batched GPU backend of the same sandbox (MuJoCo-Warp: Linux + NVIDIA/CUDA only). Optional
 # and linux-marked in `uv.lock`, so macOS/CI resolution is untouched; the pod is normally
 # synced WITHOUT this extra, which removes it from the venv, so install it before a GPU run:
-#   uv pip install --python /root/.callosum/venv/bin/python mujoco-warp
-# (see callosum/envs/wrench_cube/env_gpu.py).
+#   uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1
+# (pinned: the env's API notes are verified against exactly 4.0.1; see
+# callosum/envs/wrench_cube/env_gpu.py).
 sandbox-gpu = [
-    "mujoco-warp ; sys_platform == 'linux'",
+    "mujoco-warp==4.0.1 ; sys_platform == 'linux'",
 ]
 dev = [
     "ruff",

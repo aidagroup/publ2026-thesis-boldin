@@ -333,11 +333,12 @@ class _FakeVec:
         self._elapsed += 1
         done = self._elapsed >= self._episode_steps
         finished = self.num_envs if done else 0
+        truncated = torch.full((self.num_envs,), bool(done), dtype=torch.bool)
         return types.SimpleNamespace(
             obs=self._obs(),
             reward=torch.zeros(self.num_envs),
             terminated=torch.zeros(self.num_envs, dtype=torch.bool),
-            truncated=torch.zeros(self.num_envs, dtype=torch.bool),
+            truncated=truncated,
             final_obs=self._obs(),
             infos=[{} for _ in range(self.num_envs)],
             finished_returns=[1.0] * finished,
@@ -347,14 +348,15 @@ class _FakeVec:
         )
 
 
-def test_evaluate_greedy_aggregates_finished_episodes_and_trims_overrun() -> None:
+def test_evaluate_greedy_covers_fixed_seeds_in_batches_of_worlds() -> None:
+    """The fixed-seed protocol covers `episodes` seeds in ceil(episodes / num_envs) batches."""
     cfg = WrenchPPOConfig()
     policies = make_policies("none")
     vec = _FakeVec(num_envs=3, obs_dim=cfg.obs_size, episode_steps=4)
     summary = evaluate_greedy(policies, vec, episodes=5)
     assert isinstance(summary, EvalSummary)
-    # 5 finished episodes requested out of rounds of 3: the second round overruns and the
-    # summary is trimmed to exactly 5 episodes (not 6).
+    # 5 held-out seeds over batches of 3 worlds: the second batch records only its first 2
+    # world episodes (exactly the requested 5, one first episode per seed).
     assert summary.episodes == 5
     assert summary.success_rate == 1.0
     assert summary.mean_return == 1.0

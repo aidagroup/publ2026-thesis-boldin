@@ -143,7 +143,7 @@ requires-dist = [
     { name = "gymnasium" },
     { name = "mani-skill", marker = "sys_platform == 'linux' and extra == 'sim'" },
     { name = "mujoco", marker = "extra == 'sandbox'" },
-    { name = "mujoco-warp", marker = "sys_platform == 'linux' and extra == 'sandbox-gpu'" },
+    { name = "mujoco-warp", marker = "sys_platform == 'linux' and extra == 'sandbox-gpu'", specifier = "==4.0.1" },
     { name = "numpy" },
     { name = "pettingzoo", marker = "extra == 'sim'" },
     { name = "pytest", marker = "extra == 'dev'" },

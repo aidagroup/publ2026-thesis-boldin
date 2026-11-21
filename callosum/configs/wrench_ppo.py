@@ -34,8 +34,16 @@ control steps; the validation below only enforces the hard sanity conditions, so
                       extra (Linux/CUDA only, linux-marked in `uv.lock`); the pod's
                       `uv sync --frozen` (without that extra) removes it from the venv, so
                       install it before a run, e.g.
-                      `uv pip install --python /root/.callosum/venv/bin/python mujoco-warp`
+                      `uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1`
                       or sync with `--extra sandbox-gpu`.
+
+`randomization` selects the episode-randomness level of the *environment* the run uses
+(`callosum.configs.wrench_cube.RANDOMIZATION_PRESETS`): `"default"` keeps the learnable
+ranges, `"harsh"` restores the harder private randomness (gain/authority spread, slips,
+start delays). The trainer and the evaluator both build their env from
+`WrenchPPOConfig.env_config()`, so a checkpoint's run preset is applied on every evaluation;
+the preset is stored in the checkpoint config (an older checkpoint without the field falls
+back to `"default"`).
 """
 
 import argparse
@@ -44,6 +52,11 @@ from dataclasses import dataclass
 
 from callosum.configs._cli import build_dataclass_parser
 from callosum.configs.bijepa import BiJEPAConfig
+from callosum.configs.wrench_cube import (
+    RANDOMIZATION_PRESETS,
+    WrenchCubeConfig,
+    wrench_cube_config,
+)
 from callosum.envs._wrench_logic import PARTNER_MODES, obs_size, validate_partner_mode
 
 INPUT_MODES = ("none", "oracle", "predicted")
@@ -97,9 +110,14 @@ class WrenchPPOConfig:
     backend: str = "cpu"
     """Environment backend: `"cpu"` (the default single-instance MuJoCo loop, works on macOS
     and the pod) or `"warp"` (the batched mujoco_warp GPU env; requires `device="cuda"` and
-    the optional `sandbox-gpu`/`mujoco-warp` install on the pod). The policy/checkpoint
+    the optional `sandbox-gpu`/`mujoco-warp==4.0.1` install on the pod). The policy/checkpoint
     format is backend-independent, so a checkpoint trained on one backend evaluates on the
     other."""
+    randomization: str = "default"
+    """Episode-randomness preset of the environment (`"default"` or `"harsh"`), see
+    `callosum.configs.wrench_cube.RANDOMIZATION_PRESETS`. It is part of the checkpoint's
+    config, so the evaluator rebuilds the env with the same preset as the run; only the
+    private-randomness ranges differ between the presets."""
 
     # --- Bi-JEPA (`predicted` input mode) ---------------------------------------------------
     use_bijepa: bool = False
@@ -167,6 +185,10 @@ class WrenchPPOConfig:
         validate_partner_mode(self.partner_mode)
         if self.backend not in BACKENDS:
             raise ValueError(f"backend must be one of {BACKENDS}, got {self.backend!r}")
+        if self.randomization not in RANDOMIZATION_PRESETS:
+            raise ValueError(
+                f"randomization must be one of {RANDOMIZATION_PRESETS}, got {self.randomization!r}"
+            )
         if self.seed < 0:
             raise ValueError(f"seed must be >= 0, got {self.seed}")
         if self.total_updates < 1:
@@ -281,6 +303,15 @@ class WrenchPPOConfig:
         """Width of one policy's input: env observation plus the predicted latent if enabled."""
         return self.env_obs_size + (self.latent_dim if self.use_bijepa else 0)
 
+    def env_config(self) -> WrenchCubeConfig:
+        """The `WrenchCubeConfig` of this run's randomisation preset.
+
+        Both env backends (`VecWrenchCube`/`WrenchCubeEnv` and `WrenchCubeBatchGPU`) and the
+        evaluator build their environment from this instance, so a run and its evaluation
+        use the same episode randomness (the physics/timing/reward are preset-independent).
+        """
+        return wrench_cube_config(self.randomization)
+
     @property
     def input_mode(self) -> str:
         """The run's policy-input mode: `"predicted"` with Bi-JEPA, else the env partner mode."""
@@ -308,7 +339,11 @@ def build_parser() -> argparse.ArgumentParser:
     return build_dataclass_parser(
         WrenchPPOConfig,
         "Train two independent Gaussian PPO policies (IPPO) on CubeWrench-v0.",
-        choices={"partner_mode": PARTNER_MODES, "backend": BACKENDS},
+        choices={
+            "partner_mode": PARTNER_MODES,
+            "backend": BACKENDS,
+            "randomization": RANDOMIZATION_PRESETS,
+        },
     )
 
 
@@ -317,6 +352,21 @@ def parse_args(argv: Sequence[str] | None = None) -> WrenchPPOConfig:
 
     With `--resume <path>` the flags are still parsed and validated, but the training run
     itself continues with the config saved in the checkpoint (see
-    `callosum.training.wrench_ppo.run`); the only value that matters is `resume` itself.
+    `callosum.training.wrench_ppo.run`); the runtime resources (`--backend`, `--device`)
+    are the exception -- they are taken from the CLI, see
+    `wrench_ppo.apply_runtime_overrides`.
     """
     return WrenchPPOConfig(**vars(build_parser().parse_args(argv)))
+
+
+def parse_args_with_explicit(
+    argv: Sequence[str] | None = None,
+) -> tuple[WrenchPPOConfig, frozenset[str]]:
+    """`parse_args` plus the names of the fields the user actually passed.
+
+    The trainer needs the explicit set for `--resume`: the checkpoint wins for the learning
+    hyperparameters, but `backend`/`device` are runtime resources and must come from the CLI
+    (a flag that was not given keeps the checkpoint's value).
+    """
+    values = vars(build_parser().parse_args(argv))
+    return WrenchPPOConfig(**values), frozenset(values)

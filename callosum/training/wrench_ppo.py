@@ -18,10 +18,10 @@ the arms IPPO trainer): `ActorCritic` (3 x 256 tanh MLPs, state-independent log-
 `compute_gae` and the clipped-surrogate `ppo_update`. What this trainer adds is the
 wrench-specific contract around them:
 
-* the policy input is the env's flat observation, width `obs_size(partner_mode)` (26 for
+* the policy input is the env's flat observation, width `obs_size(partner_mode)` (28 for
   `none`, 45 for `oracle`), and the action is the normalized 6D wrench of the role;
 * under `predicted` (`use_bijepa=True`) the env stays at `partner_mode="none"` and the policy
-  input becomes `[own observation (26), ẑ_partner (latent_dim, 32)]` = 58: the agent predicts
+  input becomes `[own observation (28), ẑ_partner (latent_dim, 32)]` = 60: the agent predicts
   its partner's latent from its OWN observation history (`LatentInputBuilder` ->
   `BiJEPA.encode` + `BiJEPA.predict_partner`, no partner observation), so the policy is still
   trained on a decentralised input. The Bi-JEPA encoder/predictor are trained by an auxiliary
@@ -53,6 +53,13 @@ the plan forbids training there):
     python -m callosum.training.wrench_ppo --partner-mode none --use-bijepa --seed 0 \
         --exp-name wrench_pred_s0 --total-updates 300
 
+The optional GPU backend and the harder-randomness preset (install note in the config module;
+`uv pip install --python <venv>/bin/python mujoco-warp==4.0.1`, because a plain `uv sync --frozen`
+removes it):
+
+    python -m callosum.training.wrench_ppo --backend warp --device cuda --num-envs 1024 \
+        --rollout-steps 64 --randomization harsh --partner-mode oracle --total-updates 300
+
 `--resume runs/<exp>` continues a killed run from its `latest.pt` (the saved config wins,
 so the hyperparameters cannot drift between restarts). SIGTERM saves a checkpoint after the
 current update, so a detached run is never lost.
@@ -74,7 +81,11 @@ import torch
 from torch import nn
 
 from callosum.agents.bijepa import BiJEPA, latent_stats
-from callosum.configs.wrench_ppo import INPUT_MODES, WrenchPPOConfig, parse_args
+from callosum.configs.wrench_ppo import (
+    INPUT_MODES,
+    WrenchPPOConfig,
+    parse_args_with_explicit,
+)
 from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
 from callosum.training._bijepa_probe import ridge_probe
 from callosum.training._metrics import MetricLogger
@@ -82,6 +93,24 @@ from callosum.training._ppo_core import ActorCritic, compute_gae, ppo_update
 
 CHECKPOINT_FORMAT = 1
 """Format of the trainer's checkpoints: weights, optimizer states, config and counters."""
+
+EVAL_SEED_OFFSET = 10_000_019
+"""Offset of the held-out evaluation seeds from the training seed.
+
+Training episodes start at `cfg.seed` and the auto-reset stream continues from
+`cfg.seed + num_envs`, so evaluating at the raw seed would reuse the training episode
+randomness. Every greedy evaluation therefore uses `base_seed + EVAL_SEED_OFFSET + episode`
+(one episode per fixed seed, see :func:`evaluate_greedy`), which is a seed stream the run
+never trains on.
+"""
+
+RUNTIME_RESOURCE_FIELDS = ("backend", "device")
+"""Config fields `--resume` takes from the CLI instead of the checkpoint.
+
+They describe WHERE the run executes (CPU loop vs the warp GPU env, torch device), not the
+learning setup, so a CPU checkpoint can be continued on the GPU backend and vice versa; the
+saved hyperparameters still win for everything else.
+"""
 
 _WRENCH_SIZE = 6
 """Width of one agent's action (a normalized 6D wrench)."""
@@ -319,11 +348,18 @@ def evaluate_greedy(
     seed: int = 0,
     bijepa: BiJEPA | None = None,
 ) -> EvalSummary:
-    """Run the deterministic policies in `vec` until `episodes` episodes finish.
+    """Greedy evaluation on a FIXED set of held-out seeds, one episode per seed.
 
-    The actions are the distribution means (clipped to the `[-1, 1]` wrench box) -- the
-    greedy evaluation the plan asks for -- and the env is the same `CubeWrench-v0` with the
-    same randomisation as training, so the number is comparable with `train/*`.
+    The old protocol collected the first `episodes` finished episodes of an auto-resetting
+    batch env; fast successes then dominated (each world could contribute several episodes)
+    and time-limit truncations were almost never collected, so the number was biased towards
+    easy episodes and the seed-to-episode mapping was implicit. Here world `i` of a batch is
+    reset with exactly one seed, `seed + <batch offset> + i`, and only that world's FIRST
+    episode is recorded; the evaluation steps until the first episode of every requested
+    world has finished (success, failure or the 350-step truncation). If `episodes` exceeds
+    the vec env's `num_envs`, the seeds are covered in consecutive batches of worlds.
+    Callers pass `cfg.seed + EVAL_SEED_OFFSET + ...` so the seeds are outside the training
+    stream.
 
     With `bijepa` (the `predicted` input mode) the policies are fed the exact same
     `[own observation, ẑ_partner]` construction as in training (`LatentInputBuilder` from
@@ -334,56 +370,84 @@ def evaluate_greedy(
         vec: A `callosum.training._vec_wrench.VecWrenchCube`-like object (`reset`, `step`,
             `num_envs`, `config.max_control_steps`); typed loosely so this function needs
             no simulator import.
-        episodes: Number of finished episodes to collect.
+        episodes: Number of held-out episodes to evaluate (one episode per seed).
         device: Torch device of the policies.
-        seed: Base episode seed of the evaluation.
+        seed: Base episode seed; episode `k` uses `seed + k` (the caller applies
+            `EVAL_SEED_OFFSET`).
         bijepa: The `predicted` run's Bi-JEPA module, or `None` for `none`/`oracle`.
 
     Returns:
-        The aggregated `EvalSummary`.
+        The aggregated `EvalSummary` over exactly `episodes` first episodes.
     """
-    obs = _to_torch(vec.reset(seed=seed), device)
     torch_io = bool(getattr(vec, "torch_io", False))
     builder = LatentInputBuilder(bijepa, device) if bijepa is not None else None
-    inputs = builder.reset(obs) if builder is not None else obs
-    max_steps = (episodes // int(vec.num_envs) + 2) * int(vec.config.max_control_steps)
+    num_envs = int(vec.num_envs)
+    max_control_steps = int(vec.config.max_control_steps)
     successes: list[bool] = []
     returns: list[float] = []
     lengths: list[int] = []
     angles: list[float] = []
-    steps = 0
     while len(successes) < episodes:
-        if steps >= max_steps:
-            raise RuntimeError(
-                f"evaluation did not finish {episodes} episodes in {max_steps} steps "
-                f"({len(successes)} finished); the env's episode budget is broken"
-            )
-        actions = {}
-        for name, policy in zip(AGENT_KEYS, policies):
-            action = policy.get_action(inputs[name], deterministic=True)
-            clipped = torch.clamp(action, -1.0, 1.0)
-            actions[name] = clipped if torch_io else clipped.cpu().numpy()
-        result = vec.step(actions)
-        obs = _to_torch(result.obs, device)
-        if builder is not None:
-            done = torch.as_tensor(result.terminated, device=device, dtype=torch.bool)
-            done = done | torch.as_tensor(result.truncated, device=device, dtype=torch.bool)
-            inputs = builder.step(obs, done.float())
+        batch = min(num_envs, episodes - len(successes))
+        obs = _to_torch(vec.reset(seed=seed + len(successes)), device)
+        inputs = builder.reset(obs) if builder is not None else obs
+        recorded = [False] * num_envs
+        for _step in range(max_control_steps + 1):
+            actions = {}
+            for name, policy in zip(AGENT_KEYS, policies):
+                action = policy.get_action(inputs[name], deterministic=True)
+                clipped = torch.clamp(action, -1.0, 1.0)
+                actions[name] = clipped if torch_io else clipped.cpu().numpy()
+            result = vec.step(actions)
+            obs = _to_torch(result.obs, device)
+            terminated = _flags(result.terminated)
+            truncated = _flags(result.truncated)
+            done = terminated | truncated
+            if builder is not None:
+                done_tensor = torch.as_tensor(terminated, device=device, dtype=torch.bool)
+                done_tensor = done_tensor | torch.as_tensor(
+                    truncated, device=device, dtype=torch.bool
+                )
+                inputs = builder.step(obs, done_tensor.float())
+            else:
+                inputs = obs
+            done_indices = np.flatnonzero(done)
+            if len(done_indices) != len(result.finished_returns):
+                raise RuntimeError(
+                    "vec env contract broken: "
+                    f"{len(done_indices)} worlds finished but "
+                    f"{len(result.finished_returns)} finished statistics reported"
+                )
+            for position, world in enumerate(done_indices):
+                if world >= batch or recorded[world]:
+                    continue
+                recorded[world] = True
+                successes.append(bool(result.finished_successes[position]))
+                returns.append(float(result.finished_returns[position]))
+                lengths.append(int(result.finished_lengths[position]))
+                angles.append(float(result.finished_angles[position]))
+            if all(recorded[:batch]):
+                break
         else:
-            inputs = obs
-        successes.extend(result.finished_successes)
-        returns.extend(result.finished_returns)
-        lengths.extend(result.finished_lengths)
-        angles.extend(result.finished_angles)
-        steps += 1
-    count = episodes
+            raise RuntimeError(
+                "evaluation did not finish the first episode of every world within "
+                f"{max_control_steps + 1} steps; the env's episode budget is broken "
+                f"({sum(recorded[:batch])}/{batch} recorded)"
+            )
     return EvalSummary(
-        episodes=count,
-        success_rate=float(np.mean(successes[:count])),
-        mean_return=float(np.mean(returns[:count])),
-        mean_angle_deg=float(np.mean(angles[:count])),
-        mean_length=float(np.mean(lengths[:count])),
+        episodes=episodes,
+        success_rate=float(np.mean(successes)),
+        mean_return=float(np.mean(returns)),
+        mean_angle_deg=float(np.mean(angles)),
+        mean_length=float(np.mean(lengths)),
     )
+
+
+def _flags(value: object) -> np.ndarray:
+    """A vec env's terminated/truncated flags as a numpy bool array (tensor or array input)."""
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy().astype(bool)
+    return np.asarray(value, dtype=bool)
 
 
 @dataclass(frozen=True)
@@ -548,6 +612,27 @@ def aux_update(
 # --- checkpoints --------------------------------------------------------------------------
 
 
+def _rng_payload() -> dict:
+    """The torch RNG state a checkpoint stores (CPU state + all CUDA devices when present).
+
+    The CUDA generator state matters for a warp run: the policy sampling happens on the GPU,
+    so a resume without it replays different actions. The list is serialised by `torch.save`
+    and accepted by `torch.load(weights_only=True)` (it is a list of byte tensors).
+    """
+    return {
+        "torch": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def _restore_rng(rng: dict) -> None:
+    """Restore a checkpoint's torch RNG state (CUDA too when the field/device is available)."""
+    torch.set_rng_state(rng["torch"].cpu())
+    cuda_state = rng.get("torch_cuda")
+    if cuda_state is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(cuda_state)
+
+
 def save_checkpoint(
     path: Path,
     policies: list[ActorCritic],
@@ -564,7 +649,9 @@ def save_checkpoint(
 
     The payload holds both policies' weights, both Adam states, the config (so `--resume`
     cannot run with drifted hyperparameters), the update / environment-step counters and the
-    torch RNG state. A `predicted` run additionally stores the Bi-JEPA module (encoders,
+    torch RNG state (CPU + all CUDA device generators, so a warp run's GPU policy sampling is
+    reproducible after `--resume`). A `predicted` run additionally stores the Bi-JEPA module
+    (encoders,
     predictors and the EMA target encoders) and its optimizer under `bijepa` /
     `bijepa_optimizer`, plus the policy input metadata (`input_mode`, `policy_input_size`,
     `latent_dim`) the evaluator needs. A kill mid-write cannot corrupt the file: it is written
@@ -597,7 +684,7 @@ def save_checkpoint(
         "update": int(update),
         "global_step": int(global_step),
         "eval": {key: float(value) for key, value in (eval_metrics or {}).items()},
-        "rng": {"torch": torch.get_rng_state()},
+        "rng": _rng_payload(),
     }
     if bijepa is not None:
         payload["bijepa"] = bijepa.state_dict()
@@ -768,8 +855,55 @@ def _check_resumed_state(payload: dict, cfg: WrenchPPOConfig) -> None:
 # --- training -----------------------------------------------------------------------------
 
 
-def run(cfg: WrenchPPOConfig) -> Path:
-    """Train (or continue with `cfg.resume`) and return the run directory."""
+def apply_runtime_overrides(
+    saved: WrenchPPOConfig,
+    requested: WrenchPPOConfig,
+    explicit: frozenset[str] | None = None,
+) -> WrenchPPOConfig:
+    """The resumed config: saved hyperparameters + the CLI's runtime resources.
+
+    `--resume` continues with the hyperparameters stored in the checkpoint, but `backend` and
+    `device` describe WHERE the run executes and must come from the CLI, otherwise a CPU
+    checkpoint could never be continued on the GPU backend (and vice versa). The merged config
+    is re-validated (the `backend="warp"` -> CUDA `device` rule must hold after the override).
+
+    Args:
+        saved: The config read from the checkpoint.
+        requested: The config parsed from the CLI (defaults for flags not given).
+        explicit: Names of the fields the user actually passed. `None` infers them by
+            comparing `requested` with `WrenchPPOConfig()` defaults.
+
+    Returns:
+        The merged, validated config.
+    """
+    if explicit is None:
+        defaults = WrenchPPOConfig()
+        explicit = frozenset(
+            field
+            for field in RUNTIME_RESOURCE_FIELDS
+            if getattr(requested, field) != getattr(defaults, field)
+        )
+    overrides = {
+        field: getattr(requested, field)
+        for field in RUNTIME_RESOURCE_FIELDS
+        if field in explicit
+    }
+    if not overrides:
+        return saved
+    merged = dataclasses.replace(saved, **overrides)
+    # Re-run __post_init__: the saved config may be "cpu" while the CLI asks for "warp".
+    return WrenchPPOConfig(**dataclasses.asdict(merged))
+
+
+def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path:
+    """Train (or continue with `cfg.resume`) and return the run directory.
+
+    Args:
+        cfg: The run config.
+        explicit: Field names the caller passed explicitly (from the CLI parser); used by
+            `--resume` for the runtime resources (`backend`, `device`).
+    """
+    requested = cfg
     if cfg.backend == "warp":
         from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
     else:
@@ -784,7 +918,9 @@ def run(cfg: WrenchPPOConfig) -> Path:
     resumed: dict | None = None
     if cfg.resume:
         run_dir, resumed = _resolve_resume(cfg.resume)
-        cfg = _config_from_payload(resumed, run_dir)
+        cfg = apply_runtime_overrides(
+            _config_from_payload(resumed, run_dir), requested, explicit
+        )
         if int(resumed["update"]) >= cfg.total_updates:
             print(
                 f"run {run_dir} is already complete (update {resumed['update']}/"
@@ -802,23 +938,30 @@ def run(cfg: WrenchPPOConfig) -> Path:
         run_dir = Path(cfg.runs_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # The run's randomisation preset is part of the config, so the CPU and the GPU backend
+    # build the SAME environment variant (and the evaluator rebuilds it from the checkpoint).
+    env_config = cfg.env_config()
     if cfg.backend == "warp":
         # Lazy import above: the GPU stack (mujoco_warp/warp) is only needed for this branch.
         train_vec = WrenchCubeBatchGPU(
             cfg.num_envs,
+            config=env_config,
             partner_mode=cfg.partner_mode,
             seed=cfg.seed,
             device=cfg.device,
         )
         eval_vec = WrenchCubeBatchGPU(
             cfg.eval_envs,
+            config=env_config,
             partner_mode=cfg.partner_mode,
             seed=cfg.seed + 1_000_003,
             device=cfg.device,
         )
     else:
-        train_vec = VecWrenchCube(cfg.num_envs, cfg.partner_mode, seed=cfg.seed)
-        eval_vec = VecWrenchCube(cfg.eval_envs, cfg.partner_mode, seed=cfg.seed + 1_000_003)
+        train_vec = VecWrenchCube(cfg.num_envs, cfg.partner_mode, config=env_config, seed=cfg.seed)
+        eval_vec = VecWrenchCube(
+            cfg.eval_envs, cfg.partner_mode, config=env_config, seed=cfg.seed + 1_000_003
+        )
     try:
         return train(cfg, run_dir, train_vec, eval_vec, resumed)
     finally:
@@ -916,12 +1059,15 @@ def train(
         # Discard the events the killed process logged after the checkpoint (they have steps
         # >= purge_step), so the resumed curves continue cleanly.
         writer = SummaryWriter(str(run_dir), purge_step=global_step + 1)
-        torch.set_rng_state(resumed["rng"]["torch"].cpu())
+        _restore_rng(resumed["rng"])
     logger = MetricLogger(writer)
 
+    if hasattr(train_vec, "software_versions"):
+        print(f"env software: {train_vec.software_versions()}", flush=True)
     print(
         f"run {run_dir} | CubeWrench-v0 | input_mode {cfg.input_mode} (env partner_mode "
-        f"{cfg.partner_mode}) | backend {cfg.backend} | device {device} | obs "
+        f"{cfg.partner_mode}) | backend {cfg.backend} | randomization {cfg.randomization} | "
+        f"device {device} | torch {torch.__version__} | obs "
         f"{cfg.env_obs_size} + latent {latent_dim} = policy input "
         f"{cfg.policy_input_size} -> act {_WRENCH_SIZE}",
         flush=True,
@@ -1104,7 +1250,7 @@ def train(
                 eval_vec,
                 cfg.eval_episodes,
                 device=device,
-                seed=cfg.seed + 1_000_003 * update,
+                seed=cfg.seed + EVAL_SEED_OFFSET + 1_000_003 * update,
                 bijepa=bijepa,
             )
             eval_metrics = {
@@ -1195,7 +1341,8 @@ def main(argv: list[str] | None = None) -> None:
     A detached run has its stdout redirected to a file, so flush every line.
     """
     sys.stdout.reconfigure(line_buffering=True)
-    run(parse_args(argv))
+    cfg, explicit = parse_args_with_explicit(argv)
+    run(cfg, explicit=explicit)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,10 @@ Controllers: `random` (torch-random normalized wrenches, physics/obs parity) and
 (the scripted `OracleController` acting on the CPU envs, which drives the episode to a real
 success/failure so the terminal reward and the final observation are compared too).
 
+Randomisation: `--randomization default|harsh` selects the episode-randomness preset of
+BOTH envs (`callosum.configs.wrench_cube.wrench_cube_config`); the physics/timing/reward are
+identical between the presets, only the private-randomness ranges differ.
+
 Friction: `--friction sampled` (the production path: the per-episode Coulomb friction the CPU
 env writes into `model.dof_frictionloss` is reproduced per world by
 `put_model(batch_sizes={"dof_frictionloss": nworld})`) or `--friction disabled` (both paths
@@ -54,10 +58,10 @@ Measured on the pod (A40, mujoco_warp 4.0.1, 8 worlds, 2026-11-21):
   (the C MuJoCo reference here is float64), so this is an expected numerical limit of the GPU
   backend for adversarial actions, documented rather than worked around.
 
-The GPU backend needs the optional `mujoco-warp` install (the `sandbox-gpu` extra,
+The GPU backend needs the optional `mujoco-warp==4.0.1` install (the `sandbox-gpu` extra,
 Linux/CUDA only; the pod's plain `uv sync --frozen` removes it), so on the pod run:
 
-    uv pip install --python /root/.callosum/venv/bin/python mujoco-warp
+    uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1
     python scripts/check_wrench_gpu_parity.py --controller random --partner-mode oracle
     python scripts/check_wrench_gpu_parity.py --controller oracle --partner-mode oracle
 
@@ -65,9 +69,12 @@ Exit code 0 when every comparison is inside its tolerance, 1 otherwise.
 """
 
 import argparse
+import dataclasses
 import sys
 
 import numpy as np
+
+from callosum.configs.wrench_cube import RANDOMIZATION_PRESETS, wrench_cube_config
 
 TOLERANCES = {
     "qpos": 1e-5,
@@ -98,6 +105,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="action source: the scripted oracle (default, policy-like) or random wrenches",
     )
     parser.add_argument(
+        "--randomization",
+        choices=RANDOMIZATION_PRESETS,
+        default="default",
+        help=(
+            "episode-randomness preset of both envs (default: the dataclass defaults; harsh: "
+            "the harder private-randomness ranges of callosum.configs.wrench_cube)"
+        ),
+    )
+    parser.add_argument(
         "--friction",
         choices=("sampled", "disabled"),
         default="sampled",
@@ -107,10 +123,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--device", default="cuda", help="CUDA device of the GPU env")
+    parser.add_argument(
+        "--max-control-steps",
+        type=int,
+        default=None,
+        help="override the episode budget (e.g. 20 to force time-limit truncations)",
+    )
+    parser.add_argument(
+        "--force-slip",
+        action="store_true",
+        help="force slip_prob_range=(1, 1) so every agent slips every episode",
+    )
+    parser.add_argument(
+        "--slip-decisions",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("LO", "HI"),
+        help="override slip_decisions_range (e.g. 2 2)",
+    )
+    parser.add_argument(
+        "--start-delay",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("LO", "HI"),
+        help="override start_delay_range (e.g. 0.2 0.2)",
+    )
+    parser.add_argument(
+        "--force-impulse",
+        action="store_true",
+        help="force impulse_prob_range=(1, 1) so every episode has an impulse",
+    )
     parser.add_argument("--qpos-tol", type=float, default=TOLERANCES["qpos"])
     parser.add_argument("--qvel-tol", type=float, default=TOLERANCES["qvel"])
     parser.add_argument("--obs-tol", type=float, default=TOLERANCES["obs"])
     parser.add_argument("--reward-tol", type=float, default=TOLERANCES["reward"])
+    parser.add_argument(
+        "--return-tol",
+        type=float,
+        default=1e-4,
+        help="max |CPU - GPU| of a finished episode's undiscounted return",
+    )
     args = parser.parse_args(argv)
     if args.num_worlds < 1:
         parser.error(f"--num-worlds must be >= 1, got {args.num_worlds}")
@@ -190,7 +244,6 @@ def run_parity(args: argparse.Namespace) -> int:
     """Run the scenario; print the comparison table and return the process exit code."""
     import torch
 
-    from callosum.configs.wrench_cube import WrenchCubeConfig
     from callosum.envs.wrench_cube import OracleController, WrenchCubeEnv
     from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
 
@@ -198,10 +251,26 @@ def run_parity(args: argparse.Namespace) -> int:
     roles = ("holder", "rotator")
     num_worlds = args.num_worlds
     seeds = [args.seed + index for index in range(num_worlds)]
+    config = wrench_cube_config(args.randomization)
+    # Edge-case overrides: force truncation / injections so the parity run exercises the
+    # time-limit path, guaranteed slips, fixed start delays and the impulse in every episode.
+    overrides: dict = {}
+    if args.max_control_steps is not None:
+        overrides["max_control_steps"] = args.max_control_steps
+    if args.force_slip:
+        overrides["slip_prob_range"] = (1.0, 1.0)
+    if args.slip_decisions is not None:
+        overrides["slip_decisions_range"] = tuple(args.slip_decisions)
+    if args.start_delay is not None:
+        overrides["start_delay_range"] = tuple(args.start_delay)
+    if args.force_impulse:
+        overrides["impulse_prob_range"] = (1.0, 1.0)
+    if overrides:
+        config = dataclasses.replace(config, **overrides)
     if args.friction == "disabled":
-        config = WrenchCubeConfig(hinge_frictionloss=0.0, layer_frictionloss_range=(0.0, 0.0))
-    else:
-        config = WrenchCubeConfig()
+        config = dataclasses.replace(
+            config, hinge_frictionloss=0.0, layer_frictionloss_range=(0.0, 0.0)
+        )
 
     cpu_envs = [
         WrenchCubeEnv(config=config, partner_mode=args.partner_mode) for _ in range(num_worlds)
@@ -224,8 +293,11 @@ def run_parity(args: argparse.Namespace) -> int:
 
     print(
         f"parity: controller={args.controller} friction={args.friction} "
-        f"partner_mode={args.partner_mode} worlds={num_worlds} seed={args.seed} "
-        f"device={args.device}",
+        f"randomization={args.randomization} partner_mode={args.partner_mode} "
+        f"worlds={num_worlds} seed={args.seed} device={args.device} "
+        f"max_control_steps={config.max_control_steps} "
+        f"slip_prob={config.slip_prob_range} start_delay={config.start_delay_range} "
+        f"impulse_prob={config.impulse_prob_range}",
         flush=True,
     )
     max_diff = dict.fromkeys(("qpos", "qvel", "obs", "reward"), 0.0)
@@ -235,6 +307,14 @@ def run_parity(args: argparse.Namespace) -> int:
     next_reset_seed = args.seed + num_worlds
     finished_episodes = 0
     last_end_step: int | None = None
+    # Episode accumulators for the finished-statistics comparison (the trainer's
+    # finished_returns/lengths/successes contract is not covered by the state/obs comparison).
+    episode_returns = np.zeros(num_worlds, dtype=np.float64)
+    episode_lengths = np.zeros(num_worlds, dtype=np.int64)
+    finished_max_return_diff = 0.0
+    finished_length_mismatches = 0
+    finished_success_mismatches = 0
+    finished_compared = 0
 
     # Reset: same seeds on both paths; the initial observation must agree.
     cpu_obs = [env.reset(seed=seed)[0] for env, seed in zip(cpu_envs, seeds)]
@@ -305,6 +385,30 @@ def run_parity(args: argparse.Namespace) -> int:
         max_diff["reward"] = max(max_diff["reward"], _max_abs_diff(cpu_reward, gpu_reward))
         flag_mismatches += int((cpu_terminated != gpu_terminated).sum())
         flag_mismatches += int((cpu_truncated != gpu_truncated).sum())
+        episode_returns += cpu_reward
+        episode_lengths += 1
+
+        # --- finished-episode statistics (VecWrenchCube contract) ---------------------
+        done_rows = np.flatnonzero(done)
+        gpu_lengths = list(gpu_step.finished_lengths)
+        gpu_returns = list(gpu_step.finished_returns)
+        gpu_successes = list(gpu_step.finished_successes)
+        if not (len(done_rows) == len(gpu_lengths) == len(gpu_returns) == len(gpu_successes)):
+            flag_mismatches += 1
+            print(
+                "  finished-statistics contract broken: "
+                f"{len(done_rows)} done worlds vs {len(gpu_lengths)} GPU statistics"
+            )
+        for position, world in enumerate(done_rows[: len(gpu_lengths)]):
+            cpu_length = int(episode_lengths[world])
+            cpu_return = float(episode_returns[world])
+            cpu_success = bool(cpu_steps[world][4]["success"])
+            finished_max_return_diff = max(
+                finished_max_return_diff, abs(cpu_return - float(gpu_returns[position]))
+            )
+            finished_length_mismatches += int(cpu_length != int(gpu_lengths[position]))
+            finished_success_mismatches += int(cpu_success != bool(gpu_successes[position]))
+            finished_compared += 1
 
         if done.any():
             finished_episodes += int(done.sum())
@@ -317,6 +421,8 @@ def run_parity(args: argparse.Namespace) -> int:
                 for offset, env_index in enumerate(done_rows)
             ]
             next_reset_seed += len(done_rows)
+            episode_returns[done_rows] = 0.0
+            episode_lengths[done_rows] = 0
             for role in roles:
                 cpu_fresh = _stack_obs(fresh_obs, role)
                 max_diff["obs"] = max(
@@ -330,6 +436,21 @@ def run_parity(args: argparse.Namespace) -> int:
         if status == "FAIL":
             failures.append(f"{name} max diff {max_diff[name]:.3e} > tol {tolerance:.1e}")
         print(f"  {name:<7} max |CPU - GPU| = {max_diff[name]:.3e}  (tol {tolerance:.1e}) {status}")
+    print(
+        f"  finished episodes: {finished_compared} compared | max |Δreturn| = "
+        f"{finished_max_return_diff:.3e} | length mismatches {finished_length_mismatches} | "
+        f"success mismatches {finished_success_mismatches}"
+    )
+    if finished_compared == 0:
+        failures.append("no episode finished: the finished-statistics contract was not compared")
+    if finished_max_return_diff > args.return_tol:
+        failures.append(
+            f"finished return diff {finished_max_return_diff:.3e} > tol {args.return_tol:.1e}"
+        )
+    if finished_length_mismatches:
+        failures.append(f"{finished_length_mismatches} finished episode lengths differ")
+    if finished_success_mismatches:
+        failures.append(f"{finished_success_mismatches} finished episode success flags differ")
     print(f"  terminal-flag mismatches: {flag_mismatches}")
     if flag_mismatches:
         failures.append(f"{flag_mismatches} terminated/truncated flags differ")

@@ -31,7 +31,7 @@ SMOKE_ROLLOUT="${SMOKE_ROLLOUT:-16}"
 
 echo "== 0. optional Warp install (uv sync --frozen removes it)"
 if ! "$PYTHON" -c 'import mujoco_warp' >/dev/null 2>&1; then
-  "$UV" pip install --python "$PYTHON" mujoco-warp
+  "$UV" pip install --python "$PYTHON" mujoco-warp==4.0.1
 fi
 "$PYTHON" -c 'import mujoco, mujoco_warp, warp; print("mujoco", mujoco.__version__,
   "| mujoco_warp", getattr(mujoco_warp, "__version__", "?"), "| warp", warp.__version__)'

@@ -37,6 +37,16 @@ The config enforces the design's non-additivity invariant in `__post_init__`: th
 rotator-only quasi-static core drift must exceed `success_rot_tol` by a safe margin, so
 "the rotator alone cannot keep the core still" is a validated property of the parameters
 rather than an assumption.
+
+Randomisation presets: the benchmark grid needs two levels of the *private* episode
+randomness -- `"default"` (the dataclass defaults, tuned to stay learnable) and `"harsh"`
+(the previous, harder ranges: wider gain/authority spreads, more and longer slips, longer
+start delays). `wrench_cube_config(randomization)` builds the config of a preset, so the
+CPU env (`VecWrenchCube`/`WrenchCubeEnv`), the GPU env (`WrenchCubeBatchGPU`) and the
+evaluator all use the same randomness for a run. Only the randomisation ranges change
+between the presets; the physics, timing, tolerances and reward stay identical, so the
+`oracle`-vs-`none` gap of a harsh run answers "is the coordination harder", not "is the
+model different".
 """
 
 import math
@@ -431,3 +441,57 @@ class WrenchCubeConfig:
     def rotator_authority(self) -> tuple[float, float, float, float, float, float]:
         """Rotator action scale: max force per axis, then max torque per axis."""
         return (self.rotator_max_force,) * 3 + (self.rotator_max_torque,) * 3
+
+
+# --- randomisation presets ----------------------------------------------------------------
+
+RANDOMIZATION_PRESETS = ("default", "harsh")
+"""The episode-randomness levels the trainer/evaluator can select (`WrenchPPOConfig.randomization`).
+
+* `"default"` -- the `WrenchCubeConfig` dataclass defaults (the learnable level of the
+  anticipation test; latency stays in (0.1, 0.3) so a partner command cannot be reactive);
+* `"harsh"` -- the previous harder ranges (wider gain/authority spread, more frequent and
+  longer slips, longer start delays), used to test whether the `oracle`-vs-`none` gap is
+  only a sample-efficiency effect or survives at convergence.
+"""
+
+_HARSH_RANDOMIZATION: dict = {
+    "latency_range": (0.1, 0.3),
+    "gain_range": (0.5, 1.5),
+    "limit_scale_range": (0.4, 1.6),
+    "slip_prob_range": (0.2, 0.5),
+    "slip_decisions_range": (2, 5),
+    "start_delay_range": (0.0, 0.5),
+}
+"""The private-randomness ranges of the `"harsh"` preset (the pre-2026-11-21 defaults).
+
+These were softened back to the current `WrenchCubeConfig` defaults in the "restore the
+learnable randomisation level" commit; the preset keeps the harder level available for the
+ablation without duplicating the config class.
+"""
+
+
+def wrench_cube_config(randomization: str = "default") -> WrenchCubeConfig:
+    """The CubeWrench-v0 config of a randomisation preset.
+
+    The returned `WrenchCubeConfig` is a normal validated instance (so the non-additivity
+    invariant and the range checks run for every preset), and it is the single source of
+    truth the CPU loop, the GPU batch env and the evaluator build from.
+
+    Args:
+        randomization: One of `RANDOMIZATION_PRESETS`.
+
+    Returns:
+        `WrenchCubeConfig()` for `"default"`, the harder private-randomness ranges for
+        `"harsh"` (physics/timing/tolerances/reward unchanged).
+
+    Raises:
+        ValueError: if `randomization` is not a known preset.
+    """
+    if randomization not in RANDOMIZATION_PRESETS:
+        raise ValueError(
+            f"randomization must be one of {RANDOMIZATION_PRESETS}, got {randomization!r}"
+        )
+    if randomization == "default":
+        return WrenchCubeConfig()
+    return WrenchCubeConfig(**_HARSH_RANDOMIZATION)
