@@ -1,7 +1,7 @@
 """Render the two-agent coop-suite demos: scripted oracle, learned policy vs oracle, attempts.
 
-The reduced coop suite (`CartPoleCoop-v0`, `PendulumPump-v0`, and the planned `TossCatch-v0`)
-renders nothing on its own and its MJCF assets have no cameras, so this module builds a
+The reduced coop suite (`CartPoleCoop-v0`, `PendulumPump-v0`, `TossCatch-v0`) renders
+nothing on its own and its MJCF assets have no cameras, so this module builds a
 **render-only copy** of the task's MJCF through `mujoco.MjSpec`: the copy gets colours, a
 ground plane, goal markers, a skybox, lights and a free camera, while the env's physics model
 is never touched. The env's `state()` is written into the copy's `qpos`/`qvel` before every
@@ -22,12 +22,14 @@ Scenes (``--scene``):
    scripted oracle, or the checkpoint policies when ``--checkpoint`` is given.
 
 Every frame carries a Pillow HUD: the task name, step/time, the task's score/progress (the
-cart-pole's |pole angle| and cart->target distance, the pendulum's amplitude->target and hold
-cycles), the agents' ``left``/``right`` commanded force/torque magnitudes, a bottom progress
-bar and a SUCCESS / FAILED / TIMEOUT status on the last frame. The task-specific metrics,
-goal markers and camera poses live in one dispatch point per concern (``_decorate_scene``,
-``_write_render_state``, ``_task_hud``, ``_task_metrics`` and ``TASK_VIEWS``), so the planned
-`toss` task plugs in by extending those.
+cart-pole's |pole angle| and cart->target distance, the pendulum's peak amplitude->target and
+hold cycles, the toss-catch's passes->target with the ball height/velocity), the agents'
+``left``/``right`` commanded quantities (force/torque magnitudes for the cart-pole and
+pendulum, paddle pose plus commanded velocity for the toss-catch), a bottom progress bar and
+a SUCCESS / FAILED / TIMEOUT status on the last frame. The task-specific metrics, goal
+markers, state copy and camera poses live in one dispatch point per concern
+(``_decorate_scene``, ``_write_render_state``, ``_task_hud``, ``_task_metrics`` and
+``TASK_VIEWS``), which is how the three tasks share one renderer.
 
 The learned-policy path reuses `callosum/experiments/coop_tasks/eval.py` (checkpoint loading,
 input-mode resolution, greedy inference and the Bi-JEPA `predicted` input builder) instead of
@@ -47,6 +49,11 @@ Run on the pod (from the repo root; ``/root/.callosum/venv`` has mujoco + EGL + 
         --task pendulum --scene policy-vs-oracle \\
         --checkpoint /root/callosum/runs/coop_pendulum_none_s0/latest.pt \\
         --input-mode none --out /workspace/callosum-runs/render_coop
+
+    MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
+        --task toss --scene policy-vs-oracle \\
+        --checkpoint /root/callosum/runs/coop_toss_oracle_s0/latest.pt \\
+        --input-mode oracle --out /workspace/callosum-runs/render_coop
 
     MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
         --task cartpole --scene attempts --attempts 5 --seed 0 \\
@@ -92,13 +99,17 @@ from callosum.common.render_utils import (
 
 if TYPE_CHECKING:
     from callosum.experiments.coop_tasks.base import CoopTaskEnv
-    from callosum.experiments.coop_tasks.config import CartPoleConfig, PendulumConfig
+    from callosum.experiments.coop_tasks.config import (
+        CartPoleConfig,
+        PendulumConfig,
+        TossConfig,
+    )
 
-    TaskConfig = CartPoleConfig | PendulumConfig
+    TaskConfig = CartPoleConfig | PendulumConfig | TossConfig
     PolicyEnv = CoopTaskEnv
 
-RENDER_TASKS = ("cartpole", "pendulum")
-"""The coop tasks this renderer supports; `toss` is added here when its env lands."""
+RENDER_TASKS = ("cartpole", "pendulum", "toss")
+"""The coop tasks this renderer supports (the full two-robot suite)."""
 
 AGENT_KEYS = ("left", "right")
 """The suite's two agent keys (mirrors `coop_tasks.logic.AGENT_KEYS`).
@@ -126,6 +137,13 @@ TARGET_FADE_RGBA = (0.22, 0.85, 0.42, 0.35)
 RIG_RGBA = (0.42, 0.47, 0.57, 1.0)
 PIVOT_RGBA = (0.52, 0.57, 0.66, 1.0)
 RAIL_RGBA = (0.60, 0.66, 0.76, 1.0)
+BALL_RGBA = (0.99, 0.80, 0.18, 1.0)
+BALL_HALO_RGBA = (1.0, 0.85, 0.30, 0.22)
+PAD_LEFT_RGBA = (0.30, 0.74, 0.47, 1.0)
+PAD_RIGHT_RGBA = (0.93, 0.55, 0.17, 1.0)
+PAD_FACE_RGBA = (0.93, 0.95, 1.0, 1.0)
+COURT_LINE_RGBA = (0.48, 0.56, 0.68, 0.90)
+COURT_CENTRE_RGBA = (0.55, 0.64, 0.78, 0.75)
 GROUND_RGBA = (0.24, 0.27, 0.33, 1.0)
 SKY_RGB1 = (0.030, 0.045, 0.080)
 SKY_RGB2 = (0.150, 0.200, 0.330)
@@ -205,11 +223,25 @@ TASK_VIEWS: dict[str, TaskView] = {
         unit="Nm",
         value_decimals=3,
     ),
+    "toss": TaskView(
+        task="toss",
+        env_title="TossCatch-v0",
+        asset_name="toss_catch.xml",
+        camera=CameraPose(lookat=(0.0, 0.0, 0.48), distance=3.2, azimuth=100.0, elevation=-20.0),
+        ground_z=0.0,
+        ground_size=1.9,
+        left_title="left: paddle",
+        right_title="right: paddle",
+        symbol="v",
+        unit="m/s",
+        value_decimals=2,
+    ),
 }
 
 ORACLE_SUBTITLES: dict[str, str] = {
     "cartpole": "LQR + Smith predictor: balance the pole and drive the cart to the target",
     "pendulum": "phase-based pumping: reach the target amplitude and hold it",
+    "toss": "ballistic interception: catch the ball and return it for alternating passes",
 }
 """One-line description of each scripted oracle (shown under the caption)."""
 
@@ -266,6 +298,17 @@ def _task_metrics(task: str, state: dict[str, float], config: TaskConfig) -> dic
             "hold_cycles": float(config.hold_cycles),
             "progress": float(np.clip(amplitude_deg / max(target_deg, 1e-6), 0.0, 1.0)),
         }
+    if task == "toss":
+        passes = float(state["passes"])
+        target = float(state["target_passes"])
+        return {
+            "passes": passes,
+            "target_passes": target,
+            "ball_x": float(state["ball_x"]),
+            "ball_z": float(state["ball_z"]),
+            "ball_vz": float(state["ball_vz"]),
+            "progress": float(np.clip(passes / max(target, 1e-6), 0.0, 1.0)),
+        }
     raise ValueError(f"task must be one of {RENDER_TASKS}, got {task!r}")
 
 
@@ -277,14 +320,18 @@ def _peak_amplitude_deg(task: str, state: dict[str, float]) -> float:
 
 
 def _agent_blocks(
-    task: str, config: TaskConfig, action: dict[str, np.ndarray]
+    task: str, config: TaskConfig, state: dict[str, float], action: dict[str, np.ndarray]
 ) -> tuple[tuple[str, tuple[str, ...], tuple[int, int, int, int]], ...]:
-    """The two top-right action blocks: each agent's commanded force/torque magnitude.
+    """The two top-right action blocks: what each agent is commanding.
 
-    The shown magnitude is the agent's *commanded* physical quantity
-    (`max(action, 0) * authority`, with the left/right sign of the suite's one-sided
+    For the one-sided cart-pole/pendulum the shown magnitude is the *commanded* physical
+    quantity (`max(action, 0) * authority`, with the left/right sign of the one-sided
     actuation), like the cube demo; the env applies its private gain/limit scaling on top.
+    For the toss-catch the agents command a paddle pose increment, so the block shows the
+    paddle's pose and its commanded velocity/tilt instead.
     """
+    if task == "toss":
+        return _toss_agent_blocks(config, state, action)
     view = _task_view(task)
     authorities = [float(config.agent_authority(index)) for index in range(len(AGENT_KEYS))]
     blocks: list[tuple[str, tuple[str, ...], tuple[int, int, int, int]]] = []
@@ -298,6 +345,37 @@ def _agent_blocks(
                 (
                     f"{view.symbol} = {signed:+.{view.value_decimals}f} {view.unit}",
                     f"command {raw:.2f} / 1.00",
+                ),
+                LEFT_COLOR if index == 0 else RIGHT_COLOR,
+            )
+        )
+    return tuple(blocks)
+
+
+def _toss_agent_blocks(
+    config: TaskConfig, state: dict[str, float], action: dict[str, np.ndarray]
+) -> tuple[tuple[str, tuple[str, ...], tuple[int, int, int, int]], ...]:
+    """The toss-catch action blocks: each paddle's pose and its commanded motion.
+
+    The command is a normalized `(dx, dz, dtheta)` pose increment, so the shown
+    velocity/tilt rate is `command * the paddle's maximum speed / tilt rate` (the physical
+    limit of the servo); the position and tilt are the paddle's current pose.
+    """
+    view = _task_view("toss")
+    pad_speed = float(config.pad_speed)
+    blocks: list[tuple[str, tuple[str, ...], tuple[int, int, int, int]]] = []
+    for index, side in enumerate(AGENT_KEYS):
+        command = np.asarray(action[side], dtype=np.float64).reshape(-1)
+        blocks.append(
+            (
+                view.left_title if index == 0 else view.right_title,
+                (
+                    (f"pad x {state[f'{side}_pad_x']:+.2f} · z {state[f'{side}_pad_z']:+.2f} m"),
+                    (
+                        f"tilt {math.degrees(float(state[f'{side}_pad_tilt'])):+.0f}° · "
+                        f"cmd vx {command[0] * pad_speed:+.1f} · "
+                        f"vz {command[1] * pad_speed:+.1f} m/s"
+                    ),
                 ),
                 LEFT_COLOR if index == 0 else RIGHT_COLOR,
             )
@@ -349,11 +427,21 @@ def _task_hud(
             ),
         )
         progress = float(np.clip(best_amplitude_deg / max(target_deg, 1e-6), 0.0, 1.0))
+    elif task == "toss":
+        lines = (
+            header,
+            (
+                f"passes {metrics['passes']:.0f}/{metrics['target_passes']:.0f} · "
+                f"ball z {metrics['ball_z']:.2f} m · vz {metrics['ball_vz']:+.2f} m/s"
+            ),
+            f"ball x {metrics['ball_x']:+.2f} m · court ±{config.court_x:.1f} m",
+        )
+        progress = metrics["progress"]
     else:  # pragma: no cover - guarded by _task_view / the CLI choices
         raise ValueError(f"task must be one of {RENDER_TASKS}, got {task!r}")
     return TaskHud(
         lines=lines,
-        agent_blocks=_agent_blocks(task, config, action),
+        agent_blocks=_agent_blocks(task, config, state, action),
         progress=progress,
     )
 
@@ -381,6 +469,11 @@ def _success_detail(task: str, metrics: dict[str, float]) -> str:
     """The SUCCESS detail line of a task (its achieved score)."""
     if task == "cartpole":
         return f"|pole angle| {metrics['angle_deg']:.1f}° · cart {metrics['cart_x']:+.2f} m at goal"
+    if task == "toss":
+        return (
+            f"{metrics['passes']:.0f}/{metrics['target_passes']:.0f} passes · "
+            f"ball z {metrics['ball_z']:.2f} m"
+        )
     return (
         f"peak {metrics['peak_amplitude_deg']:.1f}° · "
         f"{metrics['completed_cycles']:.0f}/{metrics['hold_cycles']:.0f} holds"
@@ -391,6 +484,12 @@ def _failure_detail(task: str, config: TaskConfig, metrics: dict[str, float]) ->
     """The FAILED detail line of a task (why it crossed the failure bound)."""
     if task == "cartpole":
         return f"pole fell: {metrics['angle_deg']:.1f}° > {math.degrees(config.failure_angle):.1f}°"
+    if task == "toss":
+        if metrics["ball_z"] < float(config.floor_z):
+            return f"ball dropped: z {metrics['ball_z']:.2f} < {float(config.floor_z):.2f} m"
+        return (
+            f"ball left court: x {metrics['ball_x']:+.2f} m (limit ±{float(config.court_x):.2f} m)"
+        )
     return f"swung past: {metrics['angle_deg']:.1f}° > {math.degrees(config.failure_angle):.1f}°"
 
 
@@ -400,6 +499,11 @@ def _timeout_detail(task: str, steps: int, metrics: dict[str, float]) -> str:
         return (
             f"{steps} steps · cart {metrics['cart_x']:+.2f} m · "
             f"|pole angle| {metrics['angle_deg']:.1f}°"
+        )
+    if task == "toss":
+        return (
+            f"{steps} steps · {metrics['passes']:.0f}/{metrics['target_passes']:.0f} passes · "
+            f"ball z {metrics['ball_z']:.2f} m"
         )
     return f"{steps} steps · peak {metrics['peak_amplitude_deg']:.1f}°"
 
@@ -575,12 +679,77 @@ def _decorate_pendulum(spec: Any, mujoco: Any, config: TaskConfig) -> None:
         )
 
 
+def _decorate_toss(spec: Any, mujoco: Any, config: TaskConfig) -> None:
+    """Colour the ball/paddles and add the court markings of the render-only copy."""
+    spec.geom("ball_geom").rgba = list(BALL_RGBA)
+    spec.geom("pad_left_geom").rgba = list(PAD_LEFT_RGBA)
+    spec.geom("pad_right_geom").rgba = list(PAD_RIGHT_RGBA)
+    # A faint halo makes the 6 cm ball readable at the demo's camera distance (render only).
+    spec.body("ball").add_geom(
+        name="ball_halo",
+        type=mujoco.mjtGeom.mjGEOM_SPHERE,
+        size=[0.085, 0.0, 0.0],
+        pos=[0.0, 0.0, 0.0],
+        rgba=list(BALL_HALO_RGBA),
+        contype=0,
+        conaffinity=0,
+    )
+    for side in AGENT_KEYS:
+        # A painted patch on both faces of each paddle: the plate's tilt about y (and which
+        # side faces the partner) is then readable from either side.
+        for face, z in (("front", 0.033), ("back", -0.033)):
+            spec.body(f"pad_{side}").add_geom(
+                name=f"pad_{side}_face_{face}",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=[0.08, 0.08, 0.003],
+                pos=[0.0, 0.0, z],
+                rgba=list(PAD_FACE_RGBA),
+                contype=0,
+                conaffinity=0,
+            )
+    world = spec.worldbody
+    court_x = float(config.court_x)
+    court_y = float(config.court_y)
+    line_z = 0.002  # just above the render-only ground plane at z = 0
+    for name, y in (("court_line_y_pos", court_y), ("court_line_y_neg", -court_y)):
+        world.add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=[court_x, 0.010, 0.002],
+            pos=[0.0, y, line_z],
+            rgba=list(COURT_LINE_RGBA),
+            contype=0,
+            conaffinity=0,
+        )
+    for name, x in (("court_line_x_pos", court_x), ("court_line_x_neg", -court_x)):
+        world.add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=[0.010, court_y, 0.002],
+            pos=[x, 0.0, line_z],
+            rgba=list(COURT_LINE_RGBA),
+            contype=0,
+            conaffinity=0,
+        )
+    world.add_geom(
+        name="court_centre",
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=[0.010, court_y, 0.002],
+        pos=[0.0, 0.0, line_z],
+        rgba=list(COURT_CENTRE_RGBA),
+        contype=0,
+        conaffinity=0,
+    )
+
+
 def _decorate_scene(task: str, spec: Any, mujoco: Any, config: TaskConfig) -> None:
-    """Add the task's colours and goal markers to the render-only spec (`toss` goes here)."""
+    """Add the task's colours and goal markers to the render-only spec."""
     if task == "cartpole":
         _decorate_cartpole(spec, mujoco, config)
     elif task == "pendulum":
         _decorate_pendulum(spec, mujoco, config)
+    elif task == "toss":
+        _decorate_toss(spec, mujoco, config)
     else:
         raise ValueError(f"task must be one of {RENDER_TASKS}, got {task!r}")
 
@@ -622,14 +791,51 @@ def _build_render_model(
     return model, data, camera
 
 
-def _write_render_state(task: str, data: Any, state: dict[str, float]) -> None:
-    """Copy the env's kinematic state into the render copy's `qpos`/`qvel` (`toss` here)."""
+def _write_render_state(
+    task: str,
+    data: Any,
+    state: dict[str, float],
+    mocap: dict[str, int] | None = None,
+) -> None:
+    """Copy the env's kinematic state into the render copy's `qpos`/`qvel` (and mocap).
+
+    Args:
+        task: The suite task the state belongs to.
+        data: The render copy's `MjData`.
+        state: The env's `state()` dict.
+        mocap: For the toss-catch only: the render copy's paddle mocap ids per agent (the
+            paddles are kinematic MOCAP bodies, so their pose lives outside `qpos`).
+
+    Raises:
+        ValueError: if the state does not fit the render copy.
+    """
     if task == "cartpole":
         qpos = [float(state["cart_x"]), float(state["pole_angle"])]
         qvel = [float(state["cart_vx"]), float(state["pole_angvel"])]
     elif task == "pendulum":
         qpos = [float(state["angle"])]
         qvel = [float(state["angvel"])]
+    elif task == "toss":
+        # The ball is a free sphere moving in the x-z court plane (no y motion by
+        # construction), so the y pose/velocity are zero; the sphere's spin is irrelevant.
+        qpos = [float(state["ball_x"]), 0.0, float(state["ball_z"]), 1.0, 0.0, 0.0, 0.0]
+        qvel = [float(state["ball_vx"]), 0.0, float(state["ball_vz"]), 0.0, 0.0, 0.0]
+        if mocap is None:
+            raise ValueError("the toss render state needs the paddle mocap ids")
+        for side in AGENT_KEYS:
+            tilt = float(state[f"{side}_pad_tilt"])
+            index = mocap[side]
+            data.mocap_pos[index] = (
+                float(state[f"{side}_pad_x"]),
+                0.0,
+                float(state[f"{side}_pad_z"]),
+            )
+            data.mocap_quat[index] = (
+                math.cos(tilt / 2.0),
+                0.0,
+                math.sin(tilt / 2.0),
+                0.0,
+            )
     else:
         raise ValueError(f"task must be one of {RENDER_TASKS}, got {task!r}")
     if data.qpos.shape != (len(qpos),) or data.qvel.shape != (len(qvel),):
@@ -653,10 +859,16 @@ class CoopDemoRenderer:
         self._renderer = mujoco.Renderer(self._model, height, width)
         self.width = int(width)
         self.height = int(height)
+        self._mocap: dict[str, int] | None = None
+        if task == "toss":
+            # The paddles are MOCAP bodies: their pose is written into `mocap_pos/quat`.
+            self._mocap = {
+                side: int(self._model.body(f"pad_{side}").mocapid[0]) for side in AGENT_KEYS
+            }
 
     def render_state(self, state: dict[str, float]) -> np.ndarray:
         """Render one RGB frame (uint8, `height` x `width` x 3) of the given env state."""
-        _write_render_state(self._task, self._data, state)
+        _write_render_state(self._task, self._data, state, self._mocap)
         self._mujoco.mj_forward(self._model, self._data)
         self._renderer.update_scene(self._data, camera=self._camera)
         return np.asarray(self._renderer.render(), dtype=np.uint8)
