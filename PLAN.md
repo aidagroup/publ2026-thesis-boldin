@@ -52,8 +52,8 @@
 - **Гейт G1:** oracle ≥ 0.95 на ≥ 256 эпизодах (RunPod) и стабильный поворот на локальных 1–2 env; без него дальше не идём.
 
 ### 2. Тренер непрерывного IPPO (none/oracle)
-- `callosum/training/wrench_ippo.py`: две независимые гауссовы политики (переиспользовать `callosum/common/ppo_core.py`: `ActorCritic`, GAE, clipped update), MuJoCo-векторизация циклом по envs (измерить throughput; при необходимости process pool), TensorBoard, чекпоинты, resume.
-- Конфиг `callosum/configs/wrench_ippo.py`; `callosum/experiments/cube_wrench/eval.py` поверх `callosum/common/metrics.py` (success, угол, дрейф, время; `cross_play`/`recovery` — позже).
+- `callosum/experiments/cube_wrench/train.py`: две независимые гауссовы политики (переиспользовать `callosum/common/ppo_core.py`: `ActorCritic`, GAE, clipped update), MuJoCo-векторизация циклом по envs (измерить throughput; при необходимости process pool), TensorBoard, чекпоинты, resume.
+- Конфиг `callosum/experiments/cube_wrench/ppo_config.py`; `callosum/experiments/cube_wrench/eval.py` поверх `callosum/common/metrics.py` (success, угол, дрейф, время; `cross_play`/`recovery` — позже).
 - **Гейт G2:** `oracle` ≥ 0.9 и разрыв `oracle−none` ≥ 0.3 (абсолютный) после подбора рандомизации; иначе усилить рандомизацию, а не двигаться дальше.
 
 ### 3. Интеграция Bi-JEPA (`predicted`)

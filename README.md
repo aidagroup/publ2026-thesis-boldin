@@ -14,7 +14,37 @@
 - Среда валидна: скриптовый oracle 0.99 на 256 эпизодах, `rotator-only` 0.0 (неаддитивность).
 - GPU-бэкенд (`mujoco_warp`, CUDA graph): 10.8×/26×/53× env-throughput, parity и determinism проверены.
 - Честная абляция (held-out, 128 эп. × 3 сида): **none 1.000 / oracle 0.901 / predicted 0.932** на default; на harsh — **oracle 0.969 / none 0.839** (gap +0.13). Асимптотического разрыва нет; привилегированная информация даёт скорость обучения и устойчивость, Bi-JEPA в текущей реализации пока не обгоняет none — отрицательный промежуточный результат, план улучшения в отчёте.
-- Демо: [`demo/demo_policy_vs_oracle.mp4`](demo/demo_policy_vs_oracle.mp4), [`demo/demo_preview.gif`](demo/demo_preview.gif), [`demo/learning_curves_honest_seed0.png`](demo/learning_curves_honest_seed0.png), [`demo/learning_curves_harsh.png`](demo/learning_curves_harsh.png).
+- Демо: [`demo/demo_policy_vs_oracle.mp4`](demo/demo_policy_vs_oracle.mp4), [`demo/demo_preview.gif`](demo/demo_preview.gif), [`demo/demo_wrench_arrows.mp4`](demo/demo_wrench_arrows.mp4) (видно, кто держит/крутит), [`demo/demo_arms_face_turn.mp4`](demo/demo_arms_face_turn.mp4) (реальные две SO-ARM101 в ManiSkill: 90° и SUCCESS), [`demo/learning_curves_honest_seed0.png`](demo/learning_curves_honest_seed0.png), [`demo/learning_curves_harsh.png`](demo/learning_curves_harsh.png).
+
+## Структура репозитория (2026-11-21)
+
+Код организован по экспериментам; переиспользуемое — в общем пакете:
+
+```
+callosum/
+  common/                      # cli, ppo_core, categorical, checkpoint, nonfinite,
+                               # logging, diag, metrics, visibility, bijepa(+config/probe),
+                               # render_utils — без импорта симулятора на уровне модуля
+  experiments/
+    cube_wrench/               # reduced-куб: env(+gpu), logic, config, ppo_config,
+                               # train, vec_env, eval, render, oracle
+    coop_tasks/                # two-robot suite: base, cartpole, pendulum, logic, config,
+                               # oracle, vec_env, eval  (toss&catch — следующий)
+    arm/                       # обе линии SO-ARM101: scene/layout/turntable/expert(s),
+                               # trainer, agent_obs, demos, bc; skills_* (skill-level),
+                               # face_turn_* + bc (joint-level legacy)
+  robots/so101_parallel_gripper.py
+  assets/so101_parallel_gripper/
+scripts/
+  experiments/{cube_wrench,coop_tasks,arm}/   # smoke/probe/collect/GPU-grid скрипты
+  analysis/                  # plot_wrench_curves, summarize_wrench_gpu
+  ops/                       # setup_server, update_server, cloud_resume_loop, diagnose_vulkan
+tests/
+  common/                    # общие юнит-тесты (ppo/metrics/bijepa/visibility/...)
+  experiments/{cube_wrench,coop_tasks,arm}/    # тесты по экспериментам
+```
+
+**Entry points:** `python -m callosum.experiments.cube_wrench.{train,eval,render}`, `python -m callosum.experiments.coop_tasks.eval`, `python -m callosum.experiments.arm.{trainer,bc,skills_eval}`, smoke-скрипты — `scripts/experiments/<experiment>/...`. План рефакторинга и финальное дерево: [`docs/refactor-plan.md`](docs/refactor-plan.md).
 
 ## Содержание
 

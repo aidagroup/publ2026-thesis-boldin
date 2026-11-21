@@ -30,6 +30,6 @@
 
 ## Impact
 
-- Код: новые модули в `callosum/envs/`, `callosum/configs/`, `callosum/training/` (тренер), `scripts/`, `tests/`; `pyproject.toml` (extra `sandbox`), `uv.lock`.
+- Код: новые модули в `callosum/experiments/`, `callosum/experiments/arm/`, `callosum/experiments/` (тренер), `scripts/`, `tests/`; `pyproject.toml` (extra `sandbox`), `uv.lock`.
 - Инфраструктура: MuJoCo 4.0.1 (Apache-2.0), CPU-прогоны локально (1–2 env) и на RunPod (256+ env); GPU-симулятор ManiSkill не требуется.
 - Риск для темы: reduced-модель абстрагирует руки; в тексте диплома она явно позиционируется как механизменная модель координации, руки — весенний мост (профили моментов → примитивы). Тема исследования (децентрализованная координация агентов) сохраняется.

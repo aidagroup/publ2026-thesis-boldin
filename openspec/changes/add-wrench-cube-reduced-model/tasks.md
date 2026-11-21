@@ -18,7 +18,7 @@
 
 ## 2. Тренер IPPO
 
-- [x] 2.1 `callosum/training/wrench_ippo.py`: две гауссовы политики (`_ppo_core.ActorCritic`), GAE, клиппинг, TensorBoard, чекпоинты, resume
+- [x] 2.1 `callosum/experiments/wrench_ippo.py`: две гауссовы политики (`_ppo_core.ActorCritic`), GAE, клиппинг, TensorBoard, чекпоинты, resume
 - [x] 2.2 Векторизация MuJoCo (цикл по envs; при необходимости process pool), замер throughput
 - [x] 2.3 `callosum/experiments/cube_wrench/eval.py` поверх `callosum/common/metrics.py`
 - [x] 2.4 Прогоны `none`/`oracle`; подбор рандомизации

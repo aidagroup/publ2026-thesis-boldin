@@ -255,3 +255,6 @@ demo/
 
 # Local experiment result JSONs (grid/evals; artifacts live on the pod volume)
 results_gpu/
+
+# Local presentation scratch (PDFs/PNGs/scripts), not part of the package
+presentation/

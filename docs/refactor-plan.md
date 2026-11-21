@@ -1,6 +1,6 @@
 # План рефакторинга репозитория (2026-11-21)
 
-Статус: **ждём завершения трёх активных агентов** (demo-render: стрелки в демо; arms-demo: клип с реальными SO-ARM101 в ManiSkill; implementer-coop: харнесс `CartPoleCoop`/`PendulumPump`). После их отчётов — рефакторинг без конфликтов.
+Статус: **ВЫПОЛНЕНО 2026-11-21** (S1–S5, коммиты `refactor(s1)…(s5)`; backup-ветка `pre-refactor-2026-11-21`). Итоговое дерево — в разделе «Финальная структура» ниже; все тесты (595 passed, 5 skipped) и `ruff check/format` зелёные.
 
 ## Проблемы текущей структуры
 
@@ -84,3 +84,32 @@ scripts/
 - Все 518+ тестов зелёные после каждого шага; `ruff check` чистый.
 - Публичные env id (`CubeWrench-v0`, `FaceTurn-v0`, `FaceTurnSkills-v0`, `TwoSO101-v0`) и CLI-контракты (`python -m ...`) сохраняются или явно документируются в новых путях.
 - Один шаг = один коммит; ветка `step/2.4-wrench-cube`; без изменения поведения экспериментов.
+
+
+## Финальное дерево (2026-11-21)
+
+```
+callosum/
+  common/            cli, ppo_core, categorical, checkpoint, nonfinite, logging, diag,
+                     diag_names, metrics, visibility, bijepa(+config,+probe), render_utils
+  experiments/
+    cube_wrench/     env, env_gpu, logic, config, ppo_config, train, vec_env, eval, render, oracle
+    coop_tasks/      base, cartpole, pendulum, logic, config, oracle, vec_env, eval
+    arm/             scene, layout, turntable, face_lock, sim_compat, sim_utils, expert,
+                     expert_config, phases, program, tracking, noise, ppo_config, trainer,
+                     agent_obs, skills, skills_obs, skills_agent_obs, demos, bc, bc_config;
+                     skills_env, skills_cube, skills_plans, skills_runtime, skills_conductor,
+                     skills_config, skills_cube_config, skills_eval; face_turn_env, face_turn_config
+  robots/            so101_parallel_gripper
+  assets/            so101_parallel_gripper (URDF/meshes)
+scripts/
+  experiments/{cube_wrench,coop_tasks,arm}/, analysis/, ops/
+tests/
+  common/, experiments/{cube_wrench,coop_tasks,arm}/, test_import.py, test_assets.py
+```
+
+Удалено/вычищено: пакеты `callosum/envs`, `callosum/configs`, `callosum/experts`,
+`callosum/training`, `callosum/eval`, `callosum/agents` (их содержимое перенесено);
+дублирующие `_sim_utils`/`_render_utils` вынесены в общие модули; `docs/refactor-plan.md`
+зафиксировал политику (legacy joint-level архив — в `experiments/arm`, а не удалён как
+мотивация диплома). Артефакты `demo/`, `results_gpu/`, `presentation/` — в `.gitignore`.

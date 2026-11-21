@@ -106,7 +106,7 @@ eval_one() {  # $1 run name, $2 eval seed
     return 0
   fi
   mode="$(mode_of "$name")"
-  "$PY" callosum/experiments/cube_wrench/eval.py \
+  "$PY" -m callosum.experiments.cube_wrench.eval \
     --checkpoint "runs/$name/latest.pt" --input-mode "$mode" \
     --backend warp --device cuda --num-envs "$EVAL_EPISODES" \
     --episodes "$EVAL_EPISODES" --seed "$seed" --out "$out" \

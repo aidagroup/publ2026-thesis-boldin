@@ -64,7 +64,7 @@ echo "all trainers finished"
 for seed in $SEEDS; do
   for mode in $MODES; do
     name="wrench_${mode}_s${seed}"
-    "$PYTHON" callosum/experiments/cube_wrench/eval.py \
+    "$PYTHON" -m callosum.experiments.cube_wrench.eval \
       --checkpoint "$RUNS_DIR/$name/latest.pt" \
       --input-mode "$mode" --episodes "$EVAL_EPISODES" --seed 0 \
       --out "$RESULTS_DIR/$name.json"
