@@ -88,11 +88,7 @@ These are what make the oracle a true upper bound: the partner's actuator suppre
 not recoverable from the shared cube state, so without them `none` could infer the
 partner's behaviour only from delayed dynamics (the observed oracle≈none collapse)."""
 
-PARTNER_FIELDS = (
-    PARTNER_WRENCH_FIELDS
-    + PARTNER_PARAM_FIELDS
-    + PARTNER_PRIVILEGED_FIELDS
-)
+PARTNER_FIELDS = PARTNER_WRENCH_FIELDS + PARTNER_PARAM_FIELDS + PARTNER_PRIVILEGED_FIELDS
 """The full partner block ("oracle" mode): applied wrench (6) + private parameters (3)
 + start delay and remaining slip steps (2)."""
 
