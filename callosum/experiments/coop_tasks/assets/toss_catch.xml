@@ -1,0 +1,56 @@
+<!-- TossCatch-v0: the catch/toss reduced model of the two-agent coop suite
+     (see callosum/experiments/coop_tasks/toss_catch.py and config.TossConfig).
+
+Model layout (PLAN.md "Two-robot task suite"):
+
+  * `ball` -- a free 0.10 kg sphere (radius 0.06 m) with one free joint; gravity acts on
+             it, so between paddle contacts its trajectory is a parabola in the x-z plane;
+  * `pad_left` / `pad_right` -- two 0.60 x 0.60 x 0.06 m plates (half extents 0.30, 0.30,
+             0.03 m) on MOCAP bodies: their pose is written by the env from the agents'
+             normalized `(dx, dz, dtheta)` commands, i.e. the plates are kinematic
+             position-controlled paddles (the ideal limit of a stiff position servo, which
+             the task design allows). The plate's local +z axis is its face normal; the env
+             writes the tilt about world +y and interpolates the pose over the physics
+             substeps, so the paddles move smoothly instead of teleporting.
+
+The two agents are the `left` and `right` paddles: each can translate its paddle in the
+court plane (x between the two sides, z vertical) and tilt it. The ball-paddle contact is
+the physical MuJoCo contact between the ball sphere and the paddle box (frictionless in the
+model default; the sampled contact friction/restitution are written into `geom_friction`
+and `geom_solref` by the env on every reset). The task success is a conjunction: the team
+must complete `n_passes` alternating catches without the ball dropping below the floor
+height or leaving the court (both logical bounds, so the model has no floor geom).
+
+XML-OWNED physics: the ball radius/mass and the paddle half extents. MuJoCo derives the
+ball's inertia from the geom at compile time, so the mass stays XML-owned; `TossConfig`
+documents it and is the source of truth for everything else (timestep, gravity, court
+bounds, paddle speed/tilt rate, nominal tilt, tolerances), which `TossCatchEnv` writes into
+the model. The `solref`/`friction` values below are defaults only: each reset replaces the
+contact damping ratio and the friction with the episode's sampled randomisation.
+-->
+<mujoco model="toss_catch_coop">
+  <compiler angle="radian"/>
+  <option timestep="0.005" integrator="implicitfast" gravity="0 0 -9.81"/>
+
+  <worldbody>
+    <!-- Ball: a free sphere in the x-z plane; gravity is the only force between contacts. -->
+    <body name="ball" pos="0 0 1.0">
+      <freejoint name="ball_free"/>
+      <geom name="ball_geom" type="sphere" size="0.06" mass="0.1" friction="0 0 0"
+            solref="0.1 0.14" contype="1" conaffinity="1"/>
+    </body>
+
+    <!-- Left paddle: the env sets its pose from the left agent's commands. The identity
+         quaternion here is only the load-time pose; `TossCatchEnv` writes the tilt. -->
+    <body name="pad_left" pos="-0.55 0 0.30" quat="1 0 0 0" mocap="true">
+      <geom name="pad_left_geom" type="box" size="0.30 0.30 0.03" friction="0 0 0"
+            solref="0.1 0.14" contype="1" conaffinity="1"/>
+    </body>
+
+    <!-- Right paddle (mirror of the left one). -->
+    <body name="pad_right" pos="0.55 0 0.30" quat="1 0 0 0" mocap="true">
+      <geom name="pad_right_geom" type="box" size="0.30 0.30 0.03" friction="0 0 0"
+            solref="0.1 0.14" contype="1" conaffinity="1"/>
+    </body>
+  </worldbody>
+</mujoco>

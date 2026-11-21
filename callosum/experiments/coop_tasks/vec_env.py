@@ -18,8 +18,8 @@ The wrapper owns the same auto-reset contract as `_vec_wrench.VecWrenchCube`:
 * `final_obs` keeps the episode's true last observation (the truncation bootstrap of GAE);
 * the finished episodes' return / length / success / final diagnostic are collected for the
   trainer's `train/*` logs, and `infos` keeps every env's last step info (`finished_angles`
-  is the task's `angle_deg`: the pole angle for the cart-pole, the current hinge angle for
-  the pendulum).
+  is the task's primary diagnostic: the pole angle, the pendulum amplitude or the pass
+  count).
 
 Episode seeds are explicit: `reset(seed)` seeds env `i` with `seed + i`, and every
 auto-reset continues one global counter, so the envs do not replay the same episode
@@ -34,7 +34,11 @@ import numpy as np
 
 from callosum.experiments.coop_tasks import make_coop_env
 from callosum.experiments.coop_tasks.config import coop_config
-from callosum.experiments.coop_tasks.logic import AGENT_KEYS, validate_partner_mode
+from callosum.experiments.coop_tasks.logic import (
+    AGENT_KEYS,
+    task_diagnostic,
+    validate_partner_mode,
+)
 
 
 @dataclass
@@ -59,7 +63,9 @@ class VecCoopStep:
         finished_returns: undiscounted returns of the episodes that ended on this step.
         finished_lengths: lengths (control steps) of those episodes.
         finished_successes: success flags of those episodes.
-        finished_angles: final `angle_deg` diagnostic of those episodes.
+        finished_angles: final primary diagnostic of those episodes (`angle_deg` for the
+            cart-pole, `amplitude_deg` for the pendulum, `passes` for the toss-catch); the
+            field name is kept for the shared trainer contract.
     """
 
     obs: dict[str, np.ndarray]
@@ -93,7 +99,7 @@ class VecCoopEnv:
         """Build the envs and their per-env running episode accumulators.
 
         Args:
-            task: The coop task (`"cartpole"` or `"pendulum"`).
+            task: The coop task (`"cartpole"`, `"pendulum"` or `"toss"`).
             num_envs: Number of envs (each is a separate MuJoCo model/data pair).
             partner_mode: Observation visibility mode, `"none"` or `"oracle"`.
             config: The task config; the task's default config when `None`.
@@ -179,7 +185,7 @@ class VecCoopEnv:
             finished_returns.append(float(self._episode_return[index]))
             finished_lengths.append(int(self._episode_length[index]))
             finished_successes.append(bool(info["success"]))
-            finished_angles.append(float(info["angle_deg"]))
+            finished_angles.append(task_diagnostic(self.task, info))
             # Auto-reset: the next policy call must see a fresh episode, while `final_obs`
             # (above) keeps the true last observation for the truncation bootstrap.
             obs, _info = env.reset(seed=self._next_seed)

@@ -3,8 +3,8 @@
 The coop suite is CPU-only MuJoCo, so this is one of the allowed local simulation checks
 (1-2 envs, short episodes, no training). It creates the envs one after another (the env is
 single-instance; the trainer vectorises later), runs `--episodes` episodes per env for the
-requested controller and prints, per episode, success / steps / task diagnostic, then the
-aggregate.
+requested controller and prints, per episode, success / steps / task diagnostic (the pole
+angle, the pendulum amplitude or the toss-catch pass count), then the aggregate.
 
 Controllers (`--controller`):
 
@@ -14,7 +14,8 @@ Controllers (`--controller`):
   the right agent absent must stay clearly below the oracle (the suite's non-additivity).
 * `only-left` -- the absent-agent baseline on its own: the oracle commands with the right
   agent forced to zero (the one-sided actuators then cover only every other direction /
-  half-cycle). It is expected to (almost) never succeed.
+  half-cycle; in the toss-catch task the right paddle then never leaves its ready pose). It
+  is expected to (almost) never succeed.
 * `random` -- `env.action_space.sample()`; `--seed` seeds `np.random` and each env's
   action-space generator, so random runs are reproducible.
 
@@ -23,6 +24,7 @@ a diagnostic and always exits 0), 1 otherwise.
 
     ./.venv/bin/python scripts/experiments/coop_tasks/smoke_coop.py --task cartpole --controller oracle --envs 2 --episodes 10
     ./.venv/bin/python scripts/experiments/coop_tasks/smoke_coop.py --task pendulum --controller oracle --envs 2 --episodes 10
+    ./.venv/bin/python scripts/experiments/coop_tasks/smoke_coop.py --task toss --controller oracle --envs 2 --episodes 10
     ./.venv/bin/python scripts/experiments/coop_tasks/smoke_coop.py --task cartpole --controller only-left --envs 2 --episodes 10
 """
 
@@ -51,7 +53,7 @@ def parse_args() -> argparse.Namespace:
             "baseline or random actions."
         )
     )
-    parser.add_argument("--task", choices=("cartpole", "pendulum"), default="cartpole")
+    parser.add_argument("--task", choices=("cartpole", "pendulum", "toss"), default="cartpole")
     parser.add_argument("--envs", type=int, default=2, help="envs to build sequentially")
     parser.add_argument("--episodes", type=int, default=5, help="episodes per env")
     parser.add_argument(
@@ -73,10 +75,12 @@ def _episode_seed(base_seed: int, env_index: int, episode: int, episodes: int) -
 
 
 def _diagnostic(info: dict, task: str) -> float:
-    """The task's primary amplitude/angle diagnostic from a step info dict."""
+    """The task's primary diagnostic from a step info dict (angle / amplitude / passes)."""
     if task == "cartpole":
         return float(info["angle_deg"])
-    return float(info["amplitude_deg"])
+    if task == "pendulum":
+        return float(info["amplitude_deg"])
+    return float(info["passes"])
 
 
 def run_episode(env, oracle, kind: str, seed: int, task: str) -> tuple[dict, int]:
@@ -117,11 +121,15 @@ def run_controller(
                 successes.append(float(info["success"]))
                 steps.append(episode_steps)
                 diagnostics.append(_diagnostic(info, args.task))
+                label = {
+                    "cartpole": "angle_deg",
+                    "pendulum": "amplitude_deg",
+                    "toss": "passes",
+                }[args.task]
                 print(
                     f"env {env_index} episode {episode}: "
                     f"success={bool(info['success'])} steps={episode_steps} "
-                    f"{'angle_deg' if args.task == 'cartpole' else 'amplitude_deg'}="
-                    f"{diagnostics[-1]:.1f}"
+                    f"{label}={diagnostics[-1]:.1f}"
                 )
         finally:
             env.close()

@@ -1,4 +1,4 @@
-"""MuJoCo-guarded tests of the two-agent coop envs (`CartPoleCoop-v0`, `PendulumPump-v0`).
+"""MuJoCo-guarded tests of the two-agent coop envs (all three suite tasks).
 
 The environments need the `sandbox` extra (mujoco), which CI does not install, so every test
 here starts with `pytest.importorskip("mujoco")` (the same pattern as the simulator-side
@@ -7,21 +7,28 @@ checks of `tests/test_wrench_logic.py`): CI skips them, the macOS sandbox venv r
 simulator.
 
 What is checked: the Gymnasium spaces and observation widths (against the pure
-`_coop_logic` layout), the config-as-truth model writes and the sampled-damping reset, seed
-determinism and reset-friendliness (no hidden state across episodes), the deterministic
-scripted oracle reaching the task and the one-sided only-left baseline failing it, the
-terminal reward cases, the pendulum hold-cycle success, and the `_vec_coop` auto-reset / vec
-contract the trainer relies on.
+`callosum.experiments.coop_tasks.logic` layout), the config-as-truth model writes and the
+sampled-randomisation reset, seed determinism and reset-friendliness (no hidden state across
+episodes), the deterministic scripted oracle reaching the task and the absent-agent
+(`only-left`) baseline failing it, the terminal reward cases, the pendulum hold-cycle success,
+the toss-catch pass/tilt/floor rules, and the `_vec_coop` auto-reset / vec contract the
+trainer relies on.
 """
 
 import numpy as np
 import pytest
 
 from callosum.experiments.coop_tasks.config import coop_config
-from callosum.experiments.coop_tasks.logic import AGENT_KEYS, task_obs_size
+from callosum.experiments.coop_tasks.logic import AGENT_KEYS, obs_size, task_obs_size
+
+_ALL_TASKS = ("cartpole", "pendulum", "toss")
 
 _ORACLE_EPISODES = 4
 """Small local episode count for the oracle/baseline checks (the envs are CPU MuJoCo)."""
+
+_TOSS_ORACLE_EPISODES = 6
+"""The toss-catch oracle is the suite's hardest script (contact/timing): a few extra local
+episodes keep the "scripted upper bound reaches the task" check meaningful."""
 
 
 def _make_env(task: str, **kwargs):
@@ -58,14 +65,15 @@ def _run_episode(env, oracle, seed: int, *, drop_right: bool = False) -> tuple[d
     return info, steps
 
 
-@pytest.mark.parametrize("task", ("cartpole", "pendulum"))
+@pytest.mark.parametrize("task", _ALL_TASKS)
 def test_spaces_and_observation_widths(task: str) -> None:
     pytest.importorskip("mujoco")
     env = _make_env(task)
+    action_dim = coop_config(task).action_size
     try:
         assert set(env.action_space.spaces) == set(AGENT_KEYS)
         for key in AGENT_KEYS:
-            assert env.action_space[key].shape == (1,)
+            assert env.action_space[key].shape == (action_dim,)
             assert env.observation_space[key].shape == (task_obs_size(task, "none"),)
         obs, info = env.reset(seed=0)
         assert set(obs) == set(AGENT_KEYS)
@@ -74,22 +82,25 @@ def test_spaces_and_observation_widths(task: str) -> None:
             assert vector.shape == (task_obs_size(task, "none"),)
             assert np.all(np.isfinite(vector))
         assert info["success"] is False
-        for key in ("angle_deg", "time"):
+        expected_info = ("ball_z", "passes", "time") if task == "toss" else ("angle_deg", "time")
+        for key in expected_info:
             assert key in info
-        # The oracle partner block widens every agent's observation by 2*1 + 4 = 6.
+        # The oracle partner block is `2 * action_dim + 4` wide.
+        partner_width = 2 * action_dim + 4
         oracle_env = _make_env(task, partner_mode="oracle")
         try:
             assert oracle_env.observation_space[AGENT_KEYS[0]].shape == (
                 task_obs_size(task, "oracle"),
             )
-            assert task_obs_size(task, "oracle") == task_obs_size(task, "none") + 6
+            assert task_obs_size(task, "oracle") == task_obs_size(task, "none") + partner_width
+            assert obs_size(env._task_spec, "oracle") == task_obs_size(task, "oracle")
         finally:
             oracle_env.close()
     finally:
         env.close()
 
 
-@pytest.mark.parametrize("task", ("cartpole", "pendulum"))
+@pytest.mark.parametrize("task", _ALL_TASKS)
 def test_config_is_written_into_the_model_and_sampled_on_reset(task: str) -> None:
     pytest.importorskip("mujoco")
     cfg = coop_config(task)
@@ -105,28 +116,43 @@ def test_config_is_written_into_the_model_and_sampled_on_reset(task: str) -> Non
             )
             assert model.dof_damping[env._cart_dof] == pytest.approx(cfg.cart_damping)
             assert model.dof_armature[env._pole_dof] == pytest.approx(cfg.pole_armature)
-        else:
+        elif task == "pendulum":
             hinge = model.joint("pivot_hinge")
             assert tuple(model.jnt_range[hinge.id]) == pytest.approx(
                 (-cfg.hinge_limit, cfg.hinge_limit)
             )
             assert model.dof_armature[env._hinge_dof] == pytest.approx(cfg.hinge_armature)
-        hinge_dof = env._pole_dof if task == "cartpole" else env._hinge_dof
         applied = []
         for seed in range(6):
             env.reset(seed=seed)
-            sampled = env.randomization.damping
-            assert (
-                cfg.randomization.damping_range[0] <= sampled <= cfg.randomization.damping_range[1]
-            )
-            assert model.dof_damping[hinge_dof] == pytest.approx(sampled)
+            if task == "toss":
+                sampled = env.randomization.contact_dampratio
+                assert (
+                    cfg.randomization.contact_dampratio_range[0]
+                    <= sampled
+                    <= cfg.randomization.contact_dampratio_range[1]
+                )
+                for geom_id in (env._ball_geom, *env._pad_geom.values()):
+                    assert model.geom_solref[geom_id, 1] == pytest.approx(sampled)
+                    assert model.geom_friction[geom_id, 0] == pytest.approx(
+                        env.randomization.contact_friction
+                    )
+            else:
+                sampled = env.randomization.damping
+                assert (
+                    cfg.randomization.damping_range[0]
+                    <= sampled
+                    <= cfg.randomization.damping_range[1]
+                )
+                hinge_dof = env._pole_dof if task == "cartpole" else env._hinge_dof
+                assert model.dof_damping[hinge_dof] == pytest.approx(sampled)
             applied.append(sampled)
-        assert len(set(applied)) > 1  # different seeds -> different applied damping
+        assert len(set(applied)) > 1  # different seeds -> different applied randomness
     finally:
         env.close()
 
 
-@pytest.mark.parametrize("task", ("cartpole", "pendulum"))
+@pytest.mark.parametrize("task", _ALL_TASKS)
 def test_seed_determinism_and_reset_friendliness(task: str) -> None:
     pytest.importorskip("mujoco")
     env = _make_env(task)
@@ -147,16 +173,20 @@ def test_seed_determinism_and_reset_friendliness(task: str) -> None:
         seeds = set()
         for seed in range(8):
             env.reset(seed=seed)
-            seeds.add(round(env.randomization.damping, 12))
+            if task == "toss":
+                seeds.add(round(env.randomization.contact_dampratio, 12))
+            else:
+                seeds.add(round(env.randomization.damping, 12))
         assert len(seeds) > 1
     finally:
         env.close()
 
 
-@pytest.mark.parametrize("task", ("cartpole", "pendulum"))
+@pytest.mark.parametrize("task", _ALL_TASKS)
 def test_pending_commands_are_the_latency_queues(task: str) -> None:
     pytest.importorskip("mujoco")
     env = _make_env(task)
+    action_dim = coop_config(task).action_size
     try:
         with pytest.raises(RuntimeError, match="reset"):
             env.pending_commands()
@@ -168,7 +198,7 @@ def test_pending_commands_are_the_latency_queues(task: str) -> None:
         }
         for value in pending.values():
             for command in value:
-                assert command.shape == (1,)
+                assert command.shape == (action_dim,)
                 assert np.allclose(command, 0.0)  # the queues start with zeros
         env.step(_zero_action(env))
         assert {key: len(value) for key, value in env.pending_commands().items()} == {
@@ -178,24 +208,25 @@ def test_pending_commands_are_the_latency_queues(task: str) -> None:
         env.close()
 
 
-@pytest.mark.parametrize("task", ("cartpole", "pendulum"))
+@pytest.mark.parametrize("task", _ALL_TASKS)
 def test_oracle_succeeds_and_only_left_baseline_fails(task: str) -> None:
     pytest.importorskip("mujoco")
     env = _make_env(task)
+    episodes = _TOSS_ORACLE_EPISODES if task == "toss" else _ORACLE_EPISODES
     try:
         oracle = _make_oracle(task, env.config)
         oracle_successes = []
         oracle_steps = []
-        for episode in range(_ORACLE_EPISODES):
+        for episode in range(episodes):
             info, steps = _run_episode(env, oracle, seed=episode)
             oracle_successes.append(bool(info["success"]))
             oracle_steps.append(steps)
         baseline = [
             bool(_run_episode(env, oracle, seed=episode, drop_right=True)[0]["success"])
-            for episode in range(_ORACLE_EPISODES)
+            for episode in range(episodes)
         ]
-        assert sum(oracle_successes) >= _ORACLE_EPISODES - 1  # the scripted upper bound
-        assert not any(baseline)  # the one-sided absent-agent baseline cannot do the task
+        assert sum(oracle_successes) >= episodes - 1  # the scripted upper bound
+        assert not any(baseline)  # the absent-agent baseline cannot do the task
         assert sum(oracle_successes) > sum(baseline)
         assert all(steps < env.config.max_control_steps for steps in oracle_steps)
     finally:
@@ -303,6 +334,23 @@ def test_vec_coop_contract_and_auto_reset() -> None:
     [
         ("cartpole", {"cart_x", "cart_vx", "pole_angle", "pole_angvel", "target_x"}),
         ("pendulum", {"angle", "angvel", "target_amplitude", "peak_abs_angle", "completed_cycles"}),
+        (
+            "toss",
+            {
+                "ball_x",
+                "ball_z",
+                "ball_vx",
+                "ball_vz",
+                "passes",
+                "target_passes",
+                "left_pad_x",
+                "left_pad_z",
+                "left_pad_tilt",
+                "right_pad_x",
+                "right_pad_z",
+                "right_pad_tilt",
+            },
+        ),
     ],
 )
 def test_state_exposes_the_oracle_fields(task: str, state_keys: set[str]) -> None:
@@ -316,3 +364,137 @@ def test_state_exposes_the_oracle_fields(task: str, state_keys: set[str]) -> Non
         assert env.randomization is not None
     finally:
         env.close()
+
+
+# --- toss-catch specific checks -----------------------------------------------------------
+
+_TOSS_ZERO_STEP = 1e-9
+
+
+def _toss_zero_action(env) -> dict[str, np.ndarray]:
+    """The all-zero (do-nothing) toss-catch action (all three dims)."""
+    return {key: np.zeros(env.action_space[key].shape, dtype=np.float32) for key in AGENT_KEYS}
+
+
+def test_toss_floor_failure_is_a_terminal_failure() -> None:
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        env.reset(seed=0)
+        action = _toss_zero_action(env)
+        reward = 0.0
+        terminated = truncated = False
+        info: dict = {}
+        while not (terminated or truncated):
+            _obs, reward, terminated, truncated, info = env.step(action)
+        # The ball is still released (the hidden impulse does not depend on the actions) and
+        # falls to the floor because no paddle moves: a true failure, not a timeout.
+        assert terminated and not truncated
+        assert info["success"] is False
+        assert info["ball_z"] < cfg.floor_z
+        assert reward == pytest.approx(cfg.reward.failure_penalty)
+    finally:
+        env.close()
+
+
+def test_toss_oracle_returns_the_success_reward() -> None:
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        oracle = _make_oracle("toss", env.config)
+        env.reset(seed=0)
+        reward = 0.0
+        terminated = truncated = False
+        info: dict = {}
+        while not (terminated or truncated):
+            _obs, reward, terminated, truncated, info = env.step(oracle.act(env))
+        # The scripted oracle completes `n_passes` alternating catches well inside the budget.
+        assert terminated and not truncated
+        assert info["success"] is True
+        assert info["passes"] >= cfg.n_passes
+        assert reward == pytest.approx(cfg.reward.success_bonus - cfg.reward.step_penalty)
+    finally:
+        env.close()
+
+
+def test_toss_actions_move_and_tilt_the_paddle() -> None:
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        env.reset(seed=0)
+        start = env.state()
+        action = _toss_zero_action(env)
+        # Up to 8 steps of the full +x / +tilt command: the right paddle must translate in
+        # +x and its tilt must grow, both inside the config's workspace/tilt limits.
+        action["right"] = np.array([1.0, 0.0, 1.0], dtype=np.float32)
+        for _ in range(8):
+            env.step(action)
+        state = env.state()
+        assert state["right_pad_x"] > start["right_pad_x"] + _TOSS_ZERO_STEP
+        assert state["right_pad_x"] <= cfg.pad_outer_x + _TOSS_ZERO_STEP
+        assert state["right_pad_tilt"] > start["right_pad_tilt"] + _TOSS_ZERO_STEP
+        assert abs(state["right_pad_tilt"]) <= cfg.pad_tilt_limit + _TOSS_ZERO_STEP
+        # The vertical command is bounded too: the pad never leaves its z workspace.
+        assert (
+            cfg.pad_min_z - _TOSS_ZERO_STEP
+            <= state["right_pad_z"]
+            <= (cfg.pad_max_z + _TOSS_ZERO_STEP)
+        )
+    finally:
+        env.close()
+
+
+def test_toss_trajectory_is_reproducible_from_the_seed() -> None:
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        actions = {
+            "left": np.array([0.5, 0.5, 0.2], dtype=np.float32),
+            "right": np.array([-0.5, 0.5, -0.2], dtype=np.float32),
+        }
+        trajectories = []
+        for _ in range(2):
+            env.reset(seed=11)
+            positions = []
+            for _step in range(10):
+                env.step(actions)
+                state = env.state()
+                positions.append((state["ball_x"], state["ball_z"]))
+            trajectories.append(positions)
+        assert trajectories[0] == trajectories[1]
+    finally:
+        env.close()
+
+
+def test_vec_coop_toss_contract_and_finished_diagnostic() -> None:
+    pytest.importorskip("mujoco")
+    from callosum.experiments.coop_tasks.vec_env import VecCoopEnv
+
+    cfg = coop_config("toss")
+    vec = VecCoopEnv("toss", 2, config=cfg, seed=0)
+    try:
+        assert vec.obs_dim == task_obs_size("toss", "none") == 26
+        assert vec.action_dim == 3
+        obs = vec.reset(seed=5)
+        assert {key: value.shape for key, value in obs.items()} == {
+            key: (2, vec.obs_dim) for key in AGENT_KEYS
+        }
+        actions = {key: np.zeros((2, 3), dtype=np.float32) for key in AGENT_KEYS}
+        result = vec.step(actions)
+        # Zero paddle commands cannot catch the ball: both worlds finish with a failure and
+        # the vec env reports the task's primary diagnostic (the pass count) for the trainer.
+        while not result.done.any():
+            result = vec.step(actions)
+        assert result.terminated.all()
+        assert result.finished_successes == [False, False]
+        assert result.finished_angles == [0.0, 0.0]
+        assert len(result.finished_lengths) == 2
+        assert all(length < cfg.max_control_steps for length in result.finished_lengths)
+        with pytest.raises(ValueError, match="shape"):
+            vec.step({key: np.zeros((3, 3), dtype=np.float32) for key in AGENT_KEYS})
+    finally:
+        vec.close()

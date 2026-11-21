@@ -2,7 +2,7 @@
 
 The `--task` flag selects the environment: the default `"cube"` keeps the thesis main line
 (`CubeWrench-v0`, `holder`/`rotator`) bit-for-bit on its original CPU/warp paths, while
-`"cartpole"`/`"pendulum"` train the two-agent coop suite (`left`/`right`) on the same
+`"cartpole"`/`"pendulum"`/`"toss"` train the two-agent coop suite (`left`/`right`) on the same
 trainer, policies, GAE, checkpoints and Bi-JEPA path -- the env supplies its observation
 width, action width and agent keys (`WrenchPPOConfig.env_obs_size`/`action_size`/
 `agent_keys`), and the coop vectorisation is `callosum.experiments.coop_tasks.vec_env.VecCoopEnv`.
@@ -97,6 +97,7 @@ from callosum.experiments.cube_wrench.ppo_config import (
     WrenchPPOConfig,
     checkpoint_task,
     parse_args_with_explicit,
+    task_action_size,
     task_obs_size,
 )
 
@@ -868,7 +869,7 @@ def check_checkpoint_compat(payload: dict, input_mode: str) -> tuple[str, int]:
             )
         latent_dim = 0
     expected_input = expected_obs + latent_dim
-    expected_action = 6 if task == "cube" else 1
+    expected_action = task_action_size(task)
     saved_action = payload.get("action_size")
     if saved_action is not None and int(saved_action) != expected_action:
         raise ValueError(

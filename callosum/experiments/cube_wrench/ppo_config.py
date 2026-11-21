@@ -61,6 +61,7 @@ from callosum.experiments.coop_tasks.config import (
 from callosum.experiments.coop_tasks.config import (
     CartPoleConfig,
     PendulumConfig,
+    TossConfig,
     coop_action_size,
     coop_config,
     coop_obs_size,
@@ -82,7 +83,7 @@ from callosum.experiments.cube_wrench.logic import (
 
 TASKS = ("cube",) + COOP_TASKS
 """Environments of a run: the default `CubeWrench-v0` (`"cube"`, the unchanged path) or one
-of the reduced two-agent coop tasks (`"cartpole"`, `"pendulum"`). The coop suite runs on the
+of the reduced two-agent coop tasks (`"cartpole"`, `"pendulum"`, `"toss"`). The coop suite runs on the
 CPU MuJoCo loop only (no mujoco_warp backend yet) and is vectorised by
 `callosum.experiments.coop_tasks.vec_env`; the cube keeps its original backend selection."""
 
@@ -121,7 +122,11 @@ def task_obs_size(task: str, partner_mode: str) -> int:
 
 
 def task_action_size(task: str) -> int:
-    """Width of one agent's action of `task` (6 for the cube, 1 for the coop tasks)."""
+    """Width of one agent's action of `task` (6 for the cube, 1 or 3 for the coop tasks).
+
+    The one-sided force tasks (`cartpole`, `pendulum`) have a scalar action; the toss-catch
+    task's paddles take `(dx, dz, dtheta)`, so its width comes from the env spec.
+    """
     if task not in TASKS:
         raise ValueError(f"task must be one of {TASKS}, got {task!r}")
     return 6 if task == "cube" else coop_action_size(task)
@@ -170,7 +175,7 @@ class WrenchPPOConfig:
     task: str = "cube"
     """Environment of the run, one of `TASKS`: `"cube"` (CubeWrench-v0, the thesis main line
     and the default -- the original trainer path, unchanged) or a reduced coop task
-    (`"cartpole"`, `"pendulum"`, PLAN.md "Two-robot task suite"). The coop tasks use the
+    (`"cartpole"`, `"pendulum"`, `"toss"`, PLAN.md "Two-robot task suite"). The coop tasks use the
     `callosum.experiments.coop_tasks` harness and the CPU-only vectorisation
     `callosum.experiments.coop_tasks.vec_env`; their observation width/action width come from the env
     (`coop_obs_size`/`coop_action_size`), so the Bi-JEPA `predicted` input works unchanged
@@ -426,7 +431,7 @@ class WrenchPPOConfig:
         """
         return wrench_cube_config(self.randomization)
 
-    def coop_env_config(self) -> CartPoleConfig | PendulumConfig:
+    def coop_env_config(self) -> CartPoleConfig | PendulumConfig | TossConfig:
         """The validated per-task config of a coop run (raises for the cube task).
 
         `callosum.experiments.coop_tasks.vec_env` and `callosum/experiments/coop_tasks/eval.py` build their envs from this

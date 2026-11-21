@@ -1,12 +1,13 @@
 """Scripted oracles of the coop suite: environment-validation / upper-bound controllers.
 
 The plan's task-suite step asks for a scripted controller per task that validates the
-environment and gives the upper bound of the coordination quality. Both oracles here are
+environment and gives the upper bound of the coordination quality. All oracles here are
 CENTRALISED scripts (one program commands both agents) used only to check that the physics,
-the one-sided authority and the observation/reward contract are sane -- not policies and not
-part of the learned `none`/`oracle`/`predicted` triple. They are also the source of the
-"only-left" non-additivity baseline: run the same oracle but zero the right agent, and the
-task must become unachievable (see `scripts/experiments/coop_tasks/smoke_coop.py`).
+the one-sided authority (the toss-catch paddles are symmetric position servos instead) and
+the observation/reward contract are sane -- not policies and not part of the learned
+`none`/`oracle`/`predicted` triple. They are also the source of the "only-left"
+non-additivity baseline: run the same oracle but zero the right agent, and the task must
+become unachievable (see `scripts/experiments/coop_tasks/smoke_coop.py`).
 
 The scripted oracle is deliberately PRIVILEGED: it reads the env's sampled randomisation
 (each agent's latency and start delay) and the base env's `pending_commands()` (the
@@ -26,6 +27,16 @@ up-to-0.3 s action latency.
 the actuator whose one-sided torque agrees with the (latency-predicted) hinge velocity, and
 brake once the current half-cycle peak reaches the target amplitude. Both actuators are used
 across one full oscillation -- exactly what the one-sided "only-left" baseline cannot do.
+
+`TossOracle` is the catch-and-return script of `TossCatch-v0`: it predicts the ball's
+ballistic trajectory from the observed state, picks a contact point on the receiving
+paddle's face such that the paddle can still be moved there before the ball arrives (using
+the known in-flight command queues -- the same Smith-prediction privilege as the cart-pole
+oracle) and the frictionless rebound, with the nominal aiming tilt, sends the ball back
+toward the partner's reachable paddle box. The other paddle is kept at its ready pose. It
+learns the episode's hidden contact restitution from the observed bounce (it compares the
+ball's velocity just before and just after a contact), so plans after the first pass use the
+episode's actual elasticity.
 """
 
 from __future__ import annotations
@@ -36,12 +47,23 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from callosum.experiments.coop_tasks.config import CartPoleConfig, PendulumConfig
-from callosum.experiments.coop_tasks.logic import AGENT_KEYS, in_start_delay, one_sided_allocation
+from callosum.experiments.coop_tasks.config import CartPoleConfig, PendulumConfig, TossConfig
+from callosum.experiments.coop_tasks.logic import (
+    AGENT_KEYS,
+    ball_position_after,
+    ball_velocity_after,
+    bounce_velocity,
+    in_start_delay,
+    one_sided_allocation,
+    pad_face_normal,
+    paddle_tilt,
+    partner_of,
+)
 
 if TYPE_CHECKING:
     from callosum.experiments.coop_tasks.cartpole import CartPoleEnv
     from callosum.experiments.coop_tasks.pendulum import PendulumEnv
+    from callosum.experiments.coop_tasks.toss_catch import TossCatchEnv
 
 
 @dataclass(frozen=True)
@@ -394,12 +416,12 @@ def _normalized(physical: float, limit: float) -> float:
 
 def make_oracle(
     task: str,
-    config: CartPoleConfig | PendulumConfig,
-) -> CartPoleOracle | PendulumOracle:
+    config: CartPoleConfig | PendulumConfig | TossConfig,
+) -> CartPoleOracle | PendulumOracle | TossOracle:
     """Build the scripted oracle of `task` for `config`.
 
     Args:
-        task: `"cartpole"` or `"pendulum"`.
+        task: `"cartpole"`, `"pendulum"` or `"toss"`.
         config: The env config of the same task.
 
     Returns:
@@ -416,4 +438,320 @@ def make_oracle(
         if not isinstance(config, PendulumConfig):
             raise ValueError(f"pendulum needs a PendulumConfig, got {type(config)}")
         return PendulumOracle(config)
-    raise ValueError(f"task must be 'cartpole' or 'pendulum', got {task!r}")
+    if task == "toss":
+        if not isinstance(config, TossConfig):
+            raise ValueError(f"toss needs a TossConfig, got {type(config)}")
+        return TossOracle(config)
+    raise ValueError(f"task must be 'cartpole', 'pendulum' or 'toss', got {task!r}")
+
+
+# --- toss-catch oracle -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TossOracleParams:
+    """Planning knobs of the toss-catch oracle."""
+
+    assumed_restitution: float = 0.85
+    """Initial effective-restitution estimate used before the first observed bounce; the
+    oracle then replaces it with the value it estimates from every observed bounce."""
+
+    reach_margin: float = 0.10
+    """Time margin (s) reserved so the paddle has arrived and stopped before the contact."""
+
+    catch_clearance: float = 0.10
+    """Minimum ball height above `floor_z` the oracle plans a contact for (m)."""
+
+    plan_horizon: float = 1.6
+    """Farthest future contact the planner considers (s)."""
+
+    plan_time_step: float = 0.02
+    """Contact-time search resolution (s)."""
+
+    intercept_min_normal_speed: float = 0.15
+    """Minimum approach speed along the paddle normal for a contact to be planned (m/s)."""
+
+
+class TossOracle:
+    """The scripted two-agent toss-catch oracle (ballistic interception + aiming tilt)."""
+
+    def __init__(self, config: TossConfig, params: TossOracleParams | None = None) -> None:
+        """Store the config and the planning knobs.
+
+        Args:
+            config: The environment config (geometry, paddle limits and tolerances are read
+                from it).
+            params: Planning knobs; defaults to `TossOracleParams()`.
+        """
+        self.config = config
+        self.params = params if params is not None else TossOracleParams()
+        self._restitution = float(self.params.assumed_restitution)
+        self._plan_side: str | None = None
+        self._plan: tuple[float, float, float, float] | None = None
+        self._contact_previous = {"left": False, "right": False}
+        self._velocity_before_contact = np.zeros(3)
+        self._contact_side: str | None = None
+
+    def _reset_episode(self) -> None:
+        """Drop the per-episode caches (called on the first control step of an episode)."""
+        self._restitution = float(self.params.assumed_restitution)
+        self._plan_side = None
+        self._plan = None
+        self._contact_previous = {"left": False, "right": False}
+        self._velocity_before_contact = np.zeros(3)
+        self._contact_side = None
+
+    # --- helpers ---------------------------------------------------------------------
+    def _effective_limits(self, env: TossCatchEnv) -> dict[str, float]:
+        """Each paddle's maximum pose-increment scale (its private authority)."""
+        randomization = env.randomization
+        if randomization is None:
+            raise RuntimeError("call env.reset() before the oracle acts")
+        return {
+            key: self.config.pad_speed * self.config.control_dt * agent.gain * agent.limit_scale
+            for key, agent in zip(AGENT_KEYS, randomization.agents)
+        }
+
+    def _pending_offset(
+        self, env: TossCatchEnv, side: str, max_step: float, step: int
+    ) -> tuple[np.ndarray, float]:
+        """Paddle displacement/tilt still in flight (latency queues, start-delay aware).
+
+        Returns the pose increment that will be applied once the command issued now reaches
+        the physics, i.e. the sum of every queued command with its start-delay suppression.
+        """
+        randomization = env.randomization
+        assert randomization is not None
+        index = AGENT_KEYS.index(side)
+        agent = randomization.agents[index]
+        authority = agent.gain * agent.limit_scale
+        tilt_step = self.config.pad_tilt_rate * self.config.control_dt * authority
+        pending = env.pending_commands()[side]
+        offset = np.zeros(2)
+        tilt = 0.0
+        for queue_offset, command in enumerate(pending):
+            if in_start_delay(agent, step + queue_offset):
+                continue
+            vector = np.asarray(command, dtype=np.float64).reshape(-1)
+            offset += vector[:2] * max_step
+            tilt += vector[2] * tilt_step
+        return offset, tilt
+
+    def _deadbeat(
+        self, env: TossCatchEnv, side: str, target: tuple[float, float, float], max_step: float
+    ) -> np.ndarray:
+        """Command that makes the paddle stop exactly at `target` once the latency clears."""
+        cfg = self.config
+        state = env.state()
+        step = int(state["step"])
+        pad = np.array([state[f"{side}_pad_x"], state[f"{side}_pad_z"]])
+        pending, pending_tilt = self._pending_offset(env, side, max_step, step)
+        desired = np.array([target[0], target[1]]) - pad - pending
+        norm = float(np.linalg.norm(desired))
+        if norm > max_step:
+            desired *= max_step / norm
+        randomization = env.randomization
+        assert randomization is not None
+        agent = randomization.agents[AGENT_KEYS.index(side)]
+        authority = agent.gain * agent.limit_scale
+        max_dtilt = cfg.pad_tilt_rate * cfg.control_dt * authority
+        d_tilt = float(
+            np.clip(target[2] - state[f"{side}_pad_tilt"] - pending_tilt, -max_dtilt, max_dtilt)
+        )
+        return np.array([desired[0] / max_step, desired[1] / max_step, d_tilt / max_dtilt])
+
+    def _return_catch(
+        self, env: TossCatchEnv, side: str, contact: np.ndarray, velocity: np.ndarray
+    ) -> tuple[float, float] | None:
+        """First catchable descending point of the return trajectory on the partner paddle."""
+        cfg = self.config
+        offset = env.contact_offset()
+        normal = pad_face_normal(paddle_tilt(side, cfg.pad_tilt))
+        x_range = cfg.paddle_x_range(side)
+        state = env.state()
+        scale = self._effective_limits(env)[side]
+        step = int(state["step"])
+        pad = np.array([state[f"{side}_pad_x"], state[f"{side}_pad_z"]])
+        pending, _ = self._pending_offset(env, side, scale, step)
+        future = pad + pending
+        randomization = env.randomization
+        assert randomization is not None
+        latency = randomization.agents[AGENT_KEYS.index(side)].latency_steps * cfg.control_dt
+        seconds = 0.0
+        while seconds < self.params.plan_horizon:
+            seconds += self.params.plan_time_step
+            position = ball_position_after(contact, velocity, seconds, cfg.gravity)
+            if position[2] < cfg.floor_z + self.params.catch_clearance:
+                return None
+            approach = ball_velocity_after(velocity, seconds, cfg.gravity)
+            if approach[2] >= 0.0:
+                continue
+            centre = position - offset * normal
+            if not x_range[0] <= centre[0] <= x_range[1]:
+                continue
+            if not cfg.pad_min_z <= centre[2] <= cfg.pad_max_z:
+                continue
+            budget = cfg.pad_speed * (seconds - latency - self.params.reach_margin)
+            if budget <= 0.0:
+                continue
+            if float(np.linalg.norm(centre[[0, 2]] - future)) <= budget + 1e-9:
+                return float(position[2]), float(seconds)
+            return None
+        return None
+
+    def _plan_pass(self, env: TossCatchEnv, side: str) -> tuple[float, float, float, float] | None:
+        """Best `(score, seconds, centre_x, centre_z)` catch on `side` for a good return."""
+        cfg = self.config
+        state = env.state()
+        ball = np.array([state["ball_x"], 0.0, state["ball_z"]])
+        velocity = np.array([state["ball_vx"], 0.0, state["ball_vz"]])
+        offset = env.contact_offset()
+        scale = self._effective_limits(env)[side]
+        tilt = paddle_tilt(side, cfg.pad_tilt)
+        normal = pad_face_normal(tilt)
+        x_range = cfg.paddle_x_range(side)
+        randomization = env.randomization
+        assert randomization is not None
+        latency = randomization.agents[AGENT_KEYS.index(side)].latency_steps * cfg.control_dt
+        step = int(state["step"])
+        pad = np.array([state[f"{side}_pad_x"], state[f"{side}_pad_z"]])
+        pending, _ = self._pending_offset(env, side, scale, step)
+        future = pad + pending
+        other = partner_of(side)
+        want = -1.0 if side == "right" else 1.0
+        best: tuple[float, float, float, float] | None = None
+        seconds = 0.0
+        while seconds < self.params.plan_horizon:
+            seconds += self.params.plan_time_step
+            position = ball_position_after(ball, velocity, seconds, cfg.gravity)
+            if position[2] < cfg.floor_z + self.params.catch_clearance:
+                break
+            approach = ball_velocity_after(velocity, seconds, cfg.gravity)
+            if approach[2] >= 0.0:
+                continue
+            if float(approach @ normal) >= -self.params.intercept_min_normal_speed:
+                continue
+            centre = position - offset * normal
+            if not x_range[0] <= centre[0] <= x_range[1]:
+                continue
+            if not cfg.pad_min_z <= centre[2] <= cfg.pad_max_z:
+                continue
+            budget = cfg.pad_speed * (seconds - latency - self.params.reach_margin)
+            if budget <= 0.0:
+                continue
+            if float(np.linalg.norm(centre[[0, 2]] - future)) > budget + 1e-9:
+                continue
+            outgoing = bounce_velocity(approach, normal, self._restitution)
+            if outgoing[0] * want <= 0.2:
+                continue
+            if self._return_catch(env, other, position, outgoing) is None:
+                continue
+            score = position[2] - 0.1 * abs(outgoing[0])
+            if best is None or score > best[0]:
+                best = (score, seconds, float(centre[0]), float(centre[2]))
+        return best
+
+    def _fallback_target(self, env: TossCatchEnv, side: str) -> tuple[float, float, float]:
+        """Best-effort intercept when no fully feasible catch was found.
+
+        Keep the paddle at its current height (moving up into the incoming ball would bat it
+        away with a large kinematic impulse) and slide it horizontally to where the ball's
+        free trajectory descends to that height. Even an off-centre contact can count as a
+        pass, while a stopped paddle would certainly miss the ball.
+        """
+        cfg = self.config
+        state = env.state()
+        ball_z = float(state["ball_z"])
+        ball_vz = float(state["ball_vz"])
+        ball_x = float(state["ball_x"])
+        ball_vx = float(state["ball_vx"])
+        pad_z = float(state[f"{side}_pad_z"])
+        tilt = paddle_tilt(side, cfg.pad_tilt)
+        normal = pad_face_normal(tilt)
+        offset = env.contact_offset()
+        x_range = cfg.paddle_x_range(side)
+        contact_z = pad_z + offset * float(normal[2])
+        discriminant = ball_vz * ball_vz - 2.0 * cfg.gravity * (contact_z - ball_z)
+        target_x = float(np.clip(ball_x - offset * float(normal[0]), *x_range))
+        if discriminant >= 0.0:
+            seconds = (ball_vz + math.sqrt(discriminant)) / cfg.gravity
+            if seconds > 0.0:
+                target_x = float(
+                    np.clip(ball_x + ball_vx * seconds - offset * float(normal[0]), *x_range)
+                )
+        return (target_x, pad_z, tilt)
+
+    def _update_restitution(self, env: TossCatchEnv) -> None:
+        """Estimate the episode's effective restitution from the observed bounces."""
+        state = env.state()
+        contact = {side: state[f"{side}_contact"] > 0.5 for side in AGENT_KEYS}
+        any_contact = any(contact.values())
+        any_previous = any(self._contact_previous.values())
+        if any_contact and not any_previous:
+            self._contact_side = next(side for side in AGENT_KEYS if contact[side])
+            self._velocity_before_contact = np.array([state["ball_vx"], 0.0, state["ball_vz"]])
+        elif not any_contact and any_previous and self._contact_side is not None:
+            normal = pad_face_normal(paddle_tilt(self._contact_side, self.config.pad_tilt))
+            incoming = float(self._velocity_before_contact @ normal)
+            outgoing = float(np.array([state["ball_vx"], 0.0, state["ball_vz"]]) @ normal)
+            if incoming < -0.05:
+                self._restitution = float(np.clip(-outgoing / incoming, 0.2, 1.0))
+        self._contact_previous = contact
+
+    def act(self, env: TossCatchEnv) -> dict[str, np.ndarray]:
+        """Return the normalized paddle commands for both agents for the next step.
+
+        Args:
+            env: The environment to control; its `state()`, `pending_commands()` and the
+                episode randomisation are read. The env must have been reset.
+
+        Returns:
+            `{"left": (3,), "right": (3,)}` normalized `(dx, dz, dtheta)` commands.
+        """
+        cfg = self.config
+        state = env.state()
+        if state["step"] == 0.0:
+            # A fresh episode: drop the per-episode plan/restitution caches so a reused
+            # oracle instance (the smoke/eval loops build it once per env) cannot leak state.
+            self._reset_episode()
+        ball_speed = math.hypot(state["ball_vx"], state["ball_vz"])
+        limits = self._effective_limits(env)
+        if ball_speed < 1e-6:
+            # The hidden release has not happened yet: anticipate it by moving the receiving
+            # (right) paddle toward the middle of the court at the pre-throw height, while the
+            # left paddle waits at its ready pose. The hidden impulse then has to cover a much
+            # shorter distance for the first intercept.
+            receive = (
+                env.paddle_receive_x(),
+                cfg.pad_ready_z,
+                paddle_tilt("right", cfg.pad_tilt),
+            )
+            left_ready = (
+                -env.paddle_ready_x(),
+                cfg.pad_start_z,
+                paddle_tilt("left", cfg.pad_tilt),
+            )
+            return {
+                "right": self._deadbeat(env, "right", receive, limits["right"]).astype(np.float32),
+                "left": self._deadbeat(env, "left", left_ready, limits["left"]).astype(np.float32),
+            }
+        self._update_restitution(env)
+        side = "right" if state["ball_vx"] > 0.0 else "left"
+        other = partner_of(side)
+        if self._plan_side != side or self._plan is None:
+            self._plan = self._plan_pass(env, side)
+            self._plan_side = side
+        actions: dict[str, np.ndarray] = {}
+        if self._plan is None:
+            target = self._fallback_target(env, side)
+        else:
+            _, _seconds, centre_x, centre_z = self._plan
+            target = (centre_x, centre_z, paddle_tilt(side, cfg.pad_tilt))
+        actions[side] = self._deadbeat(env, side, target, limits[side]).astype(np.float32)
+        ready = (
+            -env.paddle_ready_x() if other == "left" else env.paddle_ready_x(),
+            cfg.pad_start_z,
+            env.paddle_ready_tilt(other),
+        )
+        actions[other] = self._deadbeat(env, other, ready, limits[other]).astype(np.float32)
+        return actions

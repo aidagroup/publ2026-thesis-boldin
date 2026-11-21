@@ -24,6 +24,7 @@ from callosum.experiments.coop_tasks.config import (
     CoopRandomization,
     CoopRewardConfig,
     PendulumConfig,
+    TossConfig,
     coop_action_size,
     coop_config,
     coop_obs_size,
@@ -34,6 +35,7 @@ from callosum.experiments.coop_tasks.logic import (
     PENDULUM_SPEC,
     TASK_SPECS,
     TIME_FIELD,
+    TOSS_SPEC,
     amplitude_deg,
     build_observation,
     cartpole_failure,
@@ -63,15 +65,20 @@ from callosum.experiments.coop_tasks.logic import (
 
 
 def test_task_specs_registry() -> None:
-    assert set(TASK_SPECS) == {"cartpole", "pendulum"}
+    assert set(TASK_SPECS) == {"cartpole", "pendulum", "toss"}
     assert CARTPOLE_SPEC.action_dim == PENDULUM_SPEC.action_dim == 1
+    assert TOSS_SPEC.action_dim == 3
     assert CARTPOLE_SPEC.shared_fields == ("cart_x", "cart_vx", "pole_angle", "pole_angvel")
     assert PENDULUM_SPEC.shared_fields == ("angle", "angvel")
+    assert TOSS_SPEC.shared_fields[:4] == ("ball_x", "ball_z", "ball_vx", "ball_vz")
+    assert len(TOSS_SPEC.shared_fields) == 16
+    assert TOSS_SPEC.goal_fields == ("passes", "target_passes")
     assert task_spec("cartpole") is CARTPOLE_SPEC
+    assert task_spec("toss") is TOSS_SPEC
     with pytest.raises(ValueError, match="task must be one of"):
-        validate_task("toss")
+        validate_task("bogus")
     with pytest.raises(ValueError, match="task must be one of"):
-        task_spec("toss")
+        task_spec("bogus")
 
 
 def test_observation_widths_match_the_documented_layout() -> None:
@@ -83,6 +90,11 @@ def test_observation_widths_match_the_documented_layout() -> None:
     assert obs_size(PENDULUM_SPEC, "oracle") == 10 + 2 * 1 + 4 == 16
     assert task_obs_size("cartpole", "none") == 11
     assert task_obs_size("pendulum", "oracle") == 16
+    # toss-catch: own 3 actions + 3 private params + 1 start delay = 7
+    # shared 16 (ball + two paddles), goal 2 (passes, target), + time_fraction
+    assert obs_size(TOSS_SPEC, "none") == 7 + 16 + 2 + 1 == 26
+    assert obs_size(TOSS_SPEC, "oracle") == 26 + 2 * 3 + 4 == 36
+    assert task_obs_size("toss", "oracle") == 36
 
 
 def test_obs_fields_are_unique_and_partner_block_is_mode_gated() -> None:
@@ -167,7 +179,9 @@ def test_none_mode_ignores_every_partner_key(task: str) -> None:
         partner = partner_of(agent)
         tampered = dict(values)
         for key in list(tampered):
-            if key.startswith(f"{partner}_"):
+            # Only the partner-role keys are tampered with: the task's shared block may also
+            # be named after an agent (the toss-catch paddles are in the shared state).
+            if key.startswith(f"{partner}_") and key not in spec.shared_fields:
                 tampered[key] = tampered[key] + 123.0
         # The agent's own "none" observation is bit-for-bit unchanged...
         assert np.array_equal(build_observation(tampered, agent, spec, "none"), baseline)
@@ -439,6 +453,20 @@ def test_pendulum_config_defaults_match_the_task_spec() -> None:
         (PendulumConfig, {"max_torque": 0.0}),
         (PendulumConfig, {"hinge_damping": -0.1}),
         (PendulumConfig, {"shaping_amplitude_coef": -0.1}),
+        (TossConfig, {"pad_speed": 0.0}),
+        (TossConfig, {"pad_tilt_rate": 0.0}),
+        (TossConfig, {"pad_inner_x": 0.0}),
+        (TossConfig, {"pad_inner_x": 1.1}),  # above pad_outer_x
+        (TossConfig, {"pad_tilt": 0.0}),
+        (TossConfig, {"pad_tilt": 1.4}),  # above the tilt limit but below pi/2
+        (TossConfig, {"n_passes": 0}),
+        (TossConfig, {"n_passes": 99}),
+        (TossConfig, {"floor_z": 0.5}),  # above pad_min_z
+        (TossConfig, {"pad_ready_z": 5.0}),
+        (TossConfig, {"shaping_height_scale": 0.0}),
+        (TossConfig, {"shaping_pass_coef": -0.1}),
+        (TossConfig, {"court_y": 0.0}),
+        (TossConfig, {"pad_anticipation_x": 0.0}),
     ],
 )
 def test_task_configs_reject_out_of_domain_fields(factory, kwargs) -> None:
@@ -454,6 +482,8 @@ def test_task_configs_reject_a_fail_fast_reward() -> None:
         CartPoleConfig(reward=reward)
     with pytest.raises(ValueError, match="failure_penalty must be strictly worse"):
         PendulumConfig(reward=reward)
+    with pytest.raises(ValueError, match="failure_penalty must be strictly worse"):
+        TossConfig(reward=reward)
 
 
 def test_reward_config_validation() -> None:
@@ -488,13 +518,16 @@ def test_randomization_rejects_bad_ranges(kwargs) -> None:
 def test_task_config_helpers() -> None:
     assert coop_config("cartpole").task == "cartpole"
     assert isinstance(coop_config("pendulum"), PendulumConfig)
+    assert isinstance(coop_config("toss"), TossConfig)
     assert coop_obs_size("cartpole", "none") == 11
     assert coop_obs_size("pendulum", "oracle") == 16
+    assert coop_obs_size("toss", "oracle") == 36
     assert coop_action_size("cartpole") == 1
+    assert coop_action_size("toss") == 3
     with pytest.raises(ValueError, match="task must be one of"):
-        coop_config("toss")
+        coop_config("bogus")
     with pytest.raises(ValueError, match="task must be one of"):
-        coop_obs_size("toss", "none")
+        coop_obs_size("bogus", "none")
     with pytest.raises(ValueError, match="partner_mode"):
         coop_obs_size("cartpole", "predicted")
 
@@ -520,7 +553,7 @@ def test_wrench_ppo_config_is_task_aware() -> None:
         task_obs_size,
     )
 
-    assert TASKS == ("cube", "cartpole", "pendulum")
+    assert TASKS == ("cube", "cartpole", "pendulum", "toss")
     assert WrenchPPOConfig().task == "cube"
     assert WrenchPPOConfig().agent_keys == ("holder", "rotator")
     assert WrenchPPOConfig().action_size == 6
@@ -534,12 +567,18 @@ def test_wrench_ppo_config_is_task_aware() -> None:
     assert WrenchPPOConfig(task="pendulum", partner_mode="oracle").env_obs_size == 16
     # `predicted` appends the latent to the task's own observation width.
     assert WrenchPPOConfig(task="pendulum", use_bijepa=True).policy_input_size == 10 + 32
+    assert WrenchPPOConfig(task="toss", use_bijepa=True).policy_input_size == 26 + 32
     assert task_obs_size("cartpole", "oracle") == 17
     assert task_action_size("pendulum") == 1
+    assert task_action_size("toss") == 3
+    toss_cfg = WrenchPPOConfig(task="toss", partner_mode="oracle")
+    assert toss_cfg.env_obs_size == 36
+    assert toss_cfg.action_size == 3
+    assert isinstance(toss_cfg.coop_env_config(), TossConfig)
     assert checkpoint_task({"config": {"task": "pendulum"}}) == "pendulum"
     assert checkpoint_task({}) == "cube"
     with pytest.raises(ValueError, match="task must be one of"):
-        WrenchPPOConfig(task="toss")
+        WrenchPPOConfig(task="bogus")
     with pytest.raises(ValueError, match="coop_env_config"):
         WrenchPPOConfig().coop_env_config()
 

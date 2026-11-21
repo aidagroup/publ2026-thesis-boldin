@@ -28,8 +28,8 @@ callosum/
   experiments/
     cube_wrench/               # reduced-куб: env(+gpu), logic, config, ppo_config,
                                # train, vec_env, eval, render, oracle
-    coop_tasks/                # two-robot suite: base, cartpole, pendulum, logic, config,
-                               # oracle, vec_env, eval  (toss&catch — следующий)
+    coop_tasks/                # two-robot suite: base, cartpole, pendulum, toss_catch,
+                               # logic, config, oracle, vec_env, eval
     arm/                       # обе линии SO-ARM101: scene/layout/turntable/expert(s),
                                # trainer, agent_obs, demos, bc; skills_* (skill-level),
                                # face_turn_* + bc (joint-level legacy)

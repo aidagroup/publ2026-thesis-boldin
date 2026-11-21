@@ -1,4 +1,5 @@
-"""Configs of the reduced two-agent coop suite (`CartPoleCoop-v0`, `PendulumPump-v0`).
+"""Configs of the reduced two-agent coop suite (`CartPoleCoop-v0`, `PendulumPump-v0`,
+`TossCatch-v0`).
 
 The suite (`PLAN.md` "Two-robot task suite") is a set of simple MuJoCo tasks in which two
 decentralised agents cooperate on one shared object. This module holds every tunable the
@@ -44,8 +45,8 @@ from callosum.experiments.coop_tasks.logic import (
     task_spec,
 )
 
-TASKS = ("cartpole", "pendulum")
-"""Coop tasks implemented at this step (`toss` is the next agent's task)."""
+TASKS = ("cartpole", "pendulum", "toss")
+"""Coop tasks of the suite (`toss` is the contact/timing task, `TossCatch-v0`)."""
 
 
 def _validate_common(config: _CommonTaskConfig) -> None:
@@ -222,6 +223,85 @@ class CoopRandomization:
         _check_range("wind_magnitude_range", self.wind_magnitude_range)
         if self.wind_prob_range[1] > 1:
             raise ValueError(f"wind_prob_range must be within [0, 1], got {self.wind_prob_range}")
+
+
+@dataclass(frozen=True)
+class TossRandomization(CoopRandomization):
+    """The per-episode private randomisation ranges of `TossCatch-v0`.
+
+    Extends the suite's shared `CoopRandomization`: the inherited per-agent latency, gain,
+    authority scale and start delay keep their suite meaning (they randomise each paddle's
+    controller), while the toss-catch-specific fields describe the task's hidden physics --
+
+    * the hidden throw impulse (`launch_vx_range`, `launch_vz_range`) and the hidden release
+      timing (`release_delay_range`): the thrower releases the ball from a hidden position
+      with a hidden velocity, so the episode's first pass cannot be predicted from the
+      config alone;
+    * the hidden contact properties (`contact_dampratio_range` -- the effective restitution
+      of the ball/paddle contact -- and `contact_friction_range`): the ball's rebound after
+      every catch depends on them, and the agents never observe them;
+    * `launch_height_range`: the launch height of the released ball.
+
+    The inherited `damping_range`/`wind_*` fields are unused by this task (the sampler keeps
+    sampling them for a uniform record, but they carry no physical meaning here).
+    """
+
+    latency_range: tuple[float, float] = (0.04, 0.16)
+    """Per-agent action latency (s); shorter than the force tasks' range on purpose: a pass
+    flight lasts only ~0.5-0.8 s, so a 0.3 s latency would leave a bounded paddle no time to
+    reach any intercept."""
+
+    gain_range: tuple[float, float] = (0.9, 1.1)
+    """Per-agent command-gain multiplier (scales the paddle's pose increment)."""
+
+    limit_scale_range: tuple[float, float] = (0.9, 1.1)
+    """Per-agent authority multiplier of the paddle's maximum speed/tilt rate."""
+
+    start_delay_range: tuple[float, float] = (0.0, 0.08)
+    """Per-agent delay (s) before its first command takes effect."""
+
+    initial_value_range: tuple[float, float] = (-0.35, -0.15)
+    """Ball release x offset (m): the hidden throw starts on the left half of the court."""
+
+    launch_vx_range: tuple[float, float] = (1.6, 2.4)
+    """Hidden throw-impulse x velocity (m/s, toward the partner's paddle)."""
+
+    launch_vz_range: tuple[float, float] = (0.6, 1.6)
+    """Hidden throw-impulse z velocity (m/s, the loft)."""
+
+    launch_height_range: tuple[float, float] = (1.05, 1.25)
+    """Ball release height (m) above the floor."""
+
+    release_delay_range: tuple[float, float] = (0.0, 0.12)
+    """Hidden release delay (s) between reset and the throw impulse; the ball free-falls
+    during it, so the throw's exact timing is not in the config."""
+
+    contact_dampratio_range: tuple[float, float] = (0.11, 0.13)
+    """Contact damping ratio written into the ball/paddle geoms on reset (the hidden
+    restitution: at the task's impact speeds this gives an effective restitution of roughly
+    0.8-0.95; lower means a bouncier ball)."""
+
+    contact_friction_range: tuple[float, float] = (0.0, 0.15)
+    """Sliding friction coefficient of the ball/paddle contact (hidden; the oracle plans a
+    frictionless bounce and re-plans after every observed one)."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _check_range("launch_vx_range", self.launch_vx_range, positive_lo=True)
+        _check_range("launch_vz_range", self.launch_vz_range)
+        _check_range("launch_height_range", self.launch_height_range, positive_lo=True)
+        _check_range("release_delay_range", self.release_delay_range)
+        _check_range("contact_dampratio_range", self.contact_dampratio_range, positive_lo=True)
+        _check_range("contact_friction_range", self.contact_friction_range)
+        if self.contact_dampratio_range[1] >= 1.0:
+            raise ValueError(
+                "contact_dampratio_range must stay below 1 (a critically damped contact is "
+                f"inelastic), got {self.contact_dampratio_range}"
+            )
+        if self.release_delay_range[1] > 1.0:
+            raise ValueError(
+                f"release_delay_range must be at most 1 s, got {self.release_delay_range}"
+            )
 
 
 @dataclass(frozen=True)
@@ -529,14 +609,214 @@ class PendulumConfig:
             )
 
 
-TASK_CONFIGS: dict[str, type[CartPoleConfig | PendulumConfig]] = {
+@dataclass(frozen=True)
+class TossConfig:
+    """All tunables of `TossCatch-v0` (timing, geometry, authority, tolerances, reward).
+
+    The task: the two agents control one paddle each (a tilted plate on 3 normalized action
+    dimensions -- x/z translation plus tilt). The `left` agent throws the ball toward the
+    `right` paddle, the receiver must place its paddle under the ball and tilt it to send
+    the ball back, and the team must complete `n_passes` alternating catches without the
+    ball touching the floor or leaving the court.
+
+    The paddles are position-controlled (a normalized command is a bounded pose increment;
+    the env moves the kinematic paddle smoothly over the control step, the ideal limit of a
+    stiff position servo) and the ball-racket contact is a physical MuJoCo contact with a
+    randomized restitution/friction. The paddles act in the court plane: x is the axis
+    between the two agents, z is vertical, and the tilt is about world +y (the
+    `pad_tilt` nominal aiming angle throws the ball toward the partner).
+
+    XML-owned physics (`callosum/experiments/coop_tasks/assets/toss_catch.xml`): the ball
+    radius/mass and the paddle half extents. The config owns the timing, gravity, the
+    court/workspace bounds, the paddles' maximum speed/tilt rate, the nominal tilt, the
+    success/failure tolerances and the reward.
+    """
+
+    # --- decision timing -----------------------------------------------------------------
+    dt: float = 0.005
+    """MuJoCo physics timestep (s)."""
+
+    control_every: int = 8
+    """Physics substeps per control step (0.04 s at the defaults)."""
+
+    max_control_steps: int = 400
+    """Episode budget in control steps (16 s at the defaults, enough for a slow rally)."""
+
+    # --- physical model (gravity is written into the model; the masses are XML-owned) ------
+    gravity: float = 9.81
+    """Gravity magnitude (m/s^2); written into `model.opt.gravity`."""
+
+    # --- court / paddle workspace ----------------------------------------------------------
+    court_x: float = 1.35
+    """Half-width of the court in x (m): a ball beyond it has left the playable area."""
+
+    court_y: float = 0.60
+    """Half-width of the court in y (m); the ball stays near 0, this is a safety bound."""
+
+    floor_z: float = 0.07
+    """Lowest allowed ball-centre height (m): below it the ball has been dropped."""
+
+    pad_inner_x: float = 0.05
+    """Inner limit of a paddle centre's x coordinate (m, mirrored for the two sides)."""
+
+    pad_outer_x: float = 1.05
+    """Outer limit of a paddle centre's x coordinate (m, mirrored for the two sides)."""
+
+    pad_min_z: float = 0.10
+    """Lowest paddle-centre height (m); the paddle can still catch balls just above it."""
+
+    pad_max_z: float = 1.35
+    """Highest paddle-centre height (m)."""
+
+    pad_start_z: float = 0.30
+    """Initial / ready paddle-centre height (m), low so a missing agent's paddle is not in
+    the ball's flight path."""
+
+    pad_ready_z: float = 0.60
+    """Pre-throw height (m) the scripted oracle moves the receiving paddle to while the ball
+    is still being released; a policy could learn the same anticipation."""
+
+    pad_anticipation_x: float = 0.60
+    """Court x (m) of the receiving paddle's pre-throw anticipation pose (mirrored)."""
+
+    pad_speed: float = 9.0
+    """Maximum paddle translation speed (m/s); a normalized command maps to a pose increment
+    of at most `pad_speed * control_dt`. The env interpolates the paddle pose over the
+    physics substeps, so this is a smooth (non-teleporting) motion."""
+
+    pad_tilt_rate: float = 3.0
+    """Maximum paddle tilt rate (rad/s)."""
+
+    pad_tilt: float = math.radians(44.0)
+    """Nominal aiming tilt magnitude (rad) of both paddles: the tilt that throws the ball
+    toward the partner. The scripted oracle holds it; a policy may vary it."""
+
+    pad_tilt_limit: float = math.radians(60.0)
+    """Absolute tilt limit (rad) of a paddle."""
+
+    # --- success / failure tolerances -------------------------------------------------------
+    n_passes: int = 3
+    """Required number of alternating catches (the conjunction success rule)."""
+
+    max_passes: int = 12
+    """Sanity cap of `n_passes` (the episode budget must contain several passes)."""
+
+    # --- reward / shaping ------------------------------------------------------------------
+    reward: CoopRewardConfig = field(default_factory=CoopRewardConfig)
+    """The shared team reward."""
+
+    shaping_pass_coef: float = 0.5
+    """Weight of the pass-progress term of the potential-based shaping (0 disables)."""
+
+    shaping_height_coef: float = 0.3
+    """Weight of the ball-height term of the potential-based shaping (0 disables)."""
+
+    shaping_height_scale: float = 0.9
+    """Ball height (m) that saturates the height term."""
+
+    # --- episode randomisation -------------------------------------------------------------
+    randomization: TossRandomization = field(default_factory=TossRandomization)
+    """The per-episode private randomness (see `TossRandomization`)."""
+
+    # --- fallback seed ----------------------------------------------------------------------
+    seed: int = 0
+    """Seed used when `reset(seed=None)` (advances by one episode per reset)."""
+
+    # --- derived / identity ---------------------------------------------------------------
+    task: str = "toss"
+    """Task name (`--task` value)."""
+
+    @property
+    def control_dt(self) -> float:
+        """Seconds per control step (`dt * control_every`)."""
+        return self.dt * self.control_every
+
+    @property
+    def max_episode_time(self) -> float:
+        """Simulated seconds of the episode budget (`control_dt * max_control_steps`)."""
+        return self.control_dt * self.max_control_steps
+
+    @property
+    def action_size(self) -> int:
+        """Width of one agent's action (3: x/z translation and tilt commands)."""
+        return task_spec(self.task).action_dim
+
+    def agent_authority(self, agent_index: int) -> float:
+        """The paddle's maximum physical speed (m/s); both paddles share `pad_speed`."""
+        if not 0 <= agent_index < len(AGENT_KEYS):
+            raise ValueError(f"agent_index must be in [0, {len(AGENT_KEYS)}), got {agent_index}")
+        return self.pad_speed
+
+    def paddle_x_range(self, side: str) -> tuple[float, float]:
+        """The `(min, max)` x range of one paddle's centre (mirrored for the two sides)."""
+        if side not in AGENT_KEYS:
+            raise ValueError(f"side must be one of {AGENT_KEYS}, got {side!r}")
+        if side == "left":
+            return -self.pad_outer_x, -self.pad_inner_x
+        return self.pad_inner_x, self.pad_outer_x
+
+    def __post_init__(self) -> None:
+        _validate_common(self)
+        if not 0 < self.floor_z < self.pad_min_z:
+            raise ValueError(
+                f"floor_z must be in (0, pad_min_z) = (0, {self.pad_min_z}), got {self.floor_z}"
+            )
+        if not 0 < self.pad_inner_x < self.pad_outer_x < self.court_x:
+            raise ValueError(
+                "paddle bounds must satisfy 0 < pad_inner_x < pad_outer_x < court_x, got "
+                f"({self.pad_inner_x}, {self.pad_outer_x}, {self.court_x})"
+            )
+        if not self.pad_min_z < self.pad_start_z < self.pad_max_z:
+            raise ValueError(
+                "pad_start_z must be in (pad_min_z, pad_max_z) = "
+                f"({self.pad_min_z}, {self.pad_max_z}), got {self.pad_start_z}"
+            )
+        if not self.pad_min_z < self.pad_ready_z < self.pad_max_z:
+            raise ValueError(
+                f"pad_ready_z must be in (pad_min_z, pad_max_z), got {self.pad_ready_z}"
+            )
+        for name in ("pad_anticipation_x",):
+            if not 0 < getattr(self, name) < self.court_x:
+                raise ValueError(f"{name} must be in (0, court_x), got {getattr(self, name)}")
+        if not self.court_y > 0:
+            raise ValueError(f"court_y must be > 0, got {self.court_y}")
+        if not self.pad_speed > 0 or not self.pad_tilt_rate > 0:
+            raise ValueError(
+                f"pad_speed and pad_tilt_rate must be > 0, got ({self.pad_speed}, "
+                f"{self.pad_tilt_rate})"
+            )
+        if not 0 < self.pad_tilt < self.pad_tilt_limit < math.pi / 2:
+            raise ValueError(
+                "tilt bounds must satisfy 0 < pad_tilt < pad_tilt_limit < pi/2, got "
+                f"({self.pad_tilt}, {self.pad_tilt_limit})"
+            )
+        if not 1 <= self.n_passes <= self.max_passes:
+            raise ValueError(
+                f"n_passes must be in [1, max_passes={self.max_passes}], got {self.n_passes}"
+            )
+        # Each pass needs at least a couple of control steps of flight; the budget must
+        # contain the whole rally with a margin.
+        if self.n_passes * 4 > self.max_control_steps:
+            raise ValueError(
+                "n_passes does not fit the episode budget: "
+                f"n_passes={self.n_passes}, max_control_steps={self.max_control_steps}"
+            )
+        for name in ("shaping_pass_coef", "shaping_height_coef"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
+        if self.shaping_height_scale <= 0:
+            raise ValueError(f"shaping_height_scale must be > 0, got {self.shaping_height_scale}")
+
+
+TASK_CONFIGS: dict[str, type[CartPoleConfig | PendulumConfig | TossConfig]] = {
     "cartpole": CartPoleConfig,
     "pendulum": PendulumConfig,
+    "toss": TossConfig,
 }
 """The config class of each suite task (both share the same public field groups)."""
 
 
-def coop_config(task: str, **overrides: object) -> CartPoleConfig | PendulumConfig:
+def coop_config(task: str, **overrides: object) -> CartPoleConfig | PendulumConfig | TossConfig:
     """Build the config of a suite task.
 
     Args:
@@ -562,7 +842,7 @@ def coop_obs_size(task: str, partner_mode: str) -> int:
 
 
 def coop_action_size(task: str) -> int:
-    """Width of one agent's action of `task` (1 for both suite tasks)."""
+    """Width of one agent's action of `task` (1 for the one-sided tasks, 3 for the toss)."""
     return task_spec(task).action_dim
 
 

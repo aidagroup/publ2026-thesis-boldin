@@ -3,9 +3,10 @@ visibility, episode randomisation, and the success/failure/reward rules.
 
 The suite (`PLAN.md` "Two-robot task suite") is a set of simple tasks in which two
 decentralised agents cooperate on one shared object: `CartPoleCoop-v0` (two one-sided
-pushers balance a shared cart-pole and drive it to a target) and `PendulumPump-v0` (two
-one-sided actuators pump a pendulum to a target amplitude and hold it). Both share this
-module and the harness in `callosum.experiments.coop_tasks`.
+pushers balance a shared cart-pole and drive it to a target), `PendulumPump-v0` (two
+one-sided actuators pump a pendulum to a target amplitude and hold it) and `TossCatch-v0`
+(two tilted position-controlled paddles catch and return a free ball for N consecutive
+passes). All share this module and the harness in `callosum.experiments.coop_tasks`.
 
 Deliberately has zero mujoco/torch dependency (the same macOS/CI rule as
 `callosum.experiments.cube_wrench.logic` and `callosum.common.visibility`): the simulator lives in
@@ -23,7 +24,9 @@ Observation of ONE agent, in field order (`obs_fields`):
 * **own privileged state** (1): its start delay (s), known to itself only.
 * **shared state** (`spec.shared_fields`): the whole observable physics of the task
   (cart position/velocity and pole angle/velocity for the cart-pole; hinge angle and
-  angular velocity for the pendulum). There are no contacts in these reduced models.
+  angular velocity for the pendulum; ball position/velocity and both paddles'
+  position/tilt/velocity for the toss-catch). The cart-pole and pendulum have no contacts;
+  the toss-catch task is the contact/timing task of the suite.
 * **goal and time** (`spec.goal_fields` + `time_fraction`): the task target(s) and the
   fraction of the episode budget already used.
 * **partner block** (`spec.action_dim * 2 + 4`), only under `partner_mode="oracle"`: the
@@ -31,7 +34,8 @@ Observation of ONE agent, in field order (`obs_fields`):
   the privileged upper bound of the `none`/`oracle` ablation. The anticipated partner
   COMMAND matters because the per-agent action latency (0.1-0.3 s) makes the partner's
   future effect unrecoverable from the shared state -- the information `predicted`
-  (Bi-JEPA) has to supply.
+  (Bi-JEPA) has to supply. For the toss-catch task this is the partner's in-flight paddle
+  command: the receiving agent must anticipate it to time its own paddle movement.
 
 The env does not assemble the vector itself: it collects one flat `{field: value}` dict of
 role-tagged facts and `build_observation(values, agent, spec, partner_mode)` selects and
@@ -116,7 +120,40 @@ PENDULUM_SPEC = CoopTaskSpec(
 )
 """PendulumPump-v0: pendulum on a fixed hinge, two one-sided torque actuators."""
 
-TASK_SPECS: dict[str, CoopTaskSpec] = {spec.name: spec for spec in (CARTPOLE_SPEC, PENDULUM_SPEC)}
+TOSS_SPEC = CoopTaskSpec(
+    name="toss",
+    action_dim=3,
+    shared_fields=(
+        "ball_x",
+        "ball_z",
+        "ball_vx",
+        "ball_vz",
+        "left_pad_x",
+        "left_pad_z",
+        "left_pad_tilt",
+        "left_pad_vx",
+        "left_pad_vz",
+        "left_pad_tilt_rate",
+        "right_pad_x",
+        "right_pad_z",
+        "right_pad_tilt",
+        "right_pad_vx",
+        "right_pad_vz",
+        "right_pad_tilt_rate",
+    ),
+    goal_fields=("passes", "target_passes"),
+)
+"""TossCatch-v0: two tilted position-controlled paddles and a free ball.
+
+`action_dim=3` = the paddle's `(dx, dz, dtheta)` command: normalized translation in the
+court plane plus a tilt (about world +y) command. The shared block carries the ball state
+and both paddles' position/tilt/velocity, so each agent sees its own paddle, the ball, and
+(in `oracle` mode) the partner's in-flight command.
+"""
+
+TASK_SPECS: dict[str, CoopTaskSpec] = {
+    spec.name: spec for spec in (CARTPOLE_SPEC, PENDULUM_SPEC, TOSS_SPEC)
+}
 """Registry of the suite's task specs by task name."""
 
 
@@ -680,3 +717,367 @@ def team_reward(
 def amplitude_deg(angle: float) -> float:
     """Absolute hinge angle in degrees (the pendulum's "current amplitude" diagnostic)."""
     return math.degrees(abs(angle))
+
+
+_DIAGNOSTIC_FIELD = {"cartpole": "angle_deg", "pendulum": "amplitude_deg", "toss": "passes"}
+"""The info-dict field that is each task's primary diagnostic (for logs and smoke output)."""
+
+
+def task_diagnostic(task: str, info: Mapping[str, float | bool]) -> float:
+    """The task's primary diagnostic value from a step info dict.
+
+    The vector env and the smoke script share it, so the trainer's episode statistics use
+    the task's natural number: the pole angle (cart-pole), the achieved amplitude
+    (pendulum) or the pass count (toss-catch).
+
+    Args:
+        task: One of `TASK_SPECS`.
+        info: A step info dict (must contain the task's diagnostic field).
+
+    Returns:
+        The diagnostic value as a float.
+
+    Raises:
+        ValueError: for an unknown task or a missing field.
+    """
+    validate_task(task)
+    field = _DIAGNOSTIC_FIELD[task]
+    if field not in info:
+        raise ValueError(f"info is missing the {field!r} diagnostic of task {task!r}")
+    return float(info[field])
+
+
+# --- toss-catch: pure geometry, rules and randomisation -----------------------------------
+#
+# TossCatch-v0 is the suite's contact/timing task: two tilted, position-controlled paddles
+# (a "racket" each) catch a free ball and toss it back so that the ball completes
+# `n_passes` alternating catches. The paddles are kinematic in the MJCF (they are moved to
+# their commanded pose by the env, which is the ideal limit of a stiff position servo, as
+# the task design allows); the ball-racket contact itself is real MuJoCo contact, and the
+# bounce is a physical frictional contact with a random restitution/damping. Everything
+# below is simulator-free geometry and rule logic so it can be unit-tested on macOS/CI.
+
+_PAD_TILT_SIGN = {"left": 1.0, "right": -1.0}
+"""The sign that tilts a paddle toward its partner: `left` tilts +y, `right` -y.
+
+A paddle tilted by `+tilt` has the face normal `(sin tilt, 0, cos tilt)`; for the left
+paddle that points up and to the right (toward the partner), for the right paddle the sign
+is flipped. This is the suite's toss-catch mirror symmetry.
+"""
+
+
+def pad_face_normal(tilt: float) -> np.ndarray:
+    """Unit normal of the paddle's upper face for a paddle tilted by `tilt` about +y.
+
+    Args:
+        tilt: Paddle tilt (rad); positive tilts the face toward world +x.
+
+    Returns:
+        `np.float64` vector `(sin tilt, 0, cos tilt)`.
+    """
+    return np.array([math.sin(tilt), 0.0, math.cos(tilt)], dtype=np.float64)
+
+
+def pad_face_tangent(tilt: float) -> np.ndarray:
+    """Unit tangent of the paddle's face in the x-z plane (`normal x +y`)."""
+    return np.array([math.cos(tilt), 0.0, -math.sin(tilt)], dtype=np.float64)
+
+
+def ball_position_after(
+    ball_position: Sequence[float], ball_velocity: Sequence[float], seconds: float, gravity: float
+) -> np.ndarray:
+    """Ballistic ball position `p + v t - g t^2/2` on the z axis (x/y constant).
+
+    The toss-catch task keeps the ball in the x-z plane (no lateral force), so this is the
+    exact free-flight prediction the agents (and the scripted oracle) need between contacts.
+
+    Args:
+        ball_position: Current ball position `(x, y, z)`.
+        ball_velocity: Current ball velocity `(vx, vy, vz)`.
+        seconds: Prediction horizon (s).
+        gravity: Gravity magnitude (m/s^2).
+
+    Returns:
+        The predicted position as a `np.float64` vector.
+    """
+    return (
+        np.asarray(ball_position, dtype=np.float64)
+        + np.asarray(ball_velocity, dtype=np.float64) * seconds
+        - np.array([0.0, 0.0, 0.5 * gravity * seconds * seconds])
+    )
+
+
+def ball_velocity_after(
+    ball_velocity: Sequence[float], seconds: float, gravity: float
+) -> np.ndarray:
+    """Ballistic ball velocity `v - g t` after `seconds` (x/y unchanged)."""
+    return np.asarray(ball_velocity, dtype=np.float64) - np.array([0.0, 0.0, gravity * seconds])
+
+
+def bounce_velocity(
+    incoming: Sequence[float], normal: Sequence[float], restitution: float
+) -> np.ndarray:
+    """Frictionless specular bounce of a ball off a plane with normal `normal`.
+
+    `v_out = v - (1 + e) (v . n) n`: the normal component is reversed and scaled by
+    `restitution`, the tangential component (along the paddle face) is preserved. This is
+    the pure model the scripted oracle and the tests use to plan a pass; the simulator's
+    contact is a physical spring-damper contact, so the real bounce only approximately
+    follows it (the oracle re-plans after every observed bounce).
+
+    Args:
+        incoming: Incoming ball velocity `(vx, vy, vz)`.
+        normal: Unit plane normal pointing toward the ball's side.
+        restitution: Effective normal restitution `e` in `[0, 1]`.
+
+    Returns:
+        The outgoing ball velocity.
+    """
+    velocity = np.asarray(incoming, dtype=np.float64)
+    direction = np.asarray(normal, dtype=np.float64)
+    if not 0.0 <= restitution <= 1.0:
+        raise ValueError(f"restitution must be in [0, 1], got {restitution}")
+    return velocity - (1.0 + restitution) * float(velocity @ direction) * direction
+
+
+def paddle_catch_centre(
+    ball_position: Sequence[float],
+    ball_velocity: Sequence[float],
+    seconds: float,
+    gravity: float,
+    tilt: float,
+    contact_offset: float,
+) -> np.ndarray:
+    """Paddle centre that makes the ball hit the paddle's face centre after `seconds`.
+
+    The contact condition is `n . (p_ball - p_paddle) = contact_offset`, where
+    `contact_offset = ball_radius + pad_half_thickness`; for the paddle centre to be at the
+    contact point's projection, `p_paddle = p_ball - contact_offset * n`.
+
+    Args:
+        ball_position: Current ball position `(x, y, z)`.
+        ball_velocity: Current ball velocity `(vx, vy, vz)`.
+        seconds: Time until the contact (s).
+        gravity: Gravity magnitude (m/s^2).
+        tilt: Paddle tilt (rad), see `pad_face_normal`.
+        contact_offset: Ball-centre to paddle-centre distance along the normal (m).
+
+    Returns:
+        The required paddle centre `(x, y, z)` as a `np.float64` vector.
+    """
+    contact = ball_position_after(ball_position, ball_velocity, seconds, gravity)
+    return contact - contact_offset * pad_face_normal(tilt)
+
+
+def toss_floor_failure(
+    ball_x: float,
+    ball_y: float,
+    ball_z: float,
+    *,
+    floor_z: float,
+    court_x: float,
+    court_y: float,
+) -> bool:
+    """Whether the ball has left the playable volume (the toss-catch failure rule).
+
+    The ball fails the episode as soon as it drops below `floor_z` (a missed catch) or
+    leaves the court bounds in x/y (a pass that missed the partner's paddle).
+
+    Args:
+        ball_x: Ball x coordinate (m).
+        ball_y: Ball y coordinate (m).
+        ball_z: Ball z coordinate (m).
+        floor_z: Lowest allowed ball-centre height (m).
+        court_x: Half-width of the court in x (m).
+        court_y: Half-width of the court in y (m); the ball should stay near 0.
+
+    Returns:
+        True when the ball is out of play.
+    """
+    return ball_z < floor_z or abs(ball_x) > court_x or abs(ball_y) > court_y
+
+
+def toss_success(passes: int, target_passes: int) -> bool:
+    """Whether the team has completed enough consecutive passes (the conjunction rule).
+
+    Args:
+        passes: Alternating paddle catches completed so far.
+        target_passes: Required number of passes (`n_passes`).
+
+    Returns:
+        `passes >= target_passes`.
+    """
+    if target_passes < 1:
+        raise ValueError(f"target_passes must be >= 1, got {target_passes}")
+    return passes >= target_passes
+
+
+def toss_pass_count(passes: int, last_pass_side: str | None, contact_side: str) -> int:
+    """The pass count after a paddle contact (alternating contacts count as passes).
+
+    A pass is an interception by the paddle the ball was travelling toward: consecutive
+    contacts must alternate sides, so a ball chattering on the same paddle (a near-vertical
+    bounce) does not count twice and a double bounce is not a pass.
+
+    Args:
+        passes: Current pass count.
+        last_pass_side: Side of the last counted pass (`None` before the first one).
+        contact_side: Side of the paddle that is in contact now ("left" or "right").
+
+    Returns:
+        The new pass count.
+    """
+    if contact_side not in AGENT_KEYS:
+        raise ValueError(f"contact_side must be one of {AGENT_KEYS}, got {contact_side!r}")
+    if last_pass_side == contact_side:
+        return passes
+    return passes + 1
+
+
+def toss_potential(
+    *,
+    passes: int,
+    target_passes: int,
+    ball_z: float,
+    height_scale: float,
+    pass_coef: float,
+    height_coef: float,
+) -> float:
+    """Bounded potential `Φ(s)` of the toss-catch task (progress + keeping the ball up).
+
+    `pass_coef * clip(passes / target_passes, 0, 1) + height_coef * clip(ball_z /
+    height_scale, 0, 1)`. Used with :func:`potential_shaping`, so it telescopes over the
+    episode and each completed pass contributes a fixed positive shaping delta -- a dense
+    gradient toward the sparse conjunction success, while the height term rewards keeping
+    the ball in play.
+
+    Args:
+        passes: Completed alternating passes.
+        target_passes: Required passes (>= 1).
+        ball_z: Current ball height (m).
+        height_scale: Ball height that saturates the height term (m, > 0).
+        pass_coef: Weight of the pass-progress term (>= 0).
+        height_coef: Weight of the ball-height term (>= 0).
+
+    Returns:
+        A value in `[0, pass_coef + height_coef]`.
+    """
+    if target_passes < 1:
+        raise ValueError(f"target_passes must be >= 1, got {target_passes}")
+    if height_scale <= 0:
+        raise ValueError(f"height_scale must be > 0, got {height_scale}")
+    if pass_coef < 0 or height_coef < 0:
+        raise ValueError(f"potential coefficients must be >= 0, got ({pass_coef}, {height_coef})")
+    progress = min(max(passes, 0) / target_passes, 1.0)
+    height = min(max(ball_z, 0.0) / height_scale, 1.0)
+    return pass_coef * progress + height_coef * height
+
+
+# --- toss-catch randomisation -------------------------------------------------------------
+
+
+class TossRandomizationRanges(Protocol):
+    """The toss-catch randomisation ranges `sample_toss_randomization` reads."""
+
+    launch_vx_range: tuple[float, float]
+    launch_vz_range: tuple[float, float]
+    launch_height_range: tuple[float, float]
+    release_delay_range: tuple[float, float]
+    contact_dampratio_range: tuple[float, float]
+    contact_friction_range: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class TossEpisodeRandomization(EpisodeRandomization):
+    """The sampled private randomness of one TossCatch-v0 episode.
+
+    Extends the shared `EpisodeRandomization` (agents' latency/gain/start-delay, `damping`
+    is unused here) with the toss-catch hidden physical episode parameters: the hidden throw
+    impulse, its release position/timing, and the contact's effective restitution and
+    friction. The agents never observe these numbers directly; they observe the ball's
+    state and the resulting bounces.
+    """
+
+    launch_velocity: tuple[float, float]
+    """Hidden throw impulse `(vx, vz)` in m/s applied at the release step."""
+
+    launch_position: tuple[float, float]
+    """Ball release position `(x, z)` in m (before the impulse)."""
+
+    release_delay_steps: int
+    """Control steps the ball falls freely before the hidden impulse is applied."""
+
+    contact_dampratio: float
+    """Contact damping ratio written into the ball/paddle geoms (the hidden restitution)."""
+
+    contact_friction: float
+    """Sliding friction coefficient of the ball/paddle contact (the hidden contact friction)."""
+
+
+def sample_toss_randomization(
+    ranges: TossRandomizationRanges,
+    *,
+    control_dt: float,
+    max_control_steps: int,
+    seed: int,
+) -> TossEpisodeRandomization:
+    """Deterministically sample one TossCatch-v0 episode's private randomness from `seed`.
+
+    The shared suite randomness is sampled first by `sample_episode_randomization` (exactly
+    as for the other tasks, so the drawing order of the base fields is unchanged); the
+    toss-catch fields are then drawn from an independent stdlib RNG derived from the same
+    seed: launch `vx`, launch `vz`, launch height, launch x offset, release delay, contact
+    damping ratio and contact friction.
+
+    Args:
+        ranges: The task's `TossRandomization`.
+        control_dt: Seconds per control step (release-delay conversion).
+        max_control_steps: Episode budget in control steps.
+        seed: Episode seed.
+
+    Returns:
+        The immutable record; every drawn value is inside its range.
+    """
+    base = sample_episode_randomization(
+        ranges,
+        control_dt=control_dt,
+        max_control_steps=max_control_steps,
+        seed=seed,
+    )
+    rng = random.Random(int(seed) + 1_000_003)
+    launch_vx = rng.uniform(*ranges.launch_vx_range)
+    launch_vz = rng.uniform(*ranges.launch_vz_range)
+    launch_height = rng.uniform(*ranges.launch_height_range)
+    launch_x_offset = base.initial_value
+    release_delay_s = rng.uniform(*ranges.release_delay_range)
+    contact_dampratio = rng.uniform(*ranges.contact_dampratio_range)
+    contact_friction = rng.uniform(*ranges.contact_friction_range)
+    return TossEpisodeRandomization(
+        seed=base.seed,
+        agents=base.agents,
+        initial_value=base.initial_value,
+        damping=base.damping,
+        wind_active=base.wind_active,
+        wind_step=base.wind_step,
+        wind_force=base.wind_force,
+        launch_velocity=(launch_vx, launch_vz),
+        launch_position=(launch_x_offset, launch_height),
+        release_delay_steps=_steps(control_dt, release_delay_s),
+        contact_dampratio=contact_dampratio,
+        contact_friction=contact_friction,
+    )
+
+
+def paddle_tilt(side: str, tilt: float) -> float:
+    """The paddle tilt actually written for `side` (mirrored for the right paddle).
+
+    Args:
+        side: `"left"` or `"right"`.
+        tilt: The commanded tilt magnitude (rad).
+
+    Returns:
+        `+tilt` for the left paddle, `-tilt` for the right one.
+    """
+    if side not in AGENT_KEYS:
+        raise ValueError(f"side must be one of {AGENT_KEYS}, got {side!r}")
+    return _PAD_TILT_SIGN[side] * tilt

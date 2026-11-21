@@ -1,27 +1,34 @@
 """Shared MuJoCo harness of the two-agent reduced coop suite (Gymnasium API).
 
-`CoopTaskEnv` is the common base of `CartPoleCoop-v0` and `PendulumPump-v0` (and of the
-next agent's `TossCatch-v0`): it owns everything that is task-independent -- loading the
-MJCF, writing the config's timing/physics into the model, the per-agent latency queues and
-start-delay suppression, the one-sided actuation, the shared team reward, the observation
-assembly and the Gymnasium contract -- while a subclass supplies only the task physics and
-rules through a small set of hooks:
+`CoopTaskEnv` is the common base of `CartPoleCoop-v0`, `PendulumPump-v0` and
+`TossCatch-v0`: it owns everything that is task-independent -- loading the MJCF, writing the
+config's timing/physics into the model, the per-agent latency queues and start-delay
+suppression, the one-sided actuation, the shared team reward, the observation assembly and
+the Gymnasium contract -- while a subclass supplies only the task physics and rules through
+a small set of hooks:
 
 * ``_write_task_model_params`` -- joint limits/damping/armature from the config;
 * ``_bind_task_model`` -- the joint/body ids the task uses;
 * ``_reset_task_state`` -- place the model's qpos and reset the task's trackers;
 * ``_write_sampled_randomization`` -- write the episode's hidden physical parameter;
+* ``_sample_randomization`` -- the task's episode sampler (the suite sampler by default);
 * ``_task_state`` -- the oracle's `state()` block;
 * ``_shared_state_values`` / ``_goal_values`` -- the observation blocks;
-* ``_apply_task_actions`` -- the physical commands (and the optional perturbation) into
-  `mjData.xfrc_applied`;
+* ``_apply_task_actions`` -- the physical commands (and the optional perturbation) into the
+  model (`mjData.xfrc_applied` for the force tasks, the paddle pose for the toss-catch);
+* ``_on_substep`` -- optional per-physics-substep hook (smooth actuation and contact
+  sampling for the toss-catch task);
 * ``_diagnostics`` / ``_success`` / ``_failure`` / ``_task_potential`` -- info/reward;
-* ``_after_step`` -- optional per-step tracker update (the pendulum's zero crossings).
+* ``_after_step`` -- optional per-control-step tracker update (the pendulum's zero crossings,
+  the toss-catch paddles' velocity).
 
 The two agents are `left` (commands only POSITIVE physical quantities) and `right` (only
 NEGATIVE ones): the base maps an applied normalized action `a` to the physical command
 `sign * max(a, 0) * config.authority * gain * limit_scale`, so neither agent can drive the
-shared object in both directions -- the suite's non-additivity.
+shared object in both directions -- the suite's non-additivity. The toss-catch task is the
+exception: its paddles are symmetric position-controlled bodies, so that env overrides
+`_physical_commands` and maps the normalized pose increments without the one-sided split
+(the coordination there comes from timing/anticipation, not from the actuator split).
 
 Per control step (`control_every` physics substeps): both commands go through the agent's
 private latency queue and are suppressed during its start delay, the physical commands and
@@ -69,7 +76,11 @@ from callosum.experiments.coop_tasks.logic import (
 )
 
 if TYPE_CHECKING:
-    from callosum.experiments.coop_tasks.config import CartPoleConfig, PendulumConfig
+    from callosum.experiments.coop_tasks.config import (
+        CartPoleConfig,
+        PendulumConfig,
+        TossConfig,
+    )
 
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
@@ -103,7 +114,7 @@ class CoopTaskEnv(gymnasium.Env):
 
     def __init__(
         self,
-        config: CartPoleConfig | PendulumConfig | None = None,
+        config: CartPoleConfig | PendulumConfig | TossConfig | None = None,
         partner_mode: str = "none",
         render_mode: str | None = None,
     ) -> None:
@@ -192,12 +203,7 @@ class CoopTaskEnv(gymnasium.Env):
         episode_seed = self.config.seed + self._episode_index if seed is None else int(seed)
         self._episode_index += 1
         super().reset(seed=episode_seed)
-        randomization = sample_episode_randomization(
-            self.config.randomization,
-            control_dt=self.config.control_dt,
-            max_control_steps=self.config.max_control_steps,
-            seed=episode_seed,
-        )
+        randomization = self._sample_randomization(episode_seed)
         self._randomization = randomization
         self._step_index = 0
         action_dim = self._task_spec.action_dim
@@ -258,8 +264,9 @@ class CoopTaskEnv(gymnasium.Env):
             else 0.0
         )
         self._apply_task_actions(physical, wind_force)
-        for _ in range(self.config.control_every):
+        for substep in range(self.config.control_every):
             mujoco.mj_step(self._model, self._data)
+            self._on_substep(substep)
         self._step_index += 1
         self._after_step()
 
@@ -423,6 +430,38 @@ class CoopTaskEnv(gymnasium.Env):
     def _after_step(self) -> None:
         """Optional per-step tracker update (the pendulum's zero-crossing counter)."""
         return
+
+    def _on_substep(self, substep: int) -> None:
+        """Optional per-physics-substep hook, called after every `mj_step`.
+
+        The toss-catch task uses it for smooth kinematic paddle motion (interpolating the
+        paddle pose across the control step, which also avoids teleport-tunnelling) and for
+        collision sampling that must not miss a short contact inside one control step.
+
+        Args:
+            substep: Zero-based index of the physics substep that just ran.
+        """
+        return
+
+    def _sample_randomization(self, episode_seed: int) -> EpisodeRandomization:
+        """Sample the episode's private randomness (the suite sampler by default).
+
+        The toss-catch task overrides it with `sample_toss_randomization`, whose record is a
+        `TossEpisodeRandomization` (a superset of `EpisodeRandomization`); every other task
+        keeps the suite's deterministic sampler unchanged.
+
+        Args:
+            episode_seed: The episode seed.
+
+        Returns:
+            The immutable randomisation record of the episode.
+        """
+        return sample_episode_randomization(
+            self.config.randomization,
+            control_dt=self.config.control_dt,
+            max_control_steps=self.config.max_control_steps,
+            seed=episode_seed,
+        )
 
     def _write_task_model_params(self) -> None:
         """Write the task's joint limits/damping/armature into the model (subclass hook)."""

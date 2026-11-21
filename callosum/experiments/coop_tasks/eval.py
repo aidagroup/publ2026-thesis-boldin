@@ -2,11 +2,11 @@
 
 Loads a `latest.pt` checkpoint of `callosum.experiments.cube_wrench.train` (weights + config) and runs
 the two deterministic (greedy) policies for `--episodes` episodes of the checkpoint's coop
-task (`--task cartpole`/`--task pendulum` is recorded in the checkpoint config; the cube has
+task (`--task cartpole`/`pendulum`/`toss` is recorded in the checkpoint config; the cube has
 its own `callosum/experiments/cube_wrench/eval.py`). The metrics the task-suite comparison needs are
 written as JSON: success rate, steps / steps to success and the task diagnostics (the final
 pole angle for the cart-pole, the achieved amplitude and completed hold cycles for the
-pendulum).
+pendulum, the pass count for the toss-catch).
 
 The ablation's three policy **input modes** are supported exactly as in the cube evaluator:
 
@@ -42,6 +42,7 @@ import torch
 
 from callosum.common.metrics import EpisodeRecord, success_rate, time_to_success_stats
 from callosum.experiments.coop_tasks import make_coop_env
+from callosum.experiments.coop_tasks.logic import task_diagnostic
 from callosum.experiments.cube_wrench.ppo_config import BACKENDS, INPUT_MODES, TASKS
 from callosum.experiments.cube_wrench.train import (
     EVAL_SEED_OFFSET,
@@ -157,8 +158,8 @@ def run_episode(
     return record, info
 
 
-def summarize(records: list[EpisodeRecord], infos: list[dict]) -> dict:
-    """The JSON-ready metric block of one evaluation."""
+def summarize(records: list[EpisodeRecord], infos: list[dict], task: str) -> dict:
+    """The JSON-ready metric block of one evaluation (task-aware diagnostics)."""
     steps = np.asarray([record.decisions for record in records], dtype=np.float64)
     successes = sum(1 for record in records if record.success)
     time = time_to_success_stats(records)
@@ -167,17 +168,22 @@ def summarize(records: list[EpisodeRecord], infos: list[dict]) -> dict:
         "successes": successes,
         "failures": len(records) - successes,
         "success_rate": success_rate(records),
-        "mean_angle_deg": float(np.mean([info["angle_deg"] for info in infos])),
+        "mean_diagnostic": float(np.mean([task_diagnostic(task, info) for info in infos])),
         "steps_mean": float(np.mean(steps)),
         "steps_to_success_mean": None if time is None else time[0],
         "steps_to_success_std": None if time is None else time[1],
     }
+    if task == "cartpole":
+        summary["mean_angle_deg"] = float(np.mean([info["angle_deg"] for info in infos]))
     if infos and "amplitude_deg" in infos[0]:
         summary["mean_amplitude_deg"] = float(np.mean([info["amplitude_deg"] for info in infos]))
         summary["mean_completed_cycles"] = float(
             np.mean([info["completed_cycles"] for info in infos])
         )
         summary["hold_cycles"] = float(infos[0]["hold_cycles"])
+    if task == "toss":
+        summary["mean_passes"] = float(np.mean([info["passes"] for info in infos]))
+        summary["target_passes"] = float(infos[0]["target_passes"])
     return summary
 
 
@@ -233,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         env.close()
 
-    summary = summarize(records, infos)
+    summary = summarize(records, infos, cfg.task)
     report = {
         "checkpoint": str(Path(args.checkpoint)),
         "task": cfg.task,
@@ -263,10 +269,16 @@ def main(argv: list[str] | None = None) -> int:
             f" | amplitude_deg={summary['mean_amplitude_deg']:.1f} "
             f"cycles={summary['mean_completed_cycles']:.2f}/{summary['hold_cycles']:.0f}"
         )
+    if cfg.task == "cartpole":
+        diagonal = f"angle_deg={summary['mean_angle_deg']:.1f}"
+    elif cfg.task == "toss":
+        diagonal = f"passes={summary['mean_passes']:.2f}/{summary['target_passes']:.0f}"
+    else:
+        diagonal = f"angle_deg={summary['mean_diagnostic']:.1f}"
     print(
         f"success_rate={summary['success_rate']:.3f} "
         f"({summary['successes']}/{summary['episodes']}, {summary['failures']} failures) | "
-        f"angle_deg={summary['mean_angle_deg']:.1f} | "
+        f"{diagonal} | "
         f"steps={summary['steps_mean']:.1f} | "
         f"steps_to_success={'-' if time is None else f'{time:.1f}'}{extra}"
     )
