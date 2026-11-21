@@ -61,7 +61,7 @@ fi
 
 mode_of() {  # $1 run name -> none|oracle|predicted (policy input mode)
   case "$1" in
-    *predicted*) echo predicted ;;
+    *sweep*|*predicted*) echo predicted ;;  # the sweep runs are all predicted/Bi-JEPA
     *oracle*) echo oracle ;;
     *) echo none ;;
   esac
