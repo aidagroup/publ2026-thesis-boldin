@@ -8,7 +8,7 @@ TensorBoard logs, greedy evaluation and `latest.pt` checkpoints with `--resume`.
 Step 3 adds the `predicted` ablation arm on top of the env's `none`/`oracle` partner
 visibility: with `use_bijepa=True` the env stays at `partner_mode="none"` (no privileged
 partner block) and each policy additionally receives the Bi-JEPA predicted partner latent
-`ẑ_j`, so its input width is `obs_size("none") + latent_dim` (26 + 32 = 58 by default)
+`ẑ_j`, so its input width is `obs_size("none") + latent_dim` (28 + 32 = 60 by default)
 instead of 26/35. The Bi-JEPA module itself is trained by an auxiliary latent loss in
 `callosum.training.wrench_ppo`; its hyperparameters are flattened into this dataclass (one
 CLI flag each) because the shared argparse helper only supports scalar fields.
@@ -233,7 +233,7 @@ class WrenchPPOConfig:
 
     @property
     def env_obs_size(self) -> int:
-        """Width of one agent's flat *env* observation under `partner_mode` (26 none, 35 oracle)."""
+        """Width of one agent's flat *env* observation under `partner_mode` (28 none, 39 oracle)."""
         return obs_size(self.partner_mode)
 
     @property

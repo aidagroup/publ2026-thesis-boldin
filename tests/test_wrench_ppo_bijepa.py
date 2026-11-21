@@ -2,7 +2,7 @@
 
 Covers the `predicted` ablation arm end to end without the simulator:
 
-* the policy input widths of the three input modes (26 / 35 / 26+32 = 58);
+* the policy input widths of the three input modes (28 / 39 / 28+32 = 60);
 * the Bi-JEPA auxiliary loss is finite and its gradients reach the online encoder/predictor
   only (the EMA target encoders are stop-gradient and are never optimised);
 * the `ẑ_partner` policy input is built from the agent's OWN observation history only, so
@@ -96,26 +96,26 @@ def _random_policy_batch(cfg: WrenchPPOConfig, policy: object, obs_dim: int) -> 
 def test_input_widths_of_none_oracle_and_predicted() -> None:
     baseline = WrenchPPOConfig()
     assert baseline.input_mode == "none"
-    assert baseline.env_obs_size == baseline.obs_size == obs_size("none") == 26
-    assert baseline.policy_input_size == 26
+    assert baseline.env_obs_size == baseline.obs_size == obs_size("none") == 28
+    assert baseline.policy_input_size == 28
 
     oracle = WrenchPPOConfig(partner_mode="oracle")
     assert oracle.input_mode == "oracle"
-    assert oracle.env_obs_size == obs_size("oracle") == 35
-    assert oracle.policy_input_size == 35
+    assert oracle.env_obs_size == obs_size("oracle") == 39
+    assert oracle.policy_input_size == 39
 
     predicted = WrenchPPOConfig(use_bijepa=True)
     assert predicted.input_mode == "predicted"
     assert predicted.partner_mode == "none"
-    assert predicted.env_obs_size == 26
+    assert predicted.env_obs_size == 28
     assert predicted.latent_dim == 32
-    assert predicted.policy_input_size == 26 + 32 == 58
-    assert WrenchPPOConfig(use_bijepa=True, latent_dim=16).policy_input_size == 42
+    assert predicted.policy_input_size == 28 + 32 == 60
+    assert WrenchPPOConfig(use_bijepa=True, latent_dim=16).policy_input_size == 44
 
     for policies, expected in (
-        (make_policies("none"), 26),
-        (make_policies("oracle"), 35),
-        (make_policies("none", latent_dim=32), 58),
+        (make_policies("none"), 28),
+        (make_policies("oracle"), 39),
+        (make_policies("none", latent_dim=32), 60),
     ):
         for policy in policies:
             assert policy.actor_mean[0].in_features == expected
@@ -240,7 +240,7 @@ def test_predicted_input_does_not_use_the_partner_observation() -> None:
     num_envs = 3
     obs = {name: torch.randn(num_envs, cfg.env_obs_size) for name in AGENT_KEYS}
     inputs = builder.reset(obs)
-    assert builder.input_size == cfg.env_obs_size + cfg.latent_dim == 34
+    assert builder.input_size == cfg.env_obs_size + cfg.latent_dim == 36
     for name in AGENT_KEYS:
         assert inputs[name].shape == (num_envs, builder.input_size)
         # The own part of the input is the own current observation, verbatim.
@@ -330,8 +330,8 @@ def test_predicted_checkpoint_roundtrip_restores_bijepa_and_metadata(tmp_path) -
     assert payload["input_mode"] == "predicted"
     assert payload["partner_mode"] == "none"
     assert payload["use_bijepa"] is True
-    assert payload["obs_size"] == obs_size("none") == 26
-    assert payload["policy_input_size"] == 58
+    assert payload["obs_size"] == obs_size("none") == 28
+    assert payload["policy_input_size"] == 60
     assert payload["latent_dim"] == cfg.latent_dim
     assert payload["config"]["use_bijepa"] is True
     assert payload["bijepa"] and payload["bijepa_optimizer"]
@@ -361,7 +361,7 @@ def test_predicted_checkpoint_roundtrip_restores_bijepa_and_metadata(tmp_path) -
     assert restored.use_bijepa is True
     assert restored.latent_dim == cfg.latent_dim
     assert restored.input_mode == "predicted"
-    assert restored.policy_input_size == 58
+    assert restored.policy_input_size == 60
 
 
 def test_legacy_step_two_checkpoint_stays_loadable(tmp_path) -> None:
@@ -388,7 +388,7 @@ def test_legacy_step_two_checkpoint_stays_loadable(tmp_path) -> None:
         check_checkpoint_compat(payload, "predicted")
     restored = config_from_payload(payload)
     assert restored.use_bijepa is False
-    assert restored.policy_input_size == 26
+    assert restored.policy_input_size == 28
     assert restored.input_mode == "none"
 
 
@@ -396,7 +396,7 @@ def test_legacy_step_two_checkpoint_stays_loadable(tmp_path) -> None:
 
 
 class _ToyVecWrenchCube:
-    """A mujoco-free `VecWrenchCube` stand-in exposing only the env's 26-d observation.
+    """A mujoco-free `VecWrenchCube` stand-in exposing only the env's 28-d observation.
 
     It follows the real auto-reset contract: an episode truncates after `episode_steps` and
     the next observation belongs to a fresh episode, so the trainer's rollout loop, the
@@ -479,12 +479,12 @@ def test_train_smoke_with_bijepa_writes_finite_losses_and_a_predicted_checkpoint
     assert payload["update"] == cfg.total_updates == 2
     assert payload["global_step"] == cfg.total_steps
     assert payload["input_mode"] == "predicted"
-    assert payload["policy_input_size"] == 58
+    assert payload["policy_input_size"] == 60
     assert payload["bijepa"] and payload["bijepa_optimizer"]
     assert "latest.pt" in {path.name for path in run_dir.iterdir()}
     config = (run_dir / "config.json").read_text()
     assert '"input_mode": "predicted"' in config
-    assert '"policy_input_size": 58' in config
+    assert '"policy_input_size": 60' in config
 
 
 # --- (f) the ridge probe ----------------------------------------------------------------

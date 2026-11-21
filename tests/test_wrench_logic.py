@@ -40,6 +40,7 @@ from callosum.envs._wrench_logic import (
     partner_fields,
     partner_of,
     potential,
+    privileged_value_fields,
     potential_shaping,
     sample_episode_randomization,
     success,
@@ -64,11 +65,11 @@ def test_config_defaults_match_the_design_numbers() -> None:
     assert math.isclose(cfg.failure_pos_drift, 0.05)
     assert math.isclose(cfg.failure_rot_drift, 0.5)
     assert cfg.latency_range == (0.0, 0.3)
-    assert cfg.gain_range == (0.6, 1.4)
-    assert cfg.limit_scale_range == (0.5, 1.5)
-    assert cfg.slip_prob_range == (0.0, 0.3)
-    assert cfg.slip_decisions_range == (1, 3)
-    assert cfg.start_delay_range == (0.0, 0.3)
+    assert cfg.gain_range == (0.5, 1.5)
+    assert cfg.limit_scale_range == (0.4, 1.6)
+    assert cfg.slip_prob_range == (0.2, 0.5)
+    assert cfg.slip_decisions_range == (2, 5)
+    assert cfg.start_delay_range == (0.0, 0.5)
     assert cfg.layer_frictionloss_range == (0.0, 2.0e-5)
     assert cfg.initial_angle_range == (0.0, 0.05)
     assert cfg.success_bonus == 2.0
@@ -198,7 +199,7 @@ def test_oracle_observation_adds_the_partner_block() -> None:
     assert oracle_fields[: len(none_fields)] == none_fields
     assert oracle_fields[len(none_fields) :] == partner_fields("oracle")
     assert obs_size("oracle") == obs_size("none") + len(partner_fields("oracle"))
-    assert len(partner_fields("oracle")) == 9  # 6D wrench + latency/gain/limit_scale
+    assert len(partner_fields("oracle")) == 11  # applied wrench + params + start delay/slip
     assert all(field.startswith("partner_") for field in partner_fields("oracle"))
 
 
@@ -224,6 +225,7 @@ def _values(seed: int = 0) -> dict[str, float]:
         values.update(
             zip(param_value_fields(key), (agent.latency_s, agent.gain, agent.limit_scale))
         )
+        values.update(zip(privileged_value_fields(key), (agent.start_delay_s, 0.0)))
     values.update({name: (index - 7.0) / 10.0 for index, name in enumerate(CUBE_STATE_FIELDS)})
     values["goal_angle"] = math.pi / 2
     values["time_fraction"] = 0.25
@@ -233,7 +235,7 @@ def _values(seed: int = 0) -> dict[str, float]:
 def test_build_observation_has_the_layout_width_and_order() -> None:
     values = _values()
     for mode in PARTNER_MODES:
-        assert obs_size(mode) == (26 if mode == "none" else 35)
+        assert obs_size(mode) == (28 if mode == "none" else 39)
         for key in AGENT_KEYS:
             vector = build_observation(values, key, mode)
             assert vector.shape == (obs_size(mode),)
@@ -263,15 +265,15 @@ def test_build_observation_oracle_uses_the_partner_fields() -> None:
     values = _values()
     holder_none = build_observation(values, "holder", "none")
     holder_oracle = build_observation(values, "holder", "oracle")
-    assert holder_oracle.shape == (35,)
-    assert np.array_equal(holder_oracle[:26], holder_none)  # same first 26 fields
+    assert holder_oracle.shape == (39,)
+    assert np.array_equal(holder_oracle[:28], holder_none)  # same first 28 fields
     partner_values = [values[name] for name in wrench_value_fields("rotator")]
-    assert np.array_equal(holder_oracle[26:32], np.asarray(partner_values, dtype=np.float32))
+    assert np.array_equal(holder_oracle[28:34], np.asarray(partner_values, dtype=np.float32))
     # Changing a partner private parameter changes only the oracle block.
     values["rotator_gain"] += 1.0
     changed = build_observation(values, "holder", "oracle")
     assert not np.array_equal(changed, holder_oracle)
-    assert np.array_equal(changed[:26], holder_none)
+    assert np.array_equal(changed[:28], holder_none)
 
 
 def test_build_observation_rejects_unknown_agents_and_missing_values() -> None:
@@ -520,6 +522,9 @@ def test_env_failure_step_pays_the_failure_penalty() -> None:
     cfg = WrenchCubeConfig(
         failure_pos_drift=0.001,
         success_pos_tol=0.0005,
+        latency_range=(0.0, 0.0),  # apply the push immediately
+        slip_prob_range=(0.0, 0.0),
+        start_delay_range=(0.0, 0.0),
     )
     env = WrenchCubeEnv(config=cfg)
     try:

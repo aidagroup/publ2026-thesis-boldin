@@ -20,9 +20,9 @@ Observation of ONE agent, in field order (`obs_fields`):
   contacts, so this is the whole observable physics.
 * **goal and time** (2): the target hinge angle (rad) and the fraction of the episode
   budget already used.
-* **partner block** (9), only under `partner_mode="oracle"`: the partner's most recent
-  commanded wrench and its private parameters -- the privileged upper bound of the
-  ablation triple. `"predicted"` (Bi-JEPA, phase 3) will replace that block with a
+* **partner block** (11), only under `partner_mode="oracle"`: the partner's most recent
+  APPLIED wrench, its private parameters and the remaining slip/start-delay state --
+  the privileged upper bound of the ablation triple. `"predicted"` (Bi-JEPA, phase 3) will replace that block with a
   latent and is deliberately NOT part of this layout yet.
 
 The env does not assemble the vector itself. It collects one flat `{field: value}` dict
@@ -71,11 +71,30 @@ PARTNER_WRENCH_FIELDS = tuple(f"partner_wrench_{axis}" for axis in _WRENCH_AXES)
 OWN_PARAM_FIELDS = ("own_latency", "own_gain", "own_limit_scale")
 """Names of the agent's own private parameters (latency s, wrench gain, authority scale)."""
 
+OWN_PRIVILEGED_FIELDS = ("own_start_delay", "own_slip_remaining")
+"""The agent's own start delay (s) and the remaining steps of a slip event.
+
+Both are things the hand knows about itself: it knows when it may start and whether its
+actuator is slipping right now. The partner does NOT see them under `none`; under
+`oracle` the partner's values are exposed (privileged upper bound)."""
+
 PARTNER_PARAM_FIELDS = ("partner_latency", "partner_gain", "partner_limit_scale")
 """Names of the partner's private parameters ("oracle" mode only)."""
 
-PARTNER_FIELDS = PARTNER_WRENCH_FIELDS + PARTNER_PARAM_FIELDS
-"""The full partner block ("oracle" mode): the partner's wrench (6) + private parameters (3)."""
+PARTNER_PRIVILEGED_FIELDS = ("partner_start_delay", "partner_slip_remaining")
+"""The partner's start delay (s) and remaining slip steps ("oracle" mode only).
+
+These are what make the oracle a true upper bound: the partner's actuator suppression is
+not recoverable from the shared cube state, so without them `none` could infer the
+partner's behaviour only from delayed dynamics (the observed oracle≈none collapse)."""
+
+PARTNER_FIELDS = (
+    PARTNER_WRENCH_FIELDS
+    + PARTNER_PARAM_FIELDS
+    + PARTNER_PRIVILEGED_FIELDS
+)
+"""The full partner block ("oracle" mode): applied wrench (6) + private parameters (3)
++ start delay and remaining slip steps (2)."""
 
 CUBE_STATE_FIELDS = (
     "core_x",
@@ -127,6 +146,11 @@ def param_value_fields(agent: str) -> tuple[str, ...]:
     return tuple(f"{agent}_{name}" for name in _PRIVATE_PARAM_NAMES)
 
 
+def privileged_value_fields(agent: str) -> tuple[str, ...]:
+    """Values-dict keys of `agent`'s start delay and remaining slip steps."""
+    return (f"{agent}_start_delay", f"{agent}_slip_remaining")
+
+
 def validate_partner_mode(mode: str) -> None:
     """Raise ValueError if `mode` isn't one of `PARTNER_MODES`."""
     if mode not in PARTNER_MODES:
@@ -154,6 +178,7 @@ def obs_fields(mode: str) -> tuple[str, ...]:
     return (
         OWN_WRENCH_FIELDS
         + OWN_PARAM_FIELDS
+        + OWN_PRIVILEGED_FIELDS
         + CUBE_STATE_FIELDS
         + GOAL_FIELDS
         + partner_fields(mode)
@@ -242,7 +267,8 @@ class AgentRandomization:
 
     The first three fields are the agent's private hardware parameters (and the only
     ones the agent sees about itself, under the "own private parameters" obs block);
-    the slip and start-delay fields are hidden state that only the environment knows.
+    the slip and start-delay fields are private to the agent (exposed to the partner only
+    under `oracle`, so the scripted oracle is a true upper bound).
     """
 
     latency_s: float

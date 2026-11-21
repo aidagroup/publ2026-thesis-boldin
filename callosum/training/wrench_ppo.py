@@ -14,7 +14,7 @@ the arms IPPO trainer): `ActorCritic` (3 x 256 tanh MLPs, state-independent log-
 wrench-specific contract around them:
 
 * the policy input is the env's flat observation, width `obs_size(partner_mode)` (26 for
-  `none`, 35 for `oracle`), and the action is the normalized 6D wrench of the role;
+  `none`, 39 for `oracle`), and the action is the normalized 6D wrench of the role;
 * under `predicted` (`use_bijepa=True`) the env stays at `partner_mode="none"` and the policy
   input becomes `[own observation (26), ẑ_partner (latent_dim, 32)]` = 58: the agent predicts
   its partner's latent from its OWN observation history (`LatentInputBuilder` ->
@@ -91,8 +91,8 @@ def make_policies(
     """One independent Gaussian actor-critic per role, in `AGENT_KEYS` order.
 
     The input width is `callosum.envs._wrench_logic.obs_size(partner_mode) + latent_dim`: the
-    env's flat observation for that mode (26 for `none`, 35 for `oracle`) plus the predicted
-    partner latent appended under `predicted` (`latent_dim=cfg.latent_dim`, so 26 + 32 = 58).
+    env's flat observation for that mode (28 for `none`, 39 for `oracle`) plus the predicted
+    partner latent appended under `predicted` (`latent_dim=cfg.latent_dim`, so 28 + 32 = 60).
     The output is the role's normalized 6D wrench. Sharing no parameters is what makes the
     pair an IPPO-style decentralised team rather than a single joint policy.
 

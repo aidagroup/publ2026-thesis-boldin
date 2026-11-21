@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from callosum.configs.wrench_cube import WrenchCubeConfig
+from callosum.envs._wrench_logic import injection_active
 
 if TYPE_CHECKING:
     from callosum.envs.wrench_cube.env import WrenchCubeEnv
@@ -133,6 +134,14 @@ class OracleController:
             cfg.rotator_authority,
             rotator.limit_scale * rotator.gain,
         )
+        # The scripted sanity controller knows its own actuators' suppression (the env's
+        # injected start delay / slip windows): while the HOLDER cannot hold, the rotator
+        # must not turn (the reaction would drift the unheld core), and a suppressed
+        # rotator simply pauses. This is the same "wait for the partner" logic the
+        # learned policies have to discover, used here only to validate the environment.
+        step = int(state["step"])
+        if injection_active(holder, step) or injection_active(rotator, step):
+            rotator_action = np.zeros(_WRENCH_SIZE)
         return {"holder": holder_action, "rotator": rotator_action}
 
     @staticmethod

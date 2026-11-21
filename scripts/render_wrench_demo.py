@@ -1,7 +1,7 @@
-"""Render the CubeWrench-v0 demo videos: oracle success, rotator-only failure, side by side.
+"""Render the CubeWrench-v0 demo videos: oracle success, rotator-only failure, learned policy.
 
-Three clips come out of one run (all from the env's own physics, rendered with
-`mujoco.Renderer` on a render-only copy of the scene, see `scripts/_render_utils.py`):
+Clips rendered by one run (all from the env's own physics, rendered with `mujoco.Renderer`
+on a render-only copy of the scene, see `scripts/_render_utils.py`):
 
 1. ``demo_oracle.mp4`` -- the scripted oracle: the holder PD-stabilises the core while the
    rotator PD-turns the layer to 90 degrees -> SUCCESS (~50 control steps at the defaults).
@@ -10,12 +10,23 @@ Three clips come out of one run (all from the env's own physics, rendered with
    ~20 control steps (the non-additivity the reduced model exists to show).
 3. ``demo_side_by_side.mp4`` -- clips 1 and 2 in one frame, synchronised by control step,
    each half keeping its own caption and HUD.
+4. ``demo_policy_vs_oracle.mp4`` -- only with ``--checkpoint``: the trained `wrench_ppo`
+   policies (greedy, left) next to the scripted oracle (right, the upper bound), both ending
+   together (each half at its own slow-motion factor: the policy needs ~2-3x the oracle's
+   control steps, so the oracle would otherwise sit frozen for most of the clip). The policy
+   input mode comes from ``--input-mode`` (or the checkpoint):
+   ``none`` / ``oracle`` engine observations or ``predicted`` (Bi-JEPA ``ẑ_partner``, built by
+   `callosum.training.wrench_ppo.LatentInputBuilder`).
 
-Plus ``demo_preview.gif`` (looping preview of the side-by-side clip), the first three frames
-of every video as PNG stills (``oracle_frame0.png`` ...; they are identical by construction,
-because the slow-motion expansion holds frame 0), a middle frame (``*_mid.png``) and the
-final frame (``*_final.png``) of every clip, and ``demo_summary.json`` with the episode
-metrics and the video probe results.
+Plus ``demo_preview.gif`` (looping preview of the oracle-vs-rotator clip), the first three
+frames of every video as PNG stills (``oracle_frame0.png`` ...; they are identical by
+construction, because the slow-motion expansion holds frame 0), a middle frame (``*_mid.png``)
+and the final frame (``*_final.png``) of every clip, and ``demo_summary.json`` with the episode
+metrics, the still md5s and the video probe results.
+
+The learned-policy path reuses `scripts/eval_wrench_cube.py` (checkpoint loading, input-mode
+resolution, greedy inference and the Bi-JEPA input builder) instead of duplicating it, so the
+clip shows exactly what the ablation evaluates.
 
 Nothing is installed: MP4 is written by OpenCV when available and by the system ``ffmpeg``
 otherwise (the pod's venv has no OpenCV), GIF by Pillow. Rendering is offscreen: the script
@@ -27,9 +38,16 @@ Run on the pod (from the repo root):
         --out /workspace/callosum-runs/render --seed 0 --width 640 --height 640 \
         --fps 30 --controller oracle
 
-Quick metric-only check (no rendering, no OpenGL):
+    MUJOCO_GL=egl /root/.callosum/venv/bin/python scripts/render_wrench_demo.py \
+        --checkpoint /workspace/callosum-runs/wrench_v3_none_s0/latest.pt \
+        --input-mode none --out /workspace/callosum-runs/render_policy \
+        --seed 0 --width 640 --height 640 --fps 30
+
+Quick metric-only checks (no rendering, no OpenGL):
 
     python scripts/render_wrench_demo.py --out /tmp/render --dry-run
+    python scripts/render_wrench_demo.py --out /tmp/render --dry-run \
+        --checkpoint /path/latest.pt --input-mode none --scene policy-vs-oracle
 
 Single scene / holder-off variant:
 
@@ -39,6 +57,7 @@ Single scene / holder-off variant:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -66,7 +85,7 @@ from _render_utils import (
 from PIL import Image
 
 if TYPE_CHECKING:
-    from callosum.envs.wrench_cube import OracleController, WrenchCubeEnv
+    from callosum.envs.wrench_cube import WrenchCubeEnv
 
 TITLE_ORACLE = "hold + turn (both agents)"
 """Caption of scene 1 (the oracle's coordinated two-agent turn)."""
@@ -74,14 +93,21 @@ SUBTITLE_ORACLE = "oracle: holder stabilises the core, rotator turns the layer t
 TITLE_ROTATOR = "rotator only (no partner)"
 """Caption of scene 2 (the holder's wrench forced to zero)."""
 SUBTITLE_ROTATOR = "holder wrench = 0: the reaction torque spins the core out of tolerance"
+TITLE_ORACLE_UPPER = "oracle (upper bound)"
+"""Caption of the scripted oracle half of the learned-policy comparison."""
+SUBTITLE_ORACLE_UPPER = "scripted holder + rotator PD: privileged, not a learned policy"
 
 ORACLE_VIDEO = "demo_oracle.mp4"
 ROTATOR_VIDEO = "demo_rotator_only.mp4"
 SIDE_BY_SIDE_VIDEO = "demo_side_by_side.mp4"
+POLICY_VIDEO = "demo_policy_vs_oracle.mp4"
+POLICY_STEM = "policy_vs_oracle"
 PREVIEW_GIF = "demo_preview.gif"
 SUMMARY_JSON = "demo_summary.json"
 PNG_STILLS = 3
 """Number of leading frames saved as ``*_frame{i}.png`` per video."""
+SBS_MID_FRACTION = 0.6
+"""Position of the ``*_mid.png`` still inside a side-by-side clip (fraction of its length)."""
 
 FAILURE_DRIFT_RAD = 0.5
 """Core-rotation failure bound of the env config (`failure_rot_drift`, used in labels)."""
@@ -133,12 +159,176 @@ class DemoEpisode:
         }
 
 
+# --- action sources ----------------------------------------------------------------------
+
+
+class OracleDemoController:
+    """The scripted oracle (`callosum.envs.wrench_cube.OracleController`) behind the demo.
+
+    It is a centralised script that reads the whole `env.state()`; the demo uses it as the
+    upper bound, not as a policy. The adapter gives it the demo's `reset`/`act`/`observe`
+    protocol (the oracle keeps no state between steps, so `reset`/`observe` are no-ops).
+    """
+
+    env_mode: str = "none"
+    """The env's partner-visibility mode the oracle scenes run on."""
+
+    label: str = "oracle"
+
+    def __init__(self, config: Any) -> None:
+        """Wrap a `WrenchCubeConfig` with the scripted oracle."""
+        from callosum.envs.wrench_cube import OracleController
+
+        self._oracle = OracleController(config)
+
+    def reset(self, obs: dict[str, np.ndarray]) -> None:
+        """No-op: the oracle has no per-episode state (the env state is read in `act`)."""
+        del obs
+
+    def act(self, env: WrenchCubeEnv, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """The oracle's normalised wrench commands for the next control step."""
+        del obs
+        return self._oracle.act(env)
+
+    def observe(self, obs: dict[str, np.ndarray]) -> None:
+        """No-op: the oracle needs no observation history."""
+        del obs
+
+
+class PolicyDemoController:
+    """Greedy `wrench_ppo` checkpoint policies behind the demo's controller protocol.
+
+    Loading and inference reuse `scripts/eval_wrench_cube.py` / `callosum.training.wrench_ppo`:
+    `load_checkpoint` reads the payload, `eval_wrench_cube.resolve_input_mode` decides the
+    policy input mode (flag or checkpoint), `check_checkpoint_compat` validates it, and the
+    `predicted` input is built by `LatentInputBuilder` with exactly the `reset`/`step` seam of
+    the trainer and the evaluator. Actions are the distribution means, clipped to `[-1, 1]`.
+
+    Under `predicted` the env stays at `partner_mode="none"` (the agent cannot see the
+    privileged partner block it is asked to predict); `none`/`oracle` map onto themselves.
+    """
+
+    def __init__(self, checkpoint: Path, input_mode: str | None) -> None:
+        """Load the checkpoint and build both greedy policies (and the Bi-JEPA builder).
+
+        Args:
+            checkpoint: A `wrench_ppo` `latest.pt` checkpoint.
+            input_mode: `none` / `oracle` / `predicted`, or None to use the checkpoint's own
+                saved mode (see `eval_wrench_cube.resolve_input_mode`).
+        """
+        import eval_wrench_cube
+        import torch
+
+        from callosum.training.wrench_ppo import (
+            LatentInputBuilder,
+            check_checkpoint_compat,
+            config_from_payload,
+            load_bijepa_weights,
+            load_checkpoint,
+            load_weights,
+            make_bijepa,
+            make_policies,
+        )
+
+        self._torch = torch
+        self._eval = eval_wrench_cube
+        self.checkpoint = Path(checkpoint)
+        payload = load_checkpoint(self.checkpoint)
+        resolved = eval_wrench_cube.resolve_input_mode(
+            payload,
+            argparse.Namespace(
+                checkpoint=str(self.checkpoint), input_mode=input_mode, partner_mode=None
+            ),
+        )
+        env_mode, latent_dim = check_checkpoint_compat(payload, resolved)
+        cfg = config_from_payload(payload)
+        if resolved == "predicted" and (not cfg.use_bijepa or cfg.latent_dim != latent_dim):
+            raise ValueError(
+                "checkpoint is inconsistent: it stores Bi-JEPA weights (latent_dim="
+                f"{latent_dim}) but its saved config has use_bijepa={cfg.use_bijepa} and "
+                f"latent_dim={cfg.latent_dim}"
+            )
+        self.input_mode = resolved
+        self.env_mode = env_mode
+        self.latent_dim = latent_dim
+        self.update = payload.get("update")
+        self.format = payload.get("format")
+        self.policies = make_policies(env_mode, "cpu", latent_dim=latent_dim)
+        load_weights(payload, self.policies)
+        self._builder: LatentInputBuilder | None = None
+        bijepa = make_bijepa(cfg, "cpu")
+        if bijepa is not None:
+            load_bijepa_weights(payload, bijepa)
+            bijepa.eval()
+            self._builder = LatentInputBuilder(bijepa, device="cpu")
+        self._policy_obs: dict[str, Any] | None = None
+        from callosum.envs._wrench_logic import AGENT_KEYS
+
+        self._agent_keys = tuple(AGENT_KEYS)
+
+    @property
+    def label(self) -> str:
+        """Short name of the action source, for the summary."""
+        return f"policy ({self.input_mode})"
+
+    @property
+    def title(self) -> str:
+        """The clip caption, e.g. "learned policy (none)"."""
+        return f"learned policy ({self.input_mode})"
+
+    @property
+    def subtitle(self) -> str:
+        """One-line description under the caption (mode, checkpoint, update)."""
+        detail = (
+            "Bi-JEPA ẑ_partner" if self.input_mode == "predicted" else f"{self.input_mode} input"
+        )
+        return f"greedy policy, {detail} · {self.checkpoint.name} (update {self.update})"
+
+    def metadata(self) -> dict[str, Any]:
+        """The JSON-ready checkpoint metadata stored in the demo summary."""
+        return {
+            "checkpoint": str(self.checkpoint),
+            "input_mode": self.input_mode,
+            "env_partner_mode": self.env_mode,
+            "latent_dim": self.latent_dim,
+            "update": self.update,
+            "format": self.format,
+        }
+
+    def reset(self, obs: dict[str, np.ndarray]) -> None:
+        """Start a new episode: the policy input is the first observation (history reset)."""
+        batch = self._eval._batch_obs(obs)
+        self._policy_obs = self._builder.reset(batch) if self._builder is not None else batch
+
+    def act(self, env: WrenchCubeEnv, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """The greedy (distribution mean) action of both policies, clipped to `[-1, 1]`."""
+        del env, obs
+        if self._policy_obs is None:
+            raise RuntimeError("call reset() before the policy acts")
+        actions: dict[str, np.ndarray] = {}
+        for name, policy in zip(self._agent_keys, self.policies):
+            with self._torch.no_grad():
+                action = policy.get_action(self._policy_obs[name], deterministic=True)
+            actions[name] = self._torch.clamp(action, -1.0, 1.0).squeeze(0).numpy()
+        return actions
+
+    def observe(self, obs: dict[str, np.ndarray]) -> None:
+        """Advance the policy input after a non-terminal step (`predicted` rolls history)."""
+        if self._builder is not None:
+            self._policy_obs = self._builder.step(self._eval._batch_obs(obs), self._torch.zeros(1))
+
+
+DemoController = OracleDemoController | PolicyDemoController
+"""The demo's two action sources; both expose `reset` / `act` / `observe`."""
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse the demo-render CLI."""
     parser = argparse.ArgumentParser(
         description=(
             "Render the CubeWrench-v0 demo videos (oracle success, rotator-only failure, "
-            "side by side) with MuJoCo offscreen rendering."
+            "side by side, and optionally learned policy vs oracle) with MuJoCo offscreen "
+            "rendering."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -149,7 +339,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="seed",
         type=int,
         default=0,
-        help="episode seed of both scenes",
+        help="episode seed of all scenes",
     )
     parser.add_argument("--width", type=int, default=640, help="frame width (px)")
     parser.add_argument("--height", type=int, default=640, help="frame height (px)")
@@ -158,7 +348,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--controller",
         choices=("oracle",),
         default="oracle",
-        help="action source (only the scripted oracle is implemented)",
+        help="scripted action source of the oracle / rotator-only scenes",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "wrench_ppo latest.pt: renders demo_policy_vs_oracle.mp4 (learned policies on the "
+            "left, scripted oracle on the right)"
+        ),
+    )
+    parser.add_argument(
+        "--input-mode",
+        choices=("none", "oracle", "predicted"),
+        default=None,
+        help=(
+            "policy input mode of the checkpoint (default: the checkpoint's own saved mode); "
+            "the env uses partner_mode=oracle only for 'oracle'"
+        ),
+    )
+    parser.add_argument(
+        "--policy-max-steps",
+        type=int,
+        default=None,
+        help=(
+            "rollout cap of the learned-policy episode (default: 2x the oracle episode, "
+            "at least 100 steps, capped by --max-steps)"
+        ),
     )
     parser.add_argument(
         "--holder-off",
@@ -170,9 +387,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scene",
-        choices=("all", "oracle", "rotator-only", "side-by-side"),
+        choices=("all", "oracle", "rotator-only", "side-by-side", "policy-vs-oracle"),
         default="all",
-        help="which artifact(s) to render",
+        help=(
+            "'all' also renders the policy scene when --checkpoint is given; "
+            "'policy-vs-oracle' requires --checkpoint"
+        ),
     )
     parser.add_argument(
         "--step-stride",
@@ -232,9 +452,34 @@ def _state_metrics(state: dict[str, Any], initial: dict[str, Any]) -> tuple[floa
     return angle_deg, drift_mm, drift_deg
 
 
+def _policy_max_steps(
+    args: argparse.Namespace, env_max_steps: int, reference_steps: int | None
+) -> int:
+    """Rollout cap of the learned-policy episode.
+
+    Default: twice the oracle episode, at least 150 steps (the trained policies take ~120-180
+    control steps to succeed), so a learned policy that is slower than the script still gets
+    the chance to finish inside the clip; never above the env's own budget.
+    """
+    if args.policy_max_steps is not None:
+        return max(1, min(int(args.policy_max_steps), env_max_steps))
+    if reference_steps is None:
+        return env_max_steps
+    return min(env_max_steps, max(150, 2 * int(reference_steps)))
+
+
+def _scene_wanted(scene: str) -> tuple[bool, bool, bool]:
+    """Return `(oracle, rotator-only, oracle-vs-rotator)` flags of the `--scene` choice."""
+    return (
+        scene in ("all", "oracle", "side-by-side"),
+        scene in ("all", "rotator-only", "side-by-side"),
+        scene in ("all", "side-by-side"),
+    )
+
+
 def run_episode(
     env: WrenchCubeEnv,
-    controller: OracleController,
+    controller: DemoController,
     renderer: DemoRenderer | None,
     *,
     name: str,
@@ -250,9 +495,13 @@ def run_episode(
     Frames are captured at the start of every `step_stride`-th control step and once more
     after the terminating step (the final frame carries the SUCCESS / FAILED status).
     `renderer=None` runs the same rollout without rendering (the `--dry-run` path).
+
+    The controller seam is `reset(obs)` once, then `act(env, obs)` before every step and
+    `observe(obs)` after every non-terminal step (the Bi-JEPA `predicted` input needs it).
     """
     config = env.config
-    env.reset(seed=seed)
+    obs, _reset_info = env.reset(seed=seed)
+    controller.reset(obs)
     initial = env.state()
     goal = float(config.goal_angle)
     frames: list[DemoFrame] = []
@@ -302,12 +551,15 @@ def run_episode(
     while not (terminated or truncated):
         if steps and steps % step_stride == 0:
             capture(steps)
-        action = controller.act(env)
+        action = controller.act(env, obs)
         if holder_off:
             action = {"holder": np.zeros(6), "rotator": action["rotator"]}
-        _obs, _reward, terminated, truncated, info = env.step(action)
+        obs, _reward, terminated, truncated, info = env.step(action)
         steps += 1
-        if steps >= max_steps and not terminated:
+        if terminated or truncated:
+            break
+        controller.observe(obs)
+        if steps >= max_steps:
             truncated = True
             break
 
@@ -366,6 +618,20 @@ def _expanded_index(frames: Sequence[DemoFrame], index: int, duplicate: int) -> 
     return frames[min(index // duplicate, len(frames) - 1)].image
 
 
+def _side_by_side_at(
+    left: DemoEpisode,
+    right: DemoEpisode,
+    index: int,
+    duplicate_left: int,
+    duplicate_right: int,
+) -> np.ndarray:
+    """The side-by-side RGB frame at video-frame `index` (used for the PNG stills)."""
+    return hstack_side_by_side(
+        _expanded_index(left.frames, index, duplicate_left),
+        _expanded_index(right.frames, index, duplicate_right),
+    )
+
+
 def side_by_side_frames(
     left: DemoEpisode,
     right: DemoEpisode,
@@ -383,10 +649,18 @@ def side_by_side_frames(
         _repeat_count(left.frames, duplicate_left), _repeat_count(right.frames, duplicate_right)
     )
     for index in range(total):
-        yield hstack_side_by_side(
-            _expanded_index(left.frames, index, duplicate_left),
-            _expanded_index(right.frames, index, duplicate_right),
-        )
+        yield _side_by_side_at(left, right, index, duplicate_left, duplicate_right)
+
+
+def _md5_image(image: np.ndarray) -> str:
+    """Short md5 of an RGB frame (the report's proof that the stills really differ)."""
+    return hashlib.md5(np.ascontiguousarray(image, dtype=np.uint8).tobytes()).hexdigest()[:12]
+
+
+def _save_image(path: Path, image: np.ndarray) -> None:
+    """Save one RGB frame as PNG (creating the parent directory)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.ascontiguousarray(image)).save(path)
 
 
 def _check_video(path: Path, written_frames: int, sample: Sequence[np.ndarray]) -> dict[str, Any]:
@@ -422,6 +696,141 @@ def _encode_clip(
     return _check_video(path, written_frames, sample)
 
 
+def _write_single_clip(
+    out_dir: Path,
+    filename: str,
+    stem: str,
+    episode: DemoEpisode,
+    *,
+    fps: int,
+    target_seconds: float,
+    encoders: list[str],
+) -> dict[str, Any]:
+    """Encode a single-scene clip plus its stills (frame0-2, mid, final)."""
+    duplicate = duplicate_for_target(episode, fps, target_seconds)
+    first = [_expanded_index(episode.frames, index, duplicate) for index in range(PNG_STILLS)]
+    middle = _expanded_index(
+        episode.frames, round(_repeat_count(episode.frames, duplicate) * 0.5), duplicate
+    )
+    final = episode.frames[-1].image
+    clip = _encode_clip(
+        out_dir / filename,
+        _repeat_frames(episode.frames, duplicate),
+        _repeat_count(episode.frames, duplicate),
+        [first[0], middle, final],
+        fps,
+        encoders,
+    )
+    clip.update({"episode": episode.summary(), "duplicate": duplicate})
+    save_png_stills(out_dir, stem, first, count=len(first))
+    _save_image(out_dir / f"{stem}_mid.png", middle)
+    _save_image(out_dir / f"{stem}_final.png", final)
+    clip["still_md5"] = {
+        "frame0": _md5_image(first[0]),
+        "mid": _md5_image(middle),
+        "final": _md5_image(final),
+    }
+    return clip
+
+
+def _sbs_duplicates(
+    left: DemoEpisode, right: DemoEpisode, fps: int, target_seconds: float, sync: str
+) -> tuple[int, int]:
+    """Frame-hold factors of the two halves of a side-by-side clip.
+
+    `sync="step"` (oracle vs rotator-only) keeps both halves on the same physical time axis:
+    one shared hold factor, so the shorter episode freezes at its final frame. `sync="end"`
+    (learned policy vs oracle) gives each half its own factor so both reach their final state
+    at the same video time -- the policy needs ~2-3x the oracle's steps, and freezing the
+    oracle half for most of the clip would waste the comparison. The HUD step counters stay
+    honest either way.
+    """
+    longer = left if len(left.frames) >= len(right.frames) else right
+    duplicate_longer = duplicate_for_target(longer, fps, target_seconds)
+    if sync == "step":
+        return duplicate_longer, duplicate_longer
+    if sync != "end":
+        raise ValueError(f"sync must be 'step' or 'end', got {sync!r}")
+    shorter = right if longer is left else left
+    duplicate_shorter = max(
+        1, round(duplicate_longer * len(longer.frames) / max(1, len(shorter.frames)))
+    )
+    if longer is left:
+        return duplicate_longer, duplicate_shorter
+    return duplicate_shorter, duplicate_longer
+
+
+def _write_sbs_clip(
+    out_dir: Path,
+    filename: str,
+    stem: str,
+    left: DemoEpisode,
+    right: DemoEpisode,
+    *,
+    fps: int,
+    target_seconds: float,
+    sync: str,
+    encoders: list[str],
+) -> dict[str, Any]:
+    """Encode a side-by-side clip; returns its metrics.
+
+    `sync` is `"step"` (the oracle-vs-rotator comparison: same hold factor on both halves,
+    synchronised by control step) or `"end"` (the learned-policy-vs-oracle comparison: each
+    half gets the hold factor that makes it finish at the same video time). Stills are the
+    first three video frames, the frame at `SBS_MID_FRACTION` of the clip and the true last
+    frame (both halves' final states); the final still must differ from frame 0 (it shows the
+    SUCCESS / FAILED end state), and the report carries the still md5s as proof.
+    """
+    duplicate_left, duplicate_right = _sbs_duplicates(left, right, fps, target_seconds, sync)
+    total = max(
+        _repeat_count(left.frames, duplicate_left),
+        _repeat_count(right.frames, duplicate_right),
+    )
+    first = [
+        _side_by_side_at(left, right, index, duplicate_left, duplicate_right)
+        for index in range(PNG_STILLS)
+    ]
+    middle = _side_by_side_at(
+        left, right, round(total * SBS_MID_FRACTION), duplicate_left, duplicate_right
+    )
+    final = _side_by_side_at(left, right, total - 1, duplicate_left, duplicate_right)
+    if np.array_equal(final, first[0]):
+        raise RuntimeError(f"{stem}: the final still equals frame 0 -- the clip has no time axis")
+    clip = _encode_clip(
+        out_dir / filename,
+        side_by_side_frames(
+            left, right, duplicate_left=duplicate_left, duplicate_right=duplicate_right
+        ),
+        total,
+        [first[0], middle, final],
+        fps,
+        encoders,
+    )
+    clip.update(
+        {
+            "sync": sync,
+            "duplicate_left": duplicate_left,
+            "duplicate_right": duplicate_right,
+            "left_episode": left.summary(),
+            "right_episode": right.summary(),
+        }
+    )
+    save_png_stills(out_dir, stem, first, count=len(first))
+    _save_image(out_dir / f"{stem}_mid.png", middle)
+    _save_image(out_dir / f"{stem}_final.png", final)
+    hashes = {
+        "frame0": _md5_image(first[0]),
+        "mid": _md5_image(middle),
+        "final": _md5_image(final),
+    }
+    clip["still_md5"] = hashes
+    print(
+        f"{stem} stills: frame0={hashes['frame0']} mid={hashes['mid']} "
+        f"final={hashes['final']} distinct={len(set(hashes.values())) == len(hashes)}"
+    )
+    return clip
+
+
 def _print_table(rows: Sequence[Sequence[str]], header: Sequence[str]) -> None:
     """Print a small fixed-width table."""
     widths = [max(len(str(row[i])) for row in (header, *rows)) for i in range(len(header))]
@@ -431,13 +840,22 @@ def _print_table(rows: Sequence[Sequence[str]], header: Sequence[str]) -> None:
         print("  ".join(str(row[i]).ljust(widths[i]) for i in range(len(header))))
 
 
-def _scene_wanted(scene: str) -> tuple[bool, bool, bool]:
-    """Return `(oracle, rotator-only, side-by-side)` flags of the `--scene` choice."""
-    return (
-        scene in ("all", "oracle", "side-by-side"),
-        scene in ("all", "rotator-only", "side-by-side"),
-        scene in ("all", "side-by-side"),
-    )
+def _load_policy_controller(
+    args: argparse.Namespace,
+) -> PolicyDemoController | None:
+    """Build the learned-policy controller when the scene needs it (clean CLI error)."""
+    if args.checkpoint is None:
+        return None
+    if not (args.scene in ("all", "policy-vs-oracle")):
+        print(
+            f"note: --checkpoint is ignored for --scene {args.scene} "
+            "(use --scene all or --scene policy-vs-oracle)"
+        )
+        return None
+    try:
+        return PolicyDemoController(args.checkpoint, args.input_mode)
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f"cannot load checkpoint {args.checkpoint}: {exc}") from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -449,23 +867,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(f"--step-stride must be >= 1, got {args.step_stride}")
     if args.fps < 1:
         raise SystemExit(f"--fps must be >= 1, got {args.fps}")
+    if args.scene == "policy-vs-oracle" and args.checkpoint is None:
+        raise SystemExit("--scene policy-vs-oracle requires --checkpoint PATH")
     _configure_gl()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    from callosum.envs.wrench_cube import OracleController, WrenchCubeEnv
+    from callosum.envs.wrench_cube import WrenchCubeEnv
 
+    want_oracle, want_rotator, want_oracle_sbs = _scene_wanted(args.scene)
+    policy_controller = _load_policy_controller(args)
+    want_policy = policy_controller is not None
     env = WrenchCubeEnv(partner_mode="none")
-    controller = OracleController(env.config)
+    oracle_controller = OracleDemoController(env.config)
     max_steps = int(args.max_steps or env.config.max_control_steps)
-    want_oracle, want_rotator, want_side_by_side = _scene_wanted(args.scene)
     print(
         f"CubeWrench-v0 demo render: scene={args.scene} seed={args.seed} "
         f"size={args.width}x{args.height} fps={args.fps} step_stride={args.step_stride} "
         f"max_steps={max_steps} holder_off={args.holder_off} "
         f"MUJOCO_GL={os.environ.get('MUJOCO_GL')}"
     )
+    if policy_controller is not None:
+        print(
+            f"checkpoint {policy_controller.checkpoint}: "
+            f"input_mode={policy_controller.input_mode} "
+            f"env_partner_mode={policy_controller.env_mode} "
+            f"latent_dim={policy_controller.latent_dim} "
+            f"update={policy_controller.update} (greedy policies)"
+        )
 
     if args.dry_run:
+        episodes: dict[str, DemoEpisode] = {}
+        policy_env: WrenchCubeEnv | None = None
         try:
             for name, wanted, holder_off in (
                 ("oracle", want_oracle, args.holder_off),
@@ -473,9 +905,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 if not wanted:
                     continue
-                episode = run_episode(
+                episodes[name] = run_episode(
                     env,
-                    controller,
+                    oracle_controller,
                     None,
                     name=name,
                     title="",
@@ -485,8 +917,42 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_steps=max_steps,
                     holder_off=holder_off,
                 )
-                print(f"[dry-run] {name}: {json.dumps(episode.summary())}")
+                print(f"[dry-run] {name}: {json.dumps(episodes[name].summary())}")
+            if want_policy and policy_controller is not None:
+                reference_steps = episodes["oracle"].steps if "oracle" in episodes else None
+                if reference_steps is None:
+                    upper = run_episode(
+                        env,
+                        oracle_controller,
+                        None,
+                        name="oracle-upper",
+                        title="",
+                        subtitle="",
+                        seed=args.seed,
+                        step_stride=args.step_stride,
+                        max_steps=max_steps,
+                        holder_off=args.holder_off,
+                    )
+                    print(f"[dry-run] oracle-upper: {json.dumps(upper.summary())}")
+                    reference_steps = upper.steps
+                policy_steps = _policy_max_steps(args, max_steps, reference_steps)
+                policy_env = WrenchCubeEnv(partner_mode=policy_controller.env_mode)
+                episode = run_episode(
+                    policy_env,
+                    policy_controller,
+                    None,
+                    name="policy",
+                    title="",
+                    subtitle="",
+                    seed=args.seed,
+                    step_stride=args.step_stride,
+                    max_steps=policy_steps,
+                    holder_off=args.holder_off,
+                )
+                print(f"[dry-run] policy: {json.dumps(episode.summary())}")
         finally:
+            if policy_env is not None:
+                policy_env.close()
             env.close()
         return 0
 
@@ -495,11 +961,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     clips: dict[str, dict[str, Any]] = {}
     oracle: DemoEpisode | None = None
     rotator: DemoEpisode | None = None
+    policy_env: WrenchCubeEnv | None = None
     try:
         if want_oracle:
             oracle = run_episode(
                 env,
-                controller,
+                oracle_controller,
                 renderer,
                 name="oracle",
                 title=TITLE_ORACLE,
@@ -516,7 +983,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if want_rotator:
             rotator = run_episode(
                 env,
-                controller,
+                oracle_controller,
                 renderer,
                 name="rotator-only",
                 title=TITLE_ROTATOR,
@@ -532,85 +999,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         if oracle is not None:
-            duplicate = duplicate_for_target(oracle, args.fps, args.target_seconds)
-            stills = [
-                _expanded_index(oracle.frames, index, duplicate) for index in range(PNG_STILLS)
-            ]
-            clip = _encode_clip(
-                args.out / ORACLE_VIDEO,
-                _repeat_frames(oracle.frames, duplicate),
-                _repeat_count(oracle.frames, duplicate),
-                stills,
-                args.fps,
-                encoders,
+            clips["oracle"] = _write_single_clip(
+                args.out,
+                ORACLE_VIDEO,
+                "oracle",
+                oracle,
+                fps=args.fps,
+                target_seconds=args.target_seconds,
+                encoders=encoders,
             )
-            clip.update({"episode": oracle.summary(), "duplicate": duplicate})
-            clips["oracle"] = clip
-            save_png_stills(args.out, "oracle", stills, count=len(stills))
-            Image.fromarray(oracle.frames[-1].image).save(args.out / "oracle_final.png")
-            middle = len(oracle.frames) // 2
-            Image.fromarray(oracle.frames[middle].image).save(args.out / "oracle_mid.png")
         if rotator is not None:
-            duplicate_rotator = duplicate_for_target(rotator, args.fps, args.target_seconds)
-            stills = [
-                _expanded_index(rotator.frames, index, duplicate_rotator)
-                for index in range(PNG_STILLS)
-            ]
-            clip = _encode_clip(
-                args.out / ROTATOR_VIDEO,
-                _repeat_frames(rotator.frames, duplicate_rotator),
-                _repeat_count(rotator.frames, duplicate_rotator),
-                stills,
-                args.fps,
-                encoders,
+            clips["rotator-only"] = _write_single_clip(
+                args.out,
+                ROTATOR_VIDEO,
+                "rotator_only",
+                rotator,
+                fps=args.fps,
+                target_seconds=args.target_seconds,
+                encoders=encoders,
             )
-            clip.update({"episode": rotator.summary(), "duplicate": duplicate_rotator})
-            clips["rotator-only"] = clip
-            save_png_stills(args.out, "rotator_only", stills, count=len(stills))
-            Image.fromarray(rotator.frames[-1].image).save(args.out / "rotator_only_final.png")
-            middle = len(rotator.frames) // 2
-            Image.fromarray(rotator.frames[middle].image).save(args.out / "rotator_only_mid.png")
 
-        if want_side_by_side and oracle is not None and rotator is not None:
-            duplicate_left = duplicate_for_target(oracle, args.fps, args.target_seconds)
-            duplicate_right = duplicate_left  # same frames per control step => step sync
-            total = max(
-                _repeat_count(oracle.frames, duplicate_left),
-                _repeat_count(rotator.frames, duplicate_right),
+        if want_oracle_sbs and oracle is not None and rotator is not None:
+            clip = _write_sbs_clip(
+                args.out,
+                SIDE_BY_SIDE_VIDEO,
+                "side_by_side",
+                oracle,
+                rotator,
+                fps=args.fps,
+                target_seconds=args.target_seconds,
+                sync="step",
+                encoders=encoders,
             )
-            stills = []
-            for index in range(PNG_STILLS):
-                stills.append(
-                    hstack_side_by_side(
-                        _expanded_index(oracle.frames, index, duplicate_left),
-                        _expanded_index(rotator.frames, index, duplicate_right),
-                    )
-                )
-            clip = _encode_clip(
-                args.out / SIDE_BY_SIDE_VIDEO,
-                side_by_side_frames(
-                    oracle,
-                    rotator,
-                    duplicate_left=duplicate_left,
-                    duplicate_right=duplicate_right,
-                ),
-                total,
-                stills,
-                args.fps,
-                encoders,
-            )
-            clip.update({"duplicate_left": duplicate_left, "duplicate_right": duplicate_right})
             clips["side-by-side"] = clip
-            save_png_stills(args.out, "side_by_side", stills, count=len(stills))
-            Image.fromarray(stills[-1]).save(args.out / "side_by_side_final.png")
-            middle = len(oracle.frames) // 2
-            Image.fromarray(
-                hstack_side_by_side(
-                    oracle.frames[middle].image,
-                    rotator.frames[min(middle, len(rotator.frames) - 1)].image,
-                )
-            ).save(args.out / "side_by_side_mid.png")
-
+            duplicate = int(clip["duplicate_left"])
             gif_stride = 2
             gif_path = args.out / PREVIEW_GIF
             gif_frames = write_gif(
@@ -621,8 +1043,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         side_by_side_frames(
                             oracle,
                             rotator,
-                            duplicate_left=duplicate_left,
-                            duplicate_right=duplicate_right,
+                            duplicate_left=duplicate,
+                            duplicate_right=duplicate,
                         )
                     )
                     if index % gif_stride == 0
@@ -643,13 +1065,69 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "width": gif_size[0],
                 "height": gif_size[1],
                 "gif_stride": gif_stride,
-                "mean_luma": round(float(np.mean([mean_luma(frame) for frame in stills])), 2),
+                "mean_luma": round(
+                    float(np.mean([mean_luma(image) for image in _gif_luma_samples(oracle)])), 2
+                ),
             }
+
+        if want_policy and policy_controller is not None:
+            oracle_upper = run_episode(
+                env,
+                oracle_controller,
+                renderer,
+                name="oracle-upper",
+                title=TITLE_ORACLE_UPPER,
+                subtitle=SUBTITLE_ORACLE_UPPER,
+                seed=args.seed,
+                step_stride=args.step_stride,
+                max_steps=max_steps,
+                holder_off=args.holder_off,
+            )
+            print(
+                f"oracle upper bound: {oracle_upper.status} after {oracle_upper.steps} steps, "
+                f"angle {oracle_upper.final_angle_deg:.1f} deg"
+            )
+            policy_steps = _policy_max_steps(args, max_steps, oracle_upper.steps)
+            policy_env = WrenchCubeEnv(partner_mode=policy_controller.env_mode)
+            policy_episode = run_episode(
+                policy_env,
+                policy_controller,
+                renderer,
+                name="policy",
+                title=policy_controller.title,
+                subtitle=policy_controller.subtitle,
+                seed=args.seed,
+                step_stride=args.step_stride,
+                max_steps=policy_steps,
+                holder_off=args.holder_off,
+            )
+            print(
+                f"learned policy ({policy_controller.input_mode}): {policy_episode.status} "
+                f"after {policy_episode.steps} steps (cap {policy_steps}), "
+                f"angle {policy_episode.final_angle_deg:.1f} deg, "
+                f"drift {policy_episode.final_drift_deg:.1f} deg"
+            )
+            clip = _write_sbs_clip(
+                args.out,
+                POLICY_VIDEO,
+                POLICY_STEM,
+                policy_episode,
+                oracle_upper,
+                fps=args.fps,
+                target_seconds=args.target_seconds,
+                sync="end",
+                encoders=encoders,
+            )
+            clip["policy"] = policy_controller.metadata()
+            clip["policy_max_steps"] = policy_steps
+            clips["policy-vs-oracle"] = clip
     finally:
         renderer.close()
+        if policy_env is not None:
+            policy_env.close()
         env.close()
 
-    if oracle is not None and rotator is not None:
+    if clips:
         report = {
             "seed": args.seed,
             "controller": args.controller,
@@ -662,6 +1140,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "encoder": sorted(set(encoders)),
             "clips": clips,
         }
+        if policy_controller is not None:
+            report["policy"] = policy_controller.metadata()
         (args.out / SUMMARY_JSON).write_text(
             json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
         )
@@ -690,6 +1170,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"\nartifacts in: {args.out.resolve()}")
     print(f"encoder(s): {sorted(set(encoders))}")
     return 0
+
+
+def _gif_luma_samples(oracle: DemoEpisode) -> list[np.ndarray]:
+    """A few frames of the oracle clip, used as the GIF brightness sample for the report."""
+    count = len(oracle.frames)
+    if count == 0:
+        return []
+    return [oracle.frames[index].image for index in (0, count // 2, count - 1)]
 
 
 if __name__ == "__main__":

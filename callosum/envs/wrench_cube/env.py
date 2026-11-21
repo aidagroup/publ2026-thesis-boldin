@@ -69,6 +69,7 @@ from callosum.envs._wrench_logic import (
     param_value_fields,
     potential,
     potential_shaping,
+    privileged_value_fields,
     sample_episode_randomization,
     success,
     team_reward,
@@ -219,6 +220,7 @@ class WrenchCubeEnv(gymnasium.Env):
         self._model.dof_frictionloss[self._hinge_dof] = randomization.layer_frictionloss
         self._step_index = 0
         self._last_commands = {key: np.zeros(_WRENCH_SIZE) for key in AGENT_KEYS}
+        self._last_applied = {key: np.zeros(_WRENCH_SIZE) for key in AGENT_KEYS}
         self._delay_queues = {
             key: deque(
                 [np.zeros(_WRENCH_SIZE) for _ in range(randomization.agents[idx].latency_steps)]
@@ -261,6 +263,11 @@ class WrenchCubeEnv(gymnasium.Env):
             applied = np.asarray(delayed_command(queue, commands[key]), dtype=np.float64)
             if injection_active(agent, self._step_index):
                 applied = np.zeros(_WRENCH_SIZE)
+            # The observation block reports the EFFECTIVE (applied) normalized wrench, in
+            # both the agent's own block and the privileged partner block: the oracle then
+            # sees a partner whose actuator is currently suppressed (slip / start delay),
+            # which the shared cube state reveals only with a delay.
+            self._last_applied[key] = applied.copy()
             wrenches[key] = applied * self._authority(agent_idx) * agent.limit_scale * agent.gain
 
         self._data.xfrc_applied[:] = 0.0
@@ -424,10 +431,17 @@ class WrenchCubeEnv(gymnasium.Env):
         values: dict[str, float] = {}
         for agent_idx, key in enumerate(AGENT_KEYS):
             agent = self._randomization.agents[agent_idx]
-            values.update(zip(wrench_value_fields(key), self._last_commands[key]))
+            values.update(zip(wrench_value_fields(key), self._last_applied[key]))
             values.update(
                 zip(param_value_fields(key), (agent.latency_s, agent.gain, agent.limit_scale))
             )
+            if agent.slip_active and agent.slip_step <= self._step_index < (
+                agent.slip_step + agent.slip_steps
+            ):
+                slip_remaining = agent.slip_step + agent.slip_steps - self._step_index
+            else:
+                slip_remaining = 0
+            values.update(zip(privileged_value_fields(key), (agent.start_delay_s, slip_remaining)))
         values.update(zip(CUBE_STATE_FIELDS, self._cube_state_values()))
         values["goal_angle"] = self.config.goal_angle
         values["time_fraction"] = self._step_index / self.config.max_control_steps

@@ -188,22 +188,22 @@ class WrenchCubeConfig:
     steps later. Sampled per agent; the agent knows its own latency (it is in its
     observation), the partner's is hidden."""
 
-    gain_range: tuple[float, float] = (0.6, 1.4)
+    gain_range: tuple[float, float] = (0.5, 1.5)
     """Per-agent wrench-gain multiplier: the applied wrench is `action * authority *
     limit_scale * gain`. Sampled per agent."""
 
-    limit_scale_range: tuple[float, float] = (0.5, 1.5)
+    limit_scale_range: tuple[float, float] = (0.4, 1.6)
     """Per-agent authority multiplier (0.5-1.5 of the config maxima). Sampled per agent."""
 
-    slip_prob_range: tuple[float, float] = (0.0, 0.3)
+    slip_prob_range: tuple[float, float] = (0.2, 0.5)
     """Per-agent probability range of one slip event per episode (a brief loss of the
     applied wrench). The event probability itself is sampled per agent, then a Bernoulli
     draw decides whether the episode has it."""
 
-    slip_decisions_range: tuple[int, int] = (1, 3)
+    slip_decisions_range: tuple[int, int] = (2, 5)
     """Slip duration range (control steps, inclusive) of the one slip event."""
 
-    start_delay_range: tuple[float, float] = (0.0, 0.3)
+    start_delay_range: tuple[float, float] = (0.0, 0.5)
     """Per-agent delay (s) before the agent's wrench takes effect for the first time."""
 
     layer_frictionloss_range: tuple[float, float] = (0.0, 2.0e-5)
