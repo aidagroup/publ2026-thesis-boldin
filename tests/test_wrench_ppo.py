@@ -45,7 +45,7 @@ def test_default_config_is_valid_and_sized_as_the_plan() -> None:
     assert cfg.minibatch_size == cfg.batch_size // cfg.num_minibatches
     assert cfg.total_steps == cfg.batch_size * 300
     assert cfg.obs_size == obs_size("none") == 28
-    assert WrenchPPOConfig(partner_mode="oracle").obs_size == obs_size("oracle") == 39
+    assert WrenchPPOConfig(partner_mode="oracle").obs_size == obs_size("oracle") == 45
 
 
 @pytest.mark.parametrize(
@@ -202,7 +202,7 @@ def test_termination_is_terminal_and_truncation_bootstraps() -> None:
 # --- policies -----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("mode", "expected"), [("none", 28), ("oracle", 39)])
+@pytest.mark.parametrize(("mode", "expected"), [("none", 28), ("oracle", 45)])
 def test_policy_input_width_follows_the_observation_layout(mode: str, expected: int) -> None:
     policies = make_policies(mode)
     assert len(policies) == len(AGENT_KEYS) == 2

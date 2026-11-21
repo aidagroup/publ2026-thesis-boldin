@@ -66,7 +66,18 @@ OWN_WRENCH_FIELDS = tuple(f"own_wrench_{axis}" for axis in _WRENCH_AXES)
 """Names of the agent's own commanded-wrench block (normalized, [-1, 1])."""
 
 PARTNER_WRENCH_FIELDS = tuple(f"partner_wrench_{axis}" for axis in _WRENCH_AXES)
-"""Names of the privileged partner-wrench block ("oracle" mode only)."""
+"""Names of the privileged partner-wrench block ("oracle" mode only) -- the APPLIED
+(post-latency, post-injection) normalized wrench, i.e. what the partner's actuator is
+doing right now."""
+
+PARTNER_COMMAND_FIELDS = tuple(f"partner_command_{axis}" for axis in _WRENCH_AXES)
+"""Names of the partner's COMMANDED (pre-latency) wrench ("oracle" mode only).
+
+This is the anticipatory part of the upper bound: with per-episode action latency the
+command reaches the physics several control steps later, and that future effect cannot
+be recovered from the shared cube state -- a policy can only react to it after the fact.
+The oracle sees it now, which is exactly the information a learned partner predictor
+(Bi-JEPA) is supposed to supply in the `predicted` mode."""
 
 OWN_PARAM_FIELDS = ("own_latency", "own_gain", "own_limit_scale")
 """Names of the agent's own private parameters (latency s, wrench gain, authority scale)."""
@@ -88,9 +99,14 @@ These are what make the oracle a true upper bound: the partner's actuator suppre
 not recoverable from the shared cube state, so without them `none` could infer the
 partner's behaviour only from delayed dynamics (the observed oracle≈none collapse)."""
 
-PARTNER_FIELDS = PARTNER_WRENCH_FIELDS + PARTNER_PARAM_FIELDS + PARTNER_PRIVILEGED_FIELDS
-"""The full partner block ("oracle" mode): applied wrench (6) + private parameters (3)
-+ start delay and remaining slip steps (2)."""
+PARTNER_FIELDS = (
+    PARTNER_WRENCH_FIELDS
+    + PARTNER_COMMAND_FIELDS
+    + PARTNER_PARAM_FIELDS
+    + PARTNER_PRIVILEGED_FIELDS
+)
+"""The full partner block ("oracle" mode): applied wrench (6) + commanded wrench (6)
++ private parameters (3) + start delay and remaining slip steps (2)."""
 
 CUBE_STATE_FIELDS = (
     "core_x",
@@ -133,8 +149,13 @@ def partner_of(agent: str) -> str:
 
 
 def wrench_value_fields(agent: str) -> tuple[str, ...]:
-    """Values-dict keys of `agent`'s commanded-wrench block (`holder_wrench_fx`, ...)."""
+    """Values-dict keys of `agent`'s applied-wrench block (`holder_wrench_fx`, ...)."""
     return tuple(f"{agent}_wrench_{axis}" for axis in _WRENCH_AXES)
+
+
+def command_value_fields(agent: str) -> tuple[str, ...]:
+    """Values-dict keys of `agent`'s commanded (pre-latency) wrench block."""
+    return tuple(f"{agent}_command_{axis}" for axis in _WRENCH_AXES)
 
 
 def param_value_fields(agent: str) -> tuple[str, ...]:
@@ -210,6 +231,8 @@ def _observation_field_value(
         key = f"{agent}_wrench_{field_name.removeprefix('own_wrench_')}"
     elif field_name.startswith("partner_wrench_"):
         key = f"{partner_of(agent)}_wrench_{field_name.removeprefix('partner_wrench_')}"
+    elif field_name.startswith("partner_command_"):
+        key = f"{partner_of(agent)}_command_{field_name.removeprefix('partner_command_')}"
     elif field_name.startswith("own_"):
         key = f"{agent}_{field_name.removeprefix('own_')}"
     elif field_name.startswith("partner_"):

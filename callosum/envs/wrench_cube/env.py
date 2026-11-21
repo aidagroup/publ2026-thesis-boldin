@@ -62,6 +62,7 @@ from callosum.envs._wrench_logic import (
     CUBE_STATE_FIELDS,
     EpisodeRandomization,
     build_observation,
+    command_value_fields,
     delayed_command,
     failure,
     injection_active,
@@ -432,6 +433,7 @@ class WrenchCubeEnv(gymnasium.Env):
         for agent_idx, key in enumerate(AGENT_KEYS):
             agent = self._randomization.agents[agent_idx]
             values.update(zip(wrench_value_fields(key), self._last_applied[key]))
+            values.update(zip(command_value_fields(key), self._last_commands[key]))
             values.update(
                 zip(param_value_fields(key), (agent.latency_s, agent.gain, agent.limit_scale))
             )

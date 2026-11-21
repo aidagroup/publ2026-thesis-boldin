@@ -30,6 +30,7 @@ from callosum.envs._wrench_logic import (
     PARTNER_MODES,
     angle_progress,
     build_observation,
+    command_value_fields,
     delayed_command,
     drift_excess,
     failure,
@@ -64,7 +65,7 @@ def test_config_defaults_match_the_design_numbers() -> None:
     assert math.isclose(cfg.success_rot_tol, 0.15)
     assert math.isclose(cfg.failure_pos_drift, 0.05)
     assert math.isclose(cfg.failure_rot_drift, 0.5)
-    assert cfg.latency_range == (0.0, 0.3)
+    assert cfg.latency_range == (0.1, 0.3)
     assert cfg.gain_range == (0.5, 1.5)
     assert cfg.limit_scale_range == (0.4, 1.6)
     assert cfg.slip_prob_range == (0.2, 0.5)
@@ -199,7 +200,7 @@ def test_oracle_observation_adds_the_partner_block() -> None:
     assert oracle_fields[: len(none_fields)] == none_fields
     assert oracle_fields[len(none_fields) :] == partner_fields("oracle")
     assert obs_size("oracle") == obs_size("none") + len(partner_fields("oracle"))
-    assert len(partner_fields("oracle")) == 11  # applied wrench + params + start delay/slip
+    assert len(partner_fields("oracle")) == 17  # applied+commanded wrench + params + slip/start
     assert all(field.startswith("partner_") for field in partner_fields("oracle"))
 
 
@@ -225,6 +226,7 @@ def _values(seed: int = 0) -> dict[str, float]:
         values.update(
             zip(param_value_fields(key), (agent.latency_s, agent.gain, agent.limit_scale))
         )
+        values.update(zip(command_value_fields(key), np.linspace(-0.5, 0.5, 6)))
         values.update(zip(privileged_value_fields(key), (agent.start_delay_s, 0.0)))
     values.update({name: (index - 7.0) / 10.0 for index, name in enumerate(CUBE_STATE_FIELDS)})
     values["goal_angle"] = math.pi / 2
@@ -235,7 +237,7 @@ def _values(seed: int = 0) -> dict[str, float]:
 def test_build_observation_has_the_layout_width_and_order() -> None:
     values = _values()
     for mode in PARTNER_MODES:
-        assert obs_size(mode) == (28 if mode == "none" else 39)
+        assert obs_size(mode) == (28 if mode == "none" else 45)
         for key in AGENT_KEYS:
             vector = build_observation(values, key, mode)
             assert vector.shape == (obs_size(mode),)
@@ -265,10 +267,12 @@ def test_build_observation_oracle_uses_the_partner_fields() -> None:
     values = _values()
     holder_none = build_observation(values, "holder", "none")
     holder_oracle = build_observation(values, "holder", "oracle")
-    assert holder_oracle.shape == (39,)
+    assert holder_oracle.shape == (45,)
     assert np.array_equal(holder_oracle[:28], holder_none)  # same first 28 fields
     partner_values = [values[name] for name in wrench_value_fields("rotator")]
     assert np.array_equal(holder_oracle[28:34], np.asarray(partner_values, dtype=np.float32))
+    command_values = [values[name] for name in command_value_fields("rotator")]
+    assert np.array_equal(holder_oracle[34:40], np.asarray(command_values, dtype=np.float32))
     # Changing a partner private parameter changes only the oracle block.
     values["rotator_gain"] += 1.0
     changed = build_observation(values, "holder", "oracle")

@@ -101,8 +101,8 @@ def test_input_widths_of_none_oracle_and_predicted() -> None:
 
     oracle = WrenchPPOConfig(partner_mode="oracle")
     assert oracle.input_mode == "oracle"
-    assert oracle.env_obs_size == obs_size("oracle") == 39
-    assert oracle.policy_input_size == 39
+    assert oracle.env_obs_size == obs_size("oracle") == 45
+    assert oracle.policy_input_size == 45
 
     predicted = WrenchPPOConfig(use_bijepa=True)
     assert predicted.input_mode == "predicted"
@@ -114,7 +114,7 @@ def test_input_widths_of_none_oracle_and_predicted() -> None:
 
     for policies, expected in (
         (make_policies("none"), 28),
-        (make_policies("oracle"), 39),
+        (make_policies("oracle"), 45),
         (make_policies("none", latent_dim=32), 60),
     ):
         for policy in policies:

@@ -183,7 +183,7 @@ class WrenchCubeConfig:
     """Failure bound (rad) on the core's rotation drift (the spec's |yaw| > 0.5 rad)."""
 
     # --- episode randomisation (private randomness of the partner) -------------------------
-    latency_range: tuple[float, float] = (0.0, 0.3)
+    latency_range: tuple[float, float] = (0.1, 0.3)
     """Per-agent action latency (s): a commanded wrench is applied this many control
     steps later. Sampled per agent; the agent knows its own latency (it is in its
     observation), the partner's is hidden."""
