@@ -101,11 +101,26 @@ MUJOCO_GL=egl /root/.callosum/venv/bin/python callosum/experiments/cube_wrench/r
 
 - `demo_policy_vs_oracle.mp4` + `demo_preview.gif` — **главная демка**: learned policy (`none`) vs
   oracle, обе стороны SUCCESS.
+- `demo_wrench_arrows.mp4` — та же сцена с HUD и стрелками: видно, что **holder** прикладывает
+  стабилизирующий wrench, а **rotator** — момент к слою; в правой половине holder-off (|F|=0) и куб
+  уводит — «момент помощи» наглядно.
 - `demo_policy_vs_oracle_predicted.mp4` — Bi-JEPA (`predicted`) vs oracle.
+- `demo_arms_face_turn.mp4` + `demo_arms_success.png` — **реальные две SO-ARM101** в ManiSkill
+  (SAPIEN, software Vulkan): скриптовый эксперт поворачивает грань на 90.0°, дрейф 0.08 см,
+  `success=True`. Это отдельная робототехническая демка; reduced-модель рук не содержит по дизайну.
 - `demo_oracle.mp4`, `demo_rotator_only.mp4`, `demo_side_by_side.mp4` — скриптовые сцены:
-  успех вдвоём vs провал rotator-only («момент помощи»).
-- `policy_vs_oracle_final.png`, `oracle_final.png`, `rotator_only_final.png` — стиллы;
-  `demo_policy_summary.json` — метрики эпизодов/ffprobe.
+  успех вдвоём vs провал rotator-only.
+- `policy_vs_oracle_final.png`, `policy_vs_oracle_mid.png`, `oracle_final.png`,
+  `rotator_only_final.png`, `demo_arms_*.png` — стиллы; `demo_policy_summary.json` — метрики
+  эпизодов/ffprobe.
+
+## Состояние репозитория (после рефакторинга 2026-11-21)
+
+Код разложен по экспериментам: `callosum/common/` (переиспользуемое), `callosum/experiments/
+{cube_wrench, coop_tasks, arm}/`; `scripts/` и `tests/` зеркалят эту структуру. Все entry points
+обновлены (`python -m callosum.experiments.cube_wrench.{train,eval,render}` и т.п.); `pytest -q` —
+595 passed / 5 skipped, `ruff check/format` чисто. Полное дерево и политика переносов —
+`docs/refactor-plan.md`; backup-ветка до рефакторинга — `pre-refactor-2026-11-21`.
 
 ## Известные ограничения / следующие шаги
 
