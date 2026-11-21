@@ -7,6 +7,15 @@
 
 **🧭 Текущий статус (2026-11-21):** главная линия к предзащите 2026-12-14 — **reduced-модель `CubeWrench-v0`** (MuJoCo): изолированный куб «ядро + активный слой», два децентрализованных агента прикладывают непрерывные 6D-моменты; ablation `none/oracle/predicted` (Bi-JEPA). Руки SO-ARM101 (ветка `step/2.3-skill-level-marl`, skill-level MARL) заморожены как весенний мост. Подробности — [`PLAN.md`](PLAN.md), дорожная карта — [`openspec/project.md`](openspec/project.md); бенчмарк-анализ — [`docs/thesis/02-related-work.md`](docs/thesis/02-related-work.md). Данные и окружение на сервере хранятся в постоянном `$HOME` (`~/callosum`), см. [`docs/setup.md`](docs/setup.md) и [`docs/server-runbook.md`](docs/server-runbook.md). Правила работы для ассистента – в [`CLAUDE.md`](CLAUDE.md).
 
+## Результаты reduced-модели (2026-11-21)
+
+К предзащите главная линия — **reduced-модель `CubeWrench-v0`** (MuJoCo): изолированный куб «ядро + активный слой», два децентрализованных агента прикладывают непрерывные 6D-моменты; руки SO-ARM101 — весенний мост. Полный отчёт: [`docs/results-wrench-cube.md`](docs/results-wrench-cube.md), план и гейты — [`PLAN.md`](PLAN.md), спецификации — [`openspec/changes/add-wrench-cube-reduced-model/`](openspec/changes/add-wrench-cube-reduced-model/).
+
+- Среда валидна: скриптовый oracle 0.99 на 256 эпизодах, `rotator-only` 0.0 (неаддитивность).
+- GPU-бэкенд (`mujoco_warp`, CUDA graph): 10.8×/26×/53× env-throughput, parity и determinism проверены.
+- Честная абляция (held-out, 128 эп. × 3 сида): **none 1.000 / oracle 0.901 / predicted 0.932** на default; на harsh — **oracle 0.969 / none 0.839** (gap +0.13). Асимптотического разрыва нет; привилегированная информация даёт скорость обучения и устойчивость, Bi-JEPA в текущей реализации пока не обгоняет none — отрицательный промежуточный результат, план улучшения в отчёте.
+- Демо: [`demo/demo_policy_vs_oracle.mp4`](demo/demo_policy_vs_oracle.mp4), [`demo/demo_preview.gif`](demo/demo_preview.gif), [`demo/learning_curves_honest_seed0.png`](demo/learning_curves_honest_seed0.png), [`demo/learning_curves_harsh.png`](demo/learning_curves_harsh.png).
+
 ## Содержание
 
 - [Идея](#идея)
