@@ -44,21 +44,50 @@ Reduced-куб `CubeWrench-v0` — главная линия предзащит�
   `python -m callosum.experiments.coop_tasks.eval --checkpoint ... --input-mode ...`;
   демо: `python -m callosum.experiments.coop_tasks.render --task ... --scene ...`.
 
-## Протокол обучения и eval
+## Протокол обучения и eval (GPU-first)
 
-- IPPO: 2 независимые гауссовы политики, `num_envs=64`, `rollout_steps=64`, GAE, clip.
-- Бюджеты: cart-pole 400 → **1200** апдейтов (400 не хватало: ~0.44 success); pendulum 400;
-  toss 400 (contact-rich, ~530 sps/процесс).
-- Сиды обучения: 0,1,2; режимы: `none`, `oracle`, `predicted` (Bi-JEPA).
+- **GPU-first:** все финальные прогоны — `--backend warp` (`mujoco_warp`+CUDA graph, `CoopBatchGPU`);
+  CPU-петля `VecCoopEnv` остаётся для parity, unit/CI и 1–2 env smoke. Причина: на поде квота
+  ~7.65 CPU-ядер, CPU-обучение трёх задач заняло бы десятки часов.
+- IPPO: 2 независимые гауссовы политики, `num_envs=256`, `rollout_steps=64`, GAE, clip.
+- Бюджеты (GPU, 256 envs — эквивалент CPU-финала по числу сэмплов): cart-pole **400** апдейтов,
+  pendulum **200**, toss **250**. (CPU-пилот: cart-pole 1200, pendulum 400, toss 400 при 64 envs.)
+- Сиды обучения: 0,1,2; режимы: `none`, `oracle`, `predicted` (Bi-JEPA `--use-bijepa`).
 - Held-out eval: **128 эпизодов × 3 набора сидов** (`--seed {0, 1_000_000, 2_000_000}`,
-  `EVAL_SEED_OFFSET=10_000_019` — вне обучающих сидов), greedy-политики.
-- Железо: RunPod A40. GPU-прогоны — `--backend warp` (дефолт для suite на CUDA), CPU-петля
-  использовалась для первых прогонов (квота ~7.65 CPU → параллелизм ≤7 процессов).
+  `EVAL_SEED_OFFSET=10_000_019` — вне обучающих сидов), greedy-политики; batched GPU-eval
+  (`--backend warp --num-envs 128`), то же JSON-схема, что у CPU-eval.
+- Параллелизм: 2 GPU-прогона одновременно (6 процессов душили GPU: суммарно ~29k sps против
+  ~50k у одного); на поде GPU A40, 46 GB.
 
 ## Результаты
 
-_Заполняется после завершения прогонов: success_rate по задачам/режимам/сидам, `oracle−none`,
-`predicted−none`, время до успеха._
+### GPU, seed 0 (128 эпизодов × 3 held-out base-сида; train seed 0)
+
+| задача | режим | success (mean) | базы 0/1M/2M | steps-to-success |
+|---|---|---|---|---|
+| cart-pole (400 upd) | none | **0.958** | 0.958 / 0.958 / 0.958 | ~95 |
+| cart-pole | oracle | **0.943** | 0.943 / 0.943 / 0.943 | ~89 |
+| cart-pole | predicted | **0.599** | 0.599 / 0.599 / 0.599 | ~? |
+| pendulum (200 upd) | none | **0.974** | 0.974 / 0.974 / 0.974 | ~111 |
+| pendulum | oracle | **0.977** | 0.977 / 0.977 / 0.977 | ~111 |
+| pendulum | predicted | **0.974** | 0.974 / 0.974 / 0.974 | ~111 |
+| toss (250 upd, fixed rule) | none | **0.964** | 0.938 / 0.977 / 0.977 | 46.0 |
+| toss | oracle | **0.974** | 0.961 / 0.992 / 0.969 | 47.5 |
+| toss | predicted | **0.927** | 0.922 / 0.945 / 0.914 | 44.3 |
+
+**Gaps (seed 0):** cart-pole oracle−none = −0.016, predicted−none = −0.359; pendulum ≈ 0;
+toss oracle−none = +0.010, predicted−none = −0.036. Полная таблица по seeds 0–2 — в
+`results_coop_gpu/summary.json` после завершения residual-прогонов; CPU-пилот (3 сида,
+`results_coop/summary.json`) остаётся как fallback.
+
+### Исправление exploit'а toss (2026-11-21)
+
+Первая GPU-политика toss «проходила» 3/3 за 9–14 шагов, засчитывая дребезг контактов у пола.
+Правило pass ужесточено (и в CPU, и в GPU): контакт считается передачей только на половине
+**принимающей** ракетки (мяч перелетел центр), с минимальным интервалом 3 control steps; success
+требует мяч выше `floor_z + 0.02`; **failure приоритетнее success**. После фикса: успех ≥28 шагов,
+мин. высота мяча на success 0.090–0.172 м. Pre-fix числа сохранены в
+`results_coop_gpu/exploit_pre_fix/` (none 0.753 за ~11 шагов) — как пример того, почему гейт важен.
 
 ## GPU-бэкенд (2026-11-21)
 
@@ -111,7 +140,12 @@ python scripts/experiments/coop_tasks/bench_coop_gpu.py --nworld 256 1024 4096
 
 ## Демо
 
-_Заполняется: `demo/demo_{cartpole,pendulum,toss}_final_*` (policy vs oracle, attempts), GIF-превью._
+GPU-финальные клипы (policy-vs-oracle + attempts) — в `demo/`:
+`demo_{cartpole,pendulum,toss}_gpu_policy_vs_oracle.mp4`, `..._policy_vs_oracle_predicted.mp4`,
+`..._gpu_attempts_seed{0,1,2}.mp4` + GIF/PNG/JSON (JSON содержит `gpu_provenance`: политика обучена
+на GPU, физика кадров — CPU MuJoCo после parity 1e-6/1e-3). Для toss используй
+`demo_toss_gpu_fixed_*` после фикса правила; старые `demo_toss_gpu_*` — пример exploit'а.
+CPU-пилотные клипы `demo_*_final_*` оставлены как fallback.
 
 ## Ограничения / честные оговорки
 
