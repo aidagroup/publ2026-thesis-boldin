@@ -65,3 +65,15 @@ Joint-Embedding Predictive Architecture (LeCun, 2022) – предсказыва
 - Domain randomization и адаптация энкодера для sim2real (фаза 2).
 - ~~Нужен ли warmstart (скриптовый эксперт)~~ – для joint-level да (RL с нуля не схватывает, вторичная линия: демо → BC → IPPO). Skill-level эту проблему снимает: моторику делают примитивы.
 - Течёт ли градиент RL-лосса в энкодер/предсказатель Bi-JEPA, или `ẑ_j` подаётся в политику с `detach`.
+
+---
+
+## Реализация в reduced-модели (2026-11-21)
+
+Модуль `callosum/agents/bijepa.py` (ветка `step/3.1-bijepa-module`) интегрирован в тренер reduced-модели `callosum/training/wrench_ppo.py`:
+
+- вход политики в режиме `predicted`: своё наблюдение (26) ⊕ `ẑ_j` (32) = 58; в `none` — 26, в `oracle` — 35 (env-блок партнёра);
+- энкодер `E_i: o_i → z_i` (MLP 26→32), предиктор `P_i` по истории своих латентов (K=1 по умолчанию) → `ẑ_j`; цель `z_j = sg(E_j^target(o_j))` с EMA-target;
+- aux-лосс: MSE в латенте + VICReg (variance/covariance); шаг aux-оптимизатора и `update_target()` на каждом PPO-апдейте; `ẑ_j` подаётся в политику под `no_grad` (энкодер учится только aux-лоссом);
+- на исполнении (eval `--input-mode predicted`) используются только своё наблюдение и `ẑ_j`, данные партнёра не подмешиваются; тесты `tests/test_wrench_ppo_bijepa.py` проверяют ширины, stop-grad, независимость `ẑ` от подмены партнёрских obs, roundtrip чекпоинта и прогон `train()` на toy-vec;
+- проба: closed-form ridge `ẑ_j → текущий wrench партнёра` (MSE/R²/baseline) логируется в TensorBoard (`aux/probe/*`).
