@@ -11,7 +11,7 @@ weights and the fallback seed.
 Like `callosum.experiments.cube_wrench.config` this module is pure stdlib on purpose: it must import
 and validate on macOS/CI, where the `sandbox` extra (mujoco) is absent, so the suite's
 logic and parameters are unit-testable without the simulator. The MuJoCo models are
-`callosum/envs/coop/assets/cartpole.xml` and `pendulum.xml`.
+`callosum/experiments/coop_tasks/assets/cartpole.xml` and `pendulum.xml`.
 
 Config as truth for timing and DOF parameters: the env writes `dt` into
 `model.opt.timestep`, `gravity` into `model.opt.gravity`, the joint limits into
@@ -23,7 +23,7 @@ leave the model with an inconsistent inertia. The XML carries them and is the so
 truth for the masses/lengths; the config docstrings state that explicitly.
 
 Physical scale note: the defaults are tuned so that the scripted oracle in
-`callosum.envs.coop.oracle` reaches success under the full randomisation ranges, while the
+`callosum.experiments.coop_tasks.oracle` reaches success under the full randomisation ranges, while the
 one-sided "only-left" baseline (the same oracle with the right agent absent) does not reach
 the success condition -- the suite's non-additivity criterion. These are the
 "точные масса/инерция/параметры шарнира и лимиты моментов" open question of PLAN.md to be
@@ -36,7 +36,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from callosum.envs._coop_logic import (
+from callosum.experiments.coop_tasks.logic import (
     AGENT_KEYS,
     PARTNER_MODES,
     TASK_SPECS,
@@ -234,7 +234,7 @@ class CartPoleConfig:
     directions alone. The pole falls out after `failure_angle`; success is the conjunction
     "cart at target, pole upright, both speeds small".
 
-    XML-owned physics (`callosum/envs/coop/assets/cartpole.xml`): cart mass 2.0 kg, pole
+    XML-owned physics (`callosum/experiments/coop_tasks/assets/cartpole.xml`): cart mass 2.0 kg, pole
     length 3.0 m (capsule, mass 0.2 kg). The config owns gravity, the rail limit, the
     joint damping/armature and the force authority (written into the model at construction
     / on every reset).
@@ -391,7 +391,7 @@ class PendulumConfig:
     other half-cycle, so its reachable amplitude saturates below the target -- the task's
     non-additivity, tuned through `randomization.damping_range`.
 
-    XML-owned physics (`callosum/envs/coop/assets/pendulum.xml`): bob mass 0.5 kg at 0.5 m
+    XML-owned physics (`callosum/experiments/coop_tasks/assets/pendulum.xml`): bob mass 0.5 kg at 0.5 m
     from the pivot. The config owns gravity, the hinge limit, the damping/armature and the
     torque authority (written into the model at construction / on every reset).
     """

@@ -5,7 +5,7 @@ The `--task` flag selects the environment: the default `"cube"` keeps the thesis
 `"cartpole"`/`"pendulum"` train the two-agent coop suite (`left`/`right`) on the same
 trainer, policies, GAE, checkpoints and Bi-JEPA path -- the env supplies its observation
 width, action width and agent keys (`WrenchPPOConfig.env_obs_size`/`action_size`/
-`agent_keys`), and the coop vectorisation is `callosum.training._vec_coop.VecCoopEnv`.
+`agent_keys`), and the coop vectorisation is `callosum.experiments.coop_tasks.vec_env.VecCoopEnv`.
 
 Two independent PPO learners -- one Gaussian actor-critic per agent -- share one
 environment step and one **team** reward, so the coordination has to be learned from the
@@ -994,7 +994,7 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
 
     # Backend selection is task-based: the cube keeps its original CPU/warp paths (the
     # environment variant follows the run's randomisation preset), while the coop suite has
-    # only the CPU MuJoCo loop (`callosum.training._vec_coop`, the same contract).
+    # only the CPU MuJoCo loop (`callosum.experiments.coop_tasks.vec_env`, the same contract).
     if cfg.task == "cube":
         env_config = cfg.env_config()
         if cfg.backend == "warp":
@@ -1025,7 +1025,7 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
                 cfg.eval_envs, cfg.partner_mode, config=env_config, seed=cfg.seed + 1_000_003
             )
     else:
-        from callosum.training._vec_coop import VecCoopEnv
+        from callosum.experiments.coop_tasks.vec_env import VecCoopEnv
 
         env_config = cfg.coop_env_config()
         train_vec = VecCoopEnv(

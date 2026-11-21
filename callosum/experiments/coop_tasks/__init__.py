@@ -4,30 +4,30 @@ The suite (`PLAN.md` "Two-robot task suite") is a set of simple tasks in which t
 decentralised agents cooperate on one shared object: the one-sided pushers of
 `CartPoleCoop-v0` balance and move a shared cart-pole, the one-sided torque actuators of
 `PendulumPump-v0` pump a pendulum to a target amplitude and hold it. Both tasks share the
-harness `callosum.envs.coop.base.CoopTaskEnv`, the pure logic
-`callosum.envs._coop_logic` and this package's scripted oracles.
+harness `callosum.experiments.coop_tasks.base.CoopTaskEnv`, the pure logic
+`callosum.experiments.coop_tasks.logic` and this package's scripted oracles.
 
 Importing this package is what registers the gymnasium ids `CartPoleCoop-v0` and
 `PendulumPump-v0`; it needs the `sandbox` extra (mujoco), which CI does not install, so
 never import it from pure-logic modules or from tests that must run without the simulator.
-The pure logic lives in `callosum.envs._coop_logic`, the configs in
-`callosum.configs.coop_tasks`.
+The pure logic lives in `callosum.experiments.coop_tasks.logic`, the configs in
+`callosum.experiments.coop_tasks.config`.
 """
 
 from __future__ import annotations
 
 import gymnasium
 
-from callosum.configs.coop_tasks import CartPoleConfig, PendulumConfig
-from callosum.envs.coop.cartpole import CartPoleEnv
-from callosum.envs.coop.oracle import (
+from callosum.experiments.coop_tasks.cartpole import CartPoleEnv
+from callosum.experiments.coop_tasks.config import CartPoleConfig, PendulumConfig
+from callosum.experiments.coop_tasks.oracle import (
     CartPoleOracle,
     CartPoleOracleParams,
     PendulumOracle,
     PendulumOracleParams,
     make_oracle,
 )
-from callosum.envs.coop.pendulum import PendulumEnv
+from callosum.experiments.coop_tasks.pendulum import PendulumEnv
 
 TASK_ENV_IDS = {
     "cartpole": "CartPoleCoop-v0",
@@ -37,12 +37,12 @@ TASK_ENV_IDS = {
 
 gymnasium.register(
     id="CartPoleCoop-v0",
-    entry_point="callosum.envs.coop.cartpole:CartPoleEnv",
+    entry_point="callosum.experiments.coop_tasks.cartpole:CartPoleEnv",
     disable_env_checker=True,
 )
 gymnasium.register(
     id="PendulumPump-v0",
-    entry_point="callosum.envs.coop.pendulum:PendulumEnv",
+    entry_point="callosum.experiments.coop_tasks.pendulum:PendulumEnv",
     disable_env_checker=True,
 )
 
@@ -54,7 +54,7 @@ def make_coop_env(
 ) -> CartPoleEnv | PendulumEnv:
     """Build the env of a suite task.
 
-    The factory is what the vectorisation (`callosum.training._vec_coop`), the evaluator and
+    The factory is what the vectorisation (`callosum.experiments.coop_tasks.vec_env`), the evaluator and
     the smoke scripts call, so the task -> env mapping lives in one place.
 
     Args:

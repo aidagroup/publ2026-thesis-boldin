@@ -29,11 +29,11 @@ the episode's optional one-step perturbation are written into `xfrc_applied`, th
 runs, and the observation/reward/termination are computed from the resulting state. Every
 per-episode random parameter (latency, gain, authority scale, start delay, the hidden joint
 damping, the initial state and the perturbation) is sampled deterministically from the
-episode seed by `callosum.envs._coop_logic.sample_episode_randomization`, so an episode is
+episode seed by `callosum.experiments.coop_tasks.logic.sample_episode_randomization`, so an episode is
 reproducible from its seed and nothing crosses episode boundaries.
 
 The observation is a per-agent flat `spaces.Box` built by the pure
-`callosum.envs._coop_logic.build_observation` from a role-tagged `values` dict; the partner
+`callosum.experiments.coop_tasks.logic.build_observation` from a role-tagged `values` dict; the partner
 block is present only under `partner_mode="oracle"`, so the "none" mode cannot leak it.
 """
 
@@ -49,7 +49,7 @@ import mujoco
 import numpy as np
 from gymnasium import spaces
 
-from callosum.envs._coop_logic import (
+from callosum.experiments.coop_tasks.logic import (
     AGENT_KEYS,
     CoopTaskSpec,
     EpisodeRandomization,
@@ -69,7 +69,7 @@ from callosum.envs._coop_logic import (
 )
 
 if TYPE_CHECKING:
-    from callosum.configs.coop_tasks import CartPoleConfig, PendulumConfig
+    from callosum.experiments.coop_tasks.config import CartPoleConfig, PendulumConfig
 
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
@@ -95,9 +95,9 @@ class CoopTaskEnv(gymnasium.Env):
     TASK_NAME: ClassVar[str] = ""
     """Task name (`"cartpole"` / `"pendulum"`), matching the registered env id."""
     ASSET_NAME: ClassVar[str] = ""
-    """MJCF file name under `callosum/envs/coop/assets/`."""
+    """MJCF file name under `callosum/experiments/coop_tasks/assets/`."""
     SPEC: ClassVar[CoopTaskSpec]
-    """The task's observation/action layout (`callosum.envs._coop_logic`)."""
+    """The task's observation/action layout (`callosum.experiments.coop_tasks.logic`)."""
     AGENT_SIGNS: ClassVar[tuple[float, float]] = (1.0, -1.0)
     """Physical sign each agent can command: `left` only `+`, `right` only `-`."""
 

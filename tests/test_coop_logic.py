@@ -18,7 +18,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from callosum.configs.coop_tasks import (
+from callosum.experiments.coop_tasks.config import (
     TASKS,
     CartPoleConfig,
     CoopRandomization,
@@ -28,7 +28,7 @@ from callosum.configs.coop_tasks import (
     coop_config,
     coop_obs_size,
 )
-from callosum.envs._coop_logic import (
+from callosum.experiments.coop_tasks.logic import (
     AGENT_KEYS,
     CARTPOLE_SPEC,
     PENDULUM_SPEC,

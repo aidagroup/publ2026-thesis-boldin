@@ -8,7 +8,7 @@ aggregate.
 
 Controllers (`--controller`):
 
-* `oracle` -- the task's scripted two-agent oracle (`callosum.envs.coop.oracle`). This is
+* `oracle` -- the task's scripted two-agent oracle (`callosum.experiments.coop_tasks.oracle`). This is
   the environment sanity gate: mean success must be >= 0.8. With this controller the script
   ALSO runs the "only-left" baseline on the same seeds and prints it: the same oracle with
   the right agent absent must stay clearly below the oracle (the suite's non-additivity).
@@ -31,7 +31,7 @@ import sys
 
 import numpy as np
 
-from callosum.envs.coop import make_coop_env, make_oracle
+from callosum.experiments.coop_tasks import make_coop_env, make_oracle
 
 _ORACLE_SUCCESS_FLOOR = 0.8
 """The scripted oracle must reach (almost) every episode; 0.8 leaves room for local noise."""

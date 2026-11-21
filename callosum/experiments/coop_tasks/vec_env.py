@@ -1,6 +1,6 @@
 """Vectorised coop suite: N single-instance MuJoCo envs stepped in a Python loop.
 
-`callosum.envs.coop.base.CoopTaskEnv` is single-instance and CPU-only (the vectorisation is
+`callosum.experiments.coop_tasks.base.CoopTaskEnv` is single-instance and CPU-only (the vectorisation is
 the trainer's job, exactly as for `CubeWrench-v0`), and the plan keeps the coop suite on the
 CPU loop until the GPU-server throughput says otherwise. This module is that loop: it drives
 `num_envs` copies of one coop task, so `callosum.experiments.cube_wrench.train` can train the new
@@ -32,9 +32,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from callosum.configs.coop_tasks import coop_config
-from callosum.envs._coop_logic import AGENT_KEYS, validate_partner_mode
-from callosum.envs.coop import make_coop_env
+from callosum.experiments.coop_tasks import make_coop_env
+from callosum.experiments.coop_tasks.config import coop_config
+from callosum.experiments.coop_tasks.logic import AGENT_KEYS, validate_partner_mode
 
 
 @dataclass

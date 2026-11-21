@@ -23,8 +23,9 @@ from typing import ClassVar
 
 import numpy as np
 
-from callosum.configs.coop_tasks import CartPoleConfig
-from callosum.envs._coop_logic import (
+from callosum.experiments.coop_tasks.base import CoopTaskEnv
+from callosum.experiments.coop_tasks.config import CartPoleConfig
+from callosum.experiments.coop_tasks.logic import (
     CARTPOLE_SPEC,
     CoopTaskSpec,
     EpisodeRandomization,
@@ -32,7 +33,6 @@ from callosum.envs._coop_logic import (
     cartpole_potential,
     cartpole_success,
 )
-from callosum.envs.coop.base import CoopTaskEnv
 
 _CART_BODY = "cart"
 _CART_JOINT = "cart_slide"

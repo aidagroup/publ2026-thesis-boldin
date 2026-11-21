@@ -1,7 +1,7 @@
 """Config and CLI of the continuous-wrench IPPO trainer (PLAN.md steps 2 and 3, `wrench_ppo`).
 
 The reduced models (`CubeWrench-v0` and, via `--task`, the two-agent coop suite of
-`callosum.envs.coop`) are CPU-only MuJoCo, so their trainer is a small CPU-side IPPO: two
+`callosum.experiments.coop_tasks`) are CPU-only MuJoCo, so their trainer is a small CPU-side IPPO: two
 independent Gaussian policies on one shared team reward, a Python-loop vectorisation of the
 single-instance env, clipped PPO updates, TensorBoard logs, greedy evaluation and
 `latest.pt` checkpoints with `--resume`. `task` selects the environment and therefore its
@@ -55,17 +55,17 @@ from dataclasses import dataclass
 
 from callosum.common.bijepa_config import BiJEPAConfig
 from callosum.common.cli import build_dataclass_parser
-from callosum.configs.coop_tasks import (
+from callosum.experiments.coop_tasks.config import (
     TASKS as COOP_TASKS,
 )
-from callosum.configs.coop_tasks import (
+from callosum.experiments.coop_tasks.config import (
     CartPoleConfig,
     PendulumConfig,
     coop_action_size,
     coop_config,
     coop_obs_size,
 )
-from callosum.envs._coop_logic import AGENT_KEYS as COOP_AGENT_KEYS
+from callosum.experiments.coop_tasks.logic import AGENT_KEYS as COOP_AGENT_KEYS
 from callosum.experiments.cube_wrench.config import (
     RANDOMIZATION_PRESETS,
     WrenchCubeConfig,
@@ -84,7 +84,7 @@ TASKS = ("cube",) + COOP_TASKS
 """Environments of a run: the default `CubeWrench-v0` (`"cube"`, the unchanged path) or one
 of the reduced two-agent coop tasks (`"cartpole"`, `"pendulum"`). The coop suite runs on the
 CPU MuJoCo loop only (no mujoco_warp backend yet) and is vectorised by
-`callosum.training._vec_coop`; the cube keeps its original backend selection."""
+`callosum.experiments.coop_tasks.vec_env`; the cube keeps its original backend selection."""
 
 INPUT_MODES = ("none", "oracle", "predicted")
 """Policy-input modes: the env's partner visibility (`none`, `oracle`) plus the Bi-JEPA
@@ -171,8 +171,8 @@ class WrenchPPOConfig:
     """Environment of the run, one of `TASKS`: `"cube"` (CubeWrench-v0, the thesis main line
     and the default -- the original trainer path, unchanged) or a reduced coop task
     (`"cartpole"`, `"pendulum"`, PLAN.md "Two-robot task suite"). The coop tasks use the
-    `callosum.envs.coop` harness and the CPU-only vectorisation
-    `callosum.training._vec_coop`; their observation width/action width come from the env
+    `callosum.experiments.coop_tasks` harness and the CPU-only vectorisation
+    `callosum.experiments.coop_tasks.vec_env`; their observation width/action width come from the env
     (`coop_obs_size`/`coop_action_size`), so the Bi-JEPA `predicted` input works unchanged
     (own observation + latent)."""
     partner_mode: str = "none"
@@ -429,7 +429,7 @@ class WrenchPPOConfig:
     def coop_env_config(self) -> CartPoleConfig | PendulumConfig:
         """The validated per-task config of a coop run (raises for the cube task).
 
-        `callosum.training._vec_coop` and `scripts/eval_coop.py` build their envs from this
+        `callosum.experiments.coop_tasks.vec_env` and `callosum/experiments/coop_tasks/eval.py` build their envs from this
         instance, so a run and its evaluation use the same task parameters.
         """
         if self.task == "cube":

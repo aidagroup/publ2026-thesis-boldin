@@ -24,8 +24,9 @@ from __future__ import annotations
 import math
 from typing import ClassVar
 
-from callosum.configs.coop_tasks import PendulumConfig
-from callosum.envs._coop_logic import (
+from callosum.experiments.coop_tasks.base import CoopTaskEnv
+from callosum.experiments.coop_tasks.config import PendulumConfig
+from callosum.experiments.coop_tasks.logic import (
     PENDULUM_SPEC,
     CoopTaskSpec,
     EpisodeRandomization,
@@ -33,7 +34,6 @@ from callosum.envs._coop_logic import (
     pendulum_potential,
     pendulum_success,
 )
-from callosum.envs.coop.base import CoopTaskEnv
 
 _HINGE_JOINT = "pivot_hinge"
 _BOB_BODY = "bob"

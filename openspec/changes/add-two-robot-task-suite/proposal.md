@@ -15,4 +15,4 @@
 
 ## Impact
 
-Новые модули в `callosum/envs/coop/`, `callosum/configs/`, `callosum/training/`, `scripts/`, `tests/`; существующий `CubeWrench-v0` и arms-линия не меняются.
+Новые модули в `callosum/experiments/coop_tasks/`, `callosum/configs/`, `callosum/training/`, `scripts/`, `tests/`; существующий `CubeWrench-v0` и arms-линия не меняются.

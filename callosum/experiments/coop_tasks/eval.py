@@ -28,7 +28,7 @@ with the same task parameters it was trained on.
 Run it on the server (the coop suite is CPU MuJoCo, but the plan forbids training/sim on the
 laptop outside the small smoke checks):
 
-    python scripts/eval_coop.py --checkpoint runs/coop_cartpole_oracle_s0/latest.pt \\
+    python callosum/experiments/coop_tasks/eval.py --checkpoint runs/coop_cartpole_oracle_s0/latest.pt \\
         --input-mode oracle --episodes 128 --seed 0 --out results_coop_cartpole_oracle_s0.json
 """
 
@@ -41,7 +41,7 @@ import numpy as np
 import torch
 
 from callosum.common.metrics import EpisodeRecord, success_rate, time_to_success_stats
-from callosum.envs.coop import make_coop_env
+from callosum.experiments.coop_tasks import make_coop_env
 from callosum.experiments.cube_wrench.ppo_config import BACKENDS, INPUT_MODES, TASKS
 from callosum.experiments.cube_wrench.train import (
     EVAL_SEED_OFFSET,
@@ -188,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = config_from_payload(payload)
     if cfg.task not in _COOP_TASKS:
         raise ValueError(
-            f"checkpoint task is {cfg.task!r}; scripts/eval_coop.py evaluates the coop tasks "
+            f"checkpoint task is {cfg.task!r}; callosum/experiments/coop_tasks/eval.py evaluates the coop tasks "
             f"{_COOP_TASKS} (the cube has callosum/experiments/cube_wrench/eval.py)"
         )
     input_mode = resolve_input_mode(payload, args)

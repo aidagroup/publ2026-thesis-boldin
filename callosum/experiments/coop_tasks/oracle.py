@@ -36,12 +36,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from callosum.configs.coop_tasks import CartPoleConfig, PendulumConfig
-from callosum.envs._coop_logic import AGENT_KEYS, in_start_delay, one_sided_allocation
+from callosum.experiments.coop_tasks.config import CartPoleConfig, PendulumConfig
+from callosum.experiments.coop_tasks.logic import AGENT_KEYS, in_start_delay, one_sided_allocation
 
 if TYPE_CHECKING:
-    from callosum.envs.coop.cartpole import CartPoleEnv
-    from callosum.envs.coop.pendulum import PendulumEnv
+    from callosum.experiments.coop_tasks.cartpole import CartPoleEnv
+    from callosum.experiments.coop_tasks.pendulum import PendulumEnv
 
 
 @dataclass(frozen=True)

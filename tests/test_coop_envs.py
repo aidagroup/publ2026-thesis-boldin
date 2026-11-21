@@ -17,8 +17,8 @@ contract the trainer relies on.
 import numpy as np
 import pytest
 
-from callosum.configs.coop_tasks import coop_config
-from callosum.envs._coop_logic import AGENT_KEYS, task_obs_size
+from callosum.experiments.coop_tasks.config import coop_config
+from callosum.experiments.coop_tasks.logic import AGENT_KEYS, task_obs_size
 
 _ORACLE_EPISODES = 4
 """Small local episode count for the oracle/baseline checks (the envs are CPU MuJoCo)."""
@@ -26,14 +26,14 @@ _ORACLE_EPISODES = 4
 
 def _make_env(task: str, **kwargs):
     """Build a coop env (imported lazily so the module imports without mujoco)."""
-    from callosum.envs.coop import make_coop_env
+    from callosum.experiments.coop_tasks import make_coop_env
 
     return make_coop_env(task, **kwargs)
 
 
 def _make_oracle(task: str, config):
     """Build the task's scripted oracle (imported lazily)."""
-    from callosum.envs.coop import make_oracle
+    from callosum.experiments.coop_tasks import make_oracle
 
     return make_oracle(task, config)
 
@@ -261,7 +261,7 @@ def test_pendulum_success_needs_the_hold_cycles() -> None:
 
 def test_vec_coop_contract_and_auto_reset() -> None:
     pytest.importorskip("mujoco")
-    from callosum.training._vec_coop import VecCoopEnv
+    from callosum.experiments.coop_tasks.vec_env import VecCoopEnv
 
     cfg = coop_config("pendulum")
     vec = VecCoopEnv("pendulum", 2, config=cfg, seed=0)

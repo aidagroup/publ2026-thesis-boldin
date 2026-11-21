@@ -5,11 +5,11 @@ The suite (`PLAN.md` "Two-robot task suite") is a set of simple tasks in which t
 decentralised agents cooperate on one shared object: `CartPoleCoop-v0` (two one-sided
 pushers balance a shared cart-pole and drive it to a target) and `PendulumPump-v0` (two
 one-sided actuators pump a pendulum to a target amplitude and hold it). Both share this
-module and the harness in `callosum.envs.coop`.
+module and the harness in `callosum.experiments.coop_tasks`.
 
 Deliberately has zero mujoco/torch dependency (the same macOS/CI rule as
 `callosum.experiments.cube_wrench.logic` and `callosum.common.visibility`): the simulator lives in
-`callosum.envs.coop`, which CI cannot import, while everything that can be decided
+`callosum.experiments.coop_tasks`, which CI cannot import, while everything that can be decided
 without the simulator lives here and is unit-tested locally (`tests/test_coop_logic.py`).
 
 Observation of ONE agent, in field order (`obs_fields`):
@@ -284,7 +284,7 @@ class RandomizationRanges(Protocol):
     """The randomisation ranges `sample_episode_randomization` reads from a task config.
 
     Declared as a protocol so the sampler stays pure and independent of the config module
-    (`callosum.configs.coop_tasks.CoopRandomization` is the concrete implementation).
+    (`callosum.experiments.coop_tasks.config.CoopRandomization` is the concrete implementation).
     """
 
     latency_range: tuple[float, float]
