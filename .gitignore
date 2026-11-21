@@ -249,3 +249,6 @@ demos/
 # OS / editor noise and a personal folder that must never be committed
 .DS_Store
 harbour-space-letter/
+
+# Local demo artifacts (videos/stills, not source)
+demo/
