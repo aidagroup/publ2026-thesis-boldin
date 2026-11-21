@@ -4,7 +4,7 @@ import pytest
 
 torch = pytest.importorskip("torch")  # CI installs only the dev extra; run with `make dev`
 
-from callosum.training._nonfinite import (
+from callosum.common.nonfinite import (
     NonFiniteTracker,
     guard_step,
     nonfinite_fields,

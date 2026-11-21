@@ -20,7 +20,7 @@ checkpoints; see the config module for the manual install note). The trainer's r
 is backend-agnostic: it only asks the vec env for its `torch_io` marker, so a GPU step
 consumes CUDA tensors instead of the numpy copies of the CPU loop.
 
-Reused from `callosum.training._ppo_core` (the ManiSkill PPO baseline's blocks, shared with
+Reused from `callosum.common.ppo_core` (the ManiSkill PPO baseline's blocks, shared with
 the arms IPPO trainer): `ActorCritic` (3 x 256 tanh MLPs, state-independent log-std),
 `compute_gae` and the clipped-surrogate `ppo_update`. What this trainer adds is the
 wrench-specific contract around them:
@@ -87,7 +87,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from callosum.agents.bijepa import BiJEPA, latent_stats
+from callosum.common.bijepa import BiJEPA, latent_stats
 from callosum.configs.wrench_ppo import (
     INPUT_MODES,
     WrenchPPOConfig,
@@ -97,8 +97,8 @@ from callosum.configs.wrench_ppo import (
 )
 from callosum.envs._wrench_logic import AGENT_KEYS, obs_size
 from callosum.training._bijepa_probe import ridge_probe
-from callosum.training._metrics import MetricLogger
-from callosum.training._ppo_core import ActorCritic, compute_gae, ppo_update
+from callosum.common.logging import MetricLogger
+from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
 
 CHECKPOINT_FORMAT = 1
 """Format of the trainer's checkpoints: weights, optimizer states, config and counters."""

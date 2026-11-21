@@ -2,7 +2,7 @@
 
 Stdlib-only (no torch) so the config stays importable in CI, which installs only the ``dev``
 extra. Per-agent observation sizes are deliberately *not* here: they are derived from the
-environment and passed to :class:`callosum.agents.bijepa.BiJEPA` as constructor arguments.
+environment and passed to :class:`callosum.common.bijepa.BiJEPA` as constructor arguments.
 """
 
 from dataclasses import dataclass

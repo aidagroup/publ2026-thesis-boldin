@@ -31,7 +31,7 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor, nn
 
-from callosum.configs.bijepa import BiJEPAConfig
+from callosum.common.bijepa_config import BiJEPAConfig
 
 _ACTIVATIONS: dict[str, type[nn.Module]] = {
     "tanh": nn.Tanh,

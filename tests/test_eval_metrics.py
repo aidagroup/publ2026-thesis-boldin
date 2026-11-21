@@ -11,7 +11,7 @@ import math
 import pytest
 
 from callosum.envs._skills import Role
-from callosum.eval.metrics import (
+from callosum.common.metrics import (
     CrossPlayMatrix,
     EpisodeRecord,
     crossplay_matrix,

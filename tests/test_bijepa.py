@@ -1,4 +1,4 @@
-"""Tests for callosum.agents.bijepa (step 3.1): pure PyTorch, runs on macOS (``make dev``).
+"""Tests for callosum.common.bijepa (step 3.1): pure PyTorch, runs on macOS (``make dev``).
 
 Skipped when torch is absent (CI installs only the ``dev`` extra).
 """
@@ -9,7 +9,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from callosum.agents.bijepa import (
+from callosum.common.bijepa import (
     BiJEPA,
     Encoder,
     PartnerPredictor,
@@ -17,7 +17,7 @@ from callosum.agents.bijepa import (
     latent_stats,
     variance_loss,
 )
-from callosum.configs.bijepa import BiJEPAConfig
+from callosum.common.bijepa_config import BiJEPAConfig
 
 B, K, D_A, D_B, LAT = 8, 3, 12, 20, 6
 

@@ -1,7 +1,7 @@
 """Skill-level action space: the primitive registries per role, the partner-visibility
 rule and the episode-randomization sampler.
 
-Pure stdlib on purpose (the same rule as `callosum.envs._partner_obs`, design decision 2
+Pure stdlib on purpose (the same rule as `callosum.common.visibility`, design decision 2
 of openspec/changes/add-skill-level-cube-assembly): everything here must import and unit
 test on macOS, where mani_skill and torch are absent. The env (task 2.x) only consumes
 these tables instead of re-deriving them inside GPU codepaths.

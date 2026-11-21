@@ -53,8 +53,8 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from callosum.configs._cli import build_dataclass_parser
-from callosum.configs.bijepa import BiJEPAConfig
+from callosum.common.cli import build_dataclass_parser
+from callosum.common.bijepa_config import BiJEPAConfig
 from callosum.configs.coop_tasks import (
     TASKS as COOP_TASKS,
 )
@@ -446,7 +446,7 @@ class WrenchPPOConfig:
 
         Only the fields that matter for a PPO run are exposed on `WrenchPPOConfig`; the
         encoder/predictor widths, activation, layer norm, sharing and target kind keep the
-        module's own defaults (`callosum.configs.bijepa.BiJEPAConfig`).
+        module's own defaults (`callosum.common.bijepa_config.BiJEPAConfig`).
         """
         return BiJEPAConfig(
             latent_dim=self.latent_dim,

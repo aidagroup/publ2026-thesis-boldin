@@ -85,8 +85,8 @@ from callosum.configs.ippo import (
 from callosum.envs import _skills_obs
 from callosum.envs._sim_compat import prepare_sim_backend
 from callosum.training._agent_obs import AgentObsBuilder
-from callosum.training._categorical import CategoricalPolicy
-from callosum.training._checkpoint import (
+from callosum.common.categorical import CategoricalPolicy
+from callosum.common.checkpoint import (
     TrainingState,
     check_warm_start_compat,
     load_agent_weights,
@@ -100,15 +100,15 @@ from callosum.training._demos import (
     episode_length_mismatch,
     load_demos,
 )
-from callosum.training._diag import DiagStats
-from callosum.training._metrics import (
+from callosum.common.diag import DiagStats
+from callosum.common.logging import (
     EpisodeStats,
     MetricLogger,
     eval_diag_summary,
     progress_line,
 )
-from callosum.training._nonfinite import NonFiniteTracker, guard_step
-from callosum.training._ppo_core import ActorCritic, compute_gae, ppo_update
+from callosum.common.nonfinite import NonFiniteTracker, guard_step
+from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
 from callosum.training._skills_agent_obs import SkillsObsBuilder
 
 AGENT_NAMES = ("agent_a", "agent_b")

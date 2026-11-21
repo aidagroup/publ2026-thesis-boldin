@@ -12,13 +12,13 @@ from callosum.configs.bc import BCConfig
 from callosum.configs.ippo import IPPOConfig
 from callosum.training import bc
 from callosum.training._agent_obs import AGENT_UIDS, AgentObsBuilder
-from callosum.training._checkpoint import (
+from callosum.common.checkpoint import (
     check_warm_start_compat,
     load_agent_weights,
     load_checkpoint,
 )
 from callosum.training._demos import assemble_demos, layout_to_meta, save_demos, split_rollout
-from callosum.training._ppo_core import ActorCritic, bc_mse, ppo_update
+from callosum.common.ppo_core import ActorCritic, bc_mse, ppo_update
 
 LAYOUT = [
     (("agent", "so101_pg-0", "qpos"), 7),

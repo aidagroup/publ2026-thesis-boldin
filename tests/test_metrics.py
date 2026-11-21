@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from callosum.training._metrics import (
+from callosum.common.logging import (
     EpisodeStats,
     MetricLogger,
     eval_diag_summary,

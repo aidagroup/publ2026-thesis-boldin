@@ -41,7 +41,7 @@ import torch
 
 from callosum.configs.bc import BCConfig, parse_args
 from callosum.training._agent_obs import AgentObsBuilder
-from callosum.training._checkpoint import AGENT_NAMES, save_weights_checkpoint
+from callosum.common.checkpoint import AGENT_NAMES, save_weights_checkpoint
 from callosum.training._demos import (
     agent_demo_tensors,
     discounted_returns,
@@ -49,7 +49,7 @@ from callosum.training._demos import (
     load_demos,
     success_mask,
 )
-from callosum.training._ppo_core import ActorCritic
+from callosum.common.ppo_core import ActorCritic
 
 GRIPPER_DIM = 5  # last entry of the 6-D action: the absolute gripper target
 

@@ -6,8 +6,8 @@ Plain stdlib (no torch / mani_skill), so parsing and validation are unit-testabl
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from callosum.configs._cli import build_dataclass_parser
-from callosum.envs._partner_obs import PARTNER_OBS_MODES, validate_partner_obs
+from callosum.common.cli import build_dataclass_parser
+from callosum.common.visibility import PARTNER_OBS_MODES, validate_partner_obs
 
 DEVICES = ("auto", "cpu", "cuda")
 

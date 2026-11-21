@@ -23,7 +23,7 @@ import torch
 from torch import nn
 from torch.distributions.categorical import Categorical
 
-from callosum.training._ppo_core import _mlp
+from callosum.common.ppo_core import _mlp
 
 
 def _as_ids(action: torch.Tensor) -> torch.Tensor:

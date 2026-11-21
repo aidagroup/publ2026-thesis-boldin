@@ -47,7 +47,7 @@ class DiagStats:
         Args:
             infos: the info dict returned by the vector env.
             valid: optional `(num_envs,)` bool; envs that are False (non-finite state, see
-                `callosum.training._nonfinite`) contribute nothing and lose their running "ever"
+                `callosum.common.nonfinite`) contribute nothing and lose their running "ever"
                 flags. `None` means all envs (the normal, sync-free path).
         """
         final_mask = infos.get("_final_info")

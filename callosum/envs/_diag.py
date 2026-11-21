@@ -2,7 +2,7 @@
 
 Pure Python (no mani_skill/torch import). An env marks a diagnostic by prefixing its `info` key
 with `DIAG_PREFIX` (`diag_holder_grasp`, ...); the trainer averages every such key generically
-(`callosum.training._diag`) and an env without any (TwoSO101-v0) simply has none. Diagnostics
+(`callosum.common.diag`) and an env without any (TwoSO101-v0) simply has none. Diagnostics
 never feed back into the reward or the observation.
 """
 

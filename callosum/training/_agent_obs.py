@@ -36,7 +36,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from callosum.envs._partner_obs import tcp_pose_visible, validate_partner_obs
+from callosum.common.visibility import tcp_pose_visible, validate_partner_obs
 
 AGENT_UIDS = ("so101_pg-0", "so101_pg-1")
 """ManiSkill uids of agent_a (holder in FaceTurn-v0) and agent_b (rotator), in that order."""

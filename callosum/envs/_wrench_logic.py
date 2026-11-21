@@ -2,7 +2,7 @@
 randomisation, and the success/reward/failure rules.
 
 Deliberately has zero mujoco/torch dependency (the same macOS rule as
-`callosum.envs._partner_obs` and `callosum.envs._skills`): the simulator lives in
+`callosum.common.visibility` and `callosum.envs._skills`): the simulator lives in
 `callosum.envs.wrench_cube.env`, which cannot even be imported on macOS/CI, while
 everything that can be decided without the simulator lives here and is unit-tested
 locally (`tests/test_wrench_logic.py`).

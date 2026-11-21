@@ -1,6 +1,6 @@
 """Unit tests for the partner_obs observation-visibility rule (step 1.4, reworked in step 2.1).
 
-Tests callosum.envs._partner_obs directly (pure Python, no mani_skill/torch
+Tests callosum.common.visibility directly (pure Python, no mani_skill/torch
 dependency) rather than callosum.envs.two_so101_base itself: that module
 imports mani_skill at module level, which is absent on macOS/CI (mani-skill
 is gated to sys_platform == 'linux' in pyproject.toml), so it cannot even be
@@ -9,7 +9,7 @@ imported here -- see docs/implementation-plan.md section 0.
 
 import pytest
 
-from callosum.envs._partner_obs import tcp_pose_fields, tcp_pose_visible, validate_partner_obs
+from callosum.common.visibility import tcp_pose_fields, tcp_pose_visible, validate_partner_obs
 
 
 def test_env_always_emits_both_tcp_poses() -> None:

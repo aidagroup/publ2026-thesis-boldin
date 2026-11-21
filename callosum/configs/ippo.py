@@ -13,8 +13,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from callosum.configs._cli import build_dataclass_parser
-from callosum.envs._partner_obs import PARTNER_OBS_MODES, validate_partner_obs
+from callosum.common.cli import build_dataclass_parser
+from callosum.common.visibility import PARTNER_OBS_MODES, validate_partner_obs
 from callosum.envs._sim_compat import is_cpu_backend
 from callosum.envs._skills import PARTNER_VISIBILITY_MODES, validate_partner_visibility
 
