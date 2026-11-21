@@ -2,7 +2,7 @@
 
 There is no teleporting or pinning of anything: both arms are driven only through their joint
 controllers and the cube is only ever touched by the grippers. Strategy (arms stand 90 degrees
-apart around the cube, see `callosum.configs.layout`):
+apart around the cube, see `callosum.experiments.arm.layout`):
 
   1. `holder pregrasp`, `holder grasp`: the holder (agent_a) comes in low and almost horizontal,
      fingers pointing at the cube 10 degrees below horizontal and jaws open horizontally across
@@ -32,8 +32,8 @@ Two ways of driving the arms (`ExpertControlConfig.control`):
   an integral bias per joint that removes the steady-state error a disturbance leaves under this
   controller. The gripper action is absolute (+-1) in both modes.
 
-  In delta mode **every env runs its own phase state machine** (`callosum.experts._phases`,
-  the program in `callosum.experts._program`): `run_expert` plans every env's waypoints once
+  In delta mode **every env runs its own phase state machine** (`callosum.experiments.arm.phases`,
+  the program in `callosum.experiments.arm.program`): `run_expert` plans every env's waypoints once
   (they depend only on the cube pose at reset), then every `env.step` advances all envs and each
   env (and each arm) moves to its next phase as soon as ITS OWN criterion is met: waypoint
   tolerance or stall, jaws at rest, face turned, or its own timeout. Ordering constraints between
@@ -49,7 +49,7 @@ action dict that was passed to `env.step`, reward, terminated, truncated, info),
 `scripts/collect_demos.py` records.
 
 Needs mani_skill and scipy (not importable on the CI runner); the pure-Python tracking config is
-`callosum.configs.face_turn_expert`.
+`callosum.experiments.arm.expert_config`.
 """
 
 import math
@@ -63,19 +63,19 @@ import torch
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-from callosum.configs.face_turn_expert import ExpertControlConfig
-from callosum.envs.face_turn import TARGET_FACE_ANGLE
-from callosum.envs.two_so101_base import NUM_ARM_JOINTS
-from callosum.experts._noise import perturb_arm_action
-from callosum.experts._phases import Commands, Context, Observation, PhaseMachine
-from callosum.experts._program import (
+from callosum.experiments.arm.expert_config import ExpertControlConfig
+from callosum.experiments.arm.face_turn_env import TARGET_FACE_ANGLE
+from callosum.experiments.arm.noise import perturb_arm_action
+from callosum.experiments.arm.phases import Commands, Context, Observation, PhaseMachine
+from callosum.experiments.arm.program import (
     GRIPPER_CLOSED,
     GRIPPER_OPEN,
     SETTLE_STEPS,
     ExpertPlan,
     build_programs,
 )
-from callosum.experts._tracking import noise_jitter, tracking_action, update_bias
+from callosum.experiments.arm.scene import NUM_ARM_JOINTS
+from callosum.experiments.arm.tracking import noise_jitter, tracking_action, update_bias
 from callosum.robots.so101_parallel_gripper import ARM_DELTA_LIMIT, SO101ParallelGripper
 
 # Strategy parameters (metres / radians). The body is 3.8 cm tall (mid height 1.9 cm), the face
@@ -445,7 +445,7 @@ class Rig:
         `ARM_DELTA_LIMIT`, divided by its largest entry when that exceeds 1: the direction is
         kept, so a multi-joint move stays a straight line in joint space (and the waypoints'
         straight tool path is followed). The bias integrates the error (anti-windup, see
-        `callosum.experts._tracking`).
+        `callosum.experiments.arm.tracking`).
         """
         cfg = self.control
         error = self.q[arm] - self._qpos(arm)[:, :NUM_ARM_JOINTS]

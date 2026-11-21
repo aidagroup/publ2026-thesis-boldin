@@ -16,7 +16,7 @@ This module holds the pieces that avoid that, none of which needs the simulator:
   tolerances widen when the executed action carries DART noise.
 * `describe_progress`: what the demo collector prints to make a failed run diagnosable.
 
-The phase state machines that use these live in `callosum.experts._phases`.
+The phase state machines that use these live in `callosum.experiments.arm.phases`.
 """
 
 import numpy as np

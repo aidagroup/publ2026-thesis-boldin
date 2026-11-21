@@ -1,6 +1,6 @@
 """Generic averaging of the env's `diag_*` info keys over a rollout or an evaluation.
 
-An env publishes diagnostics as per-env tensors in `info` under the prefix `callosum.envs._diag.
+An env publishes diagnostics as per-env tensors in `info` under the prefix `callosum.common.diag_names.
 DIAG_PREFIX` (FaceTurn-v0: grasps, drifts, distances, reward terms; TwoSO101-v0: none). `DiagStats`
 averages every such key over all envs and steps, tracks the maximum of the float ones, and for the
 boolean ones (grasps) also the per-episode "ever" rate: the fraction of finished episodes in which
@@ -16,7 +16,7 @@ values for those envs, so a step is always counted with the values of the state 
 
 import torch
 
-from callosum.envs._diag import diag_name
+from callosum.common.diag_names import diag_name
 
 
 class DiagStats:

@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from callosum.configs.layout import ArmLayout, base_xy_yaw
+from callosum.experiments.arm.layout import ArmLayout, base_xy_yaw
 
 
 @pytest.mark.parametrize("azimuth", [-math.pi, -math.pi / 2, 0.0, 0.7, math.pi / 2])

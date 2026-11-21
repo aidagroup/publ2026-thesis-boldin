@@ -5,7 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")  # CI installs only the dev extra; run with `make dev`
 
 from callosum.common.diag import DiagStats
-from callosum.envs._diag import diag_name
+from callosum.common.diag_names import diag_name
 
 
 def test_diag_name_only_matches_the_prefix() -> None:

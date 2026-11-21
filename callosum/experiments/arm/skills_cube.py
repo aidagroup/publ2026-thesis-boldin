@@ -1,7 +1,7 @@
 """Builder for the multi-face cube: a free core plus six revolute-jointed outer layers.
 
-The generalization of `callosum.envs._turntable_cube` to all six faces, driven by
-`callosum.configs.multi_face_cube.MultiFaceCubeConfig`: the core is the articulation's
+The generalization of `callosum.experiments.arm.turntable` to all six faces, driven by
+`callosum.experiments.arm.skills_cube_config.MultiFaceCubeConfig`: the core is the articulation's
 root link (grasped by the holder, lifted and flipped), each labeled face U/D/L/R/F/B
 carries one outer layer on a revolute joint whose axis is the face normal in the body
 frame, with limits [0, 180] deg, friction from the layer spec and detents at the
@@ -36,7 +36,7 @@ import sapien.render
 from mani_skill.envs.scene import ManiSkillScene
 from mani_skill.utils.structs.articulation import Articulation
 
-from callosum.configs.multi_face_cube import FACE_NORMALS, MultiFaceCubeConfig
+from callosum.experiments.arm.skills_cube_config import FACE_NORMALS, MultiFaceCubeConfig
 
 # Distinct face colors (the real cube's convention) so a rendered rollout shows which
 # layer is which; irrelevant for state observations.

@@ -25,7 +25,7 @@ Vocabulary:
 
 `Commands` are the per-arm targets the env actions are derived from (`Rig` turns them into
 `pd_joint_delta_pos` actions); the primitives mutate them in place. The scripted FaceTurn program
-lives in `callosum.experts._program`; a skill-level env can reuse the same primitives with a
+lives in `callosum.experiments.arm.program`; a skill-level env can reuse the same primitives with a
 planner that plans from the live state instead of a precomputed plan.
 """
 
@@ -34,8 +34,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from callosum.configs.face_turn_expert import ExpertControlConfig
-from callosum.experts._tracking import ReachMonitor, effective_tol
+from callosum.experiments.arm.expert_config import ExpertControlConfig
+from callosum.experiments.arm.tracking import ReachMonitor, effective_tol
 
 NUM_ARM_JOINTS = 5
 REASONS = ("tol", "stall", "timeout", "extra", "still")

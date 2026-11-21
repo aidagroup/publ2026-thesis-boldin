@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from callosum.configs.ippo import (
+from callosum.experiments.arm.ppo_config import (
     IPPOConfig,
     build_parser,
     clamp_envs_for_cpu_backend,

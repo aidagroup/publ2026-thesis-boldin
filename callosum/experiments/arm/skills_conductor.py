@@ -27,15 +27,20 @@ import math
 
 import numpy as np
 
-from callosum.envs._plans import FACES, Flip
-from callosum.envs._skills import HOLDER_PRIMITIVES, ROTATOR_PRIMITIVES, Role, num_primitives
-from callosum.envs._skills_obs import (
+from callosum.experiments.arm.skills import (
+    HOLDER_PRIMITIVES,
+    ROTATOR_PRIMITIVES,
+    Role,
+    num_primitives,
+)
+from callosum.experiments.arm.skills_obs import (
     INFO_ACTIVE_LAYER_ANGLE_DEG,
     INFO_PRIMITIVE_HOLDER,
     INFO_ROTATOR_GRASP_FACT,
     own_block_slices,
 )
-from callosum.experts.skills_runtime import (
+from callosum.experiments.arm.skills_plans import FACES, Flip
+from callosum.experiments.arm.skills_runtime import (
     orientation_from_quat,
     turn_target_rad,
     up_face_from_quat,
@@ -99,7 +104,7 @@ class SkillsConductor:
 
     The observation is read ONLY through the `_skills_obs` own-block layout (indices
     via `own_block_slices`), so a policy input built by
-    `callosum.training._skills_agent_obs.build_agent_obs` drops in directly.
+    `callosum.experiments.arm.skills_agent_obs.build_agent_obs` drops in directly.
     """
 
     def __init__(self, settle_decisions: int = _SETTLE_DECISIONS) -> None:

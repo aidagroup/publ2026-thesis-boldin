@@ -1,4 +1,4 @@
-"""Config and CLI of the behaviour-cloning pretraining (`callosum.training.bc`).
+"""Config and CLI of the behaviour-cloning pretraining (`callosum.experiments.arm.bc`).
 
 Plain stdlib (no torch / mani_skill), so parsing and validation are unit-testable everywhere.
 """

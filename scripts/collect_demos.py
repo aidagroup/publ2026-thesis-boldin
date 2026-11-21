@@ -1,6 +1,6 @@
 """Collect demonstrations of the scripted FaceTurn expert in the policies' own action space.
 
-The expert (`callosum.experts.face_turn_expert`, the strategy of `scripts/probe_face_turn.py`) runs
+The expert (`callosum.experiments.arm.expert`, the strategy of `scripts/probe_face_turn.py`) runs
 in `control="delta"` mode: the env is the one the IPPO trainer uses (`FaceTurn-v0`,
 `pd_joint_delta_pos`, the registered 400-step episode, `obs_mode="state"`,
 `render_backend="none"`, `reward_mode="normalized_dense"`) and the arms are driven with delta
@@ -11,7 +11,7 @@ training env terminates) and only successful ones are kept unless `--keep-all`.
 
 One batch = one `env.reset(seed=...)` of `--num-envs` envs (GPU: e.g. 256 at once; the CPU sim has
 one env, so use `--num-batches` to loop over seeds). Batch `b` uses reset seed `--seed + b`.
-The expert runs one asynchronous phase state machine per env (`callosum.experts._phases`): no
+The expert runs one asynchronous phase state machine per env (`callosum.experiments.arm.phases`): no
 env waits for another, an env whose IK fails just holds. Every batch prints, per phase, how many
 envs completed it and the min / median / max env step at which they did, plus the IK failures;
 the summary (success rate, first-success step distribution) doubles as the self-check that the
@@ -21,7 +21,7 @@ expert fits into the episode under the training controller.
     # Mac CPU sim, 20 episodes (see CLAUDE.md for the throwaway env):
     python scripts/collect_demos.py --sim-backend cpu --num-batches 20
 
-The file layout is documented in `callosum.training._demos`. Exit status: 1 if no successful
+The file layout is documented in `callosum.experiments.arm.demos`. Exit status: 1 if no successful
 episode was collected. A batch without any success prints how far its episodes got (expert
 grasps, face angle, body drift) next to the per-phase table so that a failed collection can be
 diagnosed from the log.
@@ -41,19 +41,19 @@ import torch
 from _sim_utils import make_env, parse_args
 from mani_skill.utils import gym_utils
 
-import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-from callosum.configs.face_turn_expert import ExpertControlConfig
-from callosum.envs.face_turn import TARGET_FACE_ANGLE
-from callosum.experts._tracking import describe_progress
-from callosum.experts.face_turn_expert import ArmModel, Rig, run_expert
-from callosum.training._agent_obs import AGENT_UIDS, obs_layout
-from callosum.training._demos import (
+import callosum.experiments.arm.face_turn_env  # noqa: F401  (registers FaceTurn-v0)
+from callosum.experiments.arm.agent_obs import AGENT_UIDS, obs_layout
+from callosum.experiments.arm.demos import (
     assemble_demos,
     git_commit,
     layout_to_meta,
     save_demos,
     split_rollout,
 )
+from callosum.experiments.arm.expert import ArmModel, Rig, run_expert
+from callosum.experiments.arm.expert_config import ExpertControlConfig
+from callosum.experiments.arm.face_turn_env import TARGET_FACE_ANGLE
+from callosum.experiments.arm.tracking import describe_progress
 
 ENV_ID = "FaceTurn-v0"
 CONTROL_MODE = "pd_joint_delta_pos"

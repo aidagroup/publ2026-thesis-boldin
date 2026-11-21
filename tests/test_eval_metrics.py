@@ -22,7 +22,7 @@ from callosum.common.metrics import (
     time_to_success_stats,
     useless_rate,
 )
-from callosum.envs._skills import Role
+from callosum.experiments.arm.skills import Role
 
 
 def rec(

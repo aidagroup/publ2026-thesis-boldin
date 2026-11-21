@@ -54,7 +54,7 @@ log "resume loop started: run=${RUN_NAME} args=$*"
 
 while true; do
     log "starting trainer"
-    uv run python -m callosum.training.ippo --resume "runs/${RUN_NAME}" "$@" &
+    uv run python -m callosum.experiments.arm.trainer --resume "runs/${RUN_NAME}" "$@" &
     CHILD_PID=$!
     wait "$CHILD_PID"
     CODE=$?

@@ -20,7 +20,7 @@ from mani_skill.utils.structs.pose import Pose
 from transforms3d.euler import euler2quat
 
 from callosum.common.visibility import tcp_pose_fields, validate_partner_obs
-from callosum.configs.layout import ArmLayout, base_xy_yaw
+from callosum.experiments.arm.layout import ArmLayout, base_xy_yaw
 from callosum.robots.so101_parallel_gripper import SO101ParallelGripper
 
 # ~5.7 cm real Rubik's cube edge length.
@@ -51,7 +51,7 @@ class TwoSO101Base(BaseEnv):
     of the ablation triple from docs/thesis/04-experiment-design.md (`"predicted"`, from
     Bi-JEPA, lands in a later phase). It does NOT change the env's observation: both agents'
     TCP poses are always in the shared extra-obs dict, and the per-agent input builder
-    `callosum.training._agent_obs` applies the visibility rule (own TCP always, partner TCP only
+    `callosum.experiments.arm.agent_obs` applies the visibility rule (own TCP always, partner TCP only
     for "full"); see `callosum.common.visibility`.
     """
 
@@ -88,7 +88,7 @@ class TwoSO101Base(BaseEnv):
 
     def _load_agent(self, options: dict):
         # Both bases stand on a circle around the table centre (the cube) and point at it; see
-        # callosum.configs.layout.ArmLayout for the radius and azimuths.
+        # callosum.experiments.arm.layout.ArmLayout for the radius and azimuths.
         layout = self.arm_layout
         poses = []
         for radius, azimuth in (
@@ -145,7 +145,7 @@ class TwoSO101Base(BaseEnv):
         # _get_obs_agent (MultiAgent.get_proprioception, keyed per sub-agent
         # uid) -- this only adds what BaseEnv doesn't already provide: both TCP
         # poses (always; who may see which is decided per agent in
-        # callosum.training._agent_obs, see callosum.common.visibility) and the
+        # callosum.experiments.arm.agent_obs, see callosum.common.visibility) and the
         # cube pose (task-object state).
         #
         # obs_mode="state" flattens this whole dict into one combined tensor

@@ -31,7 +31,7 @@ Per-agent proprioception additionally travels in the obs dict under the agent
 keys (same shape as FaceTurn-v0), so a policy never needs the partner's qpos.
 """
 
-from callosum.envs._skills import (
+from callosum.experiments.arm.skills import (
     PARTNER_VISIBILITY_MODES,
     PartnerVisibility,
     Role,

@@ -7,7 +7,7 @@ rate, time to success, useless-action rate, partner-primitive prediction accurac
 the three report structures: run summaries, cross-play matrices and recovery summaries.
 
 Pure stdlib + numpy on purpose (the same macOS-testability rule as
-`callosum.envs._skills`): no mani_skill, no torch, deterministic outputs, JSON-friendly
+`callosum.experiments.arm.skills`): no mani_skill, no torch, deterministic outputs, JSON-friendly
 types. The standard deviation is the population one (ddof=0), so a single successful
 episode has std 0.
 """
@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-from callosum.envs._skills import Role
+from callosum.experiments.arm.skills import Role
 
 
 @dataclass(frozen=True)

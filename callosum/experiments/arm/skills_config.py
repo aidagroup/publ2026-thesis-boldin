@@ -6,16 +6,16 @@ decisions, the plan input, the episode randomization ranges (the private randomn
 the partner), the failure-injection probabilities beyond `RandomizationConfig` (layer
 slips), the team reward and the generalized layer-lock tolerances.
 
-Pure stdlib on purpose (the macOS rule of `callosum.envs._skills`): the config must
+Pure stdlib on purpose (the macOS rule of `callosum.experiments.arm.skills`): the config must
 import and validate wherever the env's logic is unit-tested. The multi-face cube's own
 geometry (layer axes, friction, detents) lives in
-`callosum.configs.multi_face_cube.MultiFaceCubeConfig` and is referenced, not duplicated.
+`callosum.experiments.arm.skills_cube_config.MultiFaceCubeConfig` and is referenced, not duplicated.
 """
 
 import math
 from dataclasses import dataclass, field
 
-from callosum.envs._skills import (
+from callosum.experiments.arm.skills import (
     RandomizationConfig,
     validate_partner_visibility,
 )
@@ -81,7 +81,7 @@ class FaceTurnSkillsConfig:
     # --- plan input ----------------------------------------------------------------------
     plan_length: int = 1
     """Moves per episode (E1: 1, E2: 2-3, E3: 5+). The plan itself is sampled per episode
-    and per env by `callosum.envs._plans.random_plan`; planning is not learned."""
+    and per env by `callosum.experiments.arm.skills_plans.random_plan`; planning is not learned."""
 
     # --- partner visibility (bookkeeping only) --------------------------------------------
     partner_mode: str = "none"
@@ -92,7 +92,7 @@ class FaceTurnSkillsConfig:
     # --- randomization and failure injection ----------------------------------------------
     randomization: RandomizationConfig = field(default_factory=RandomizationConfig)
     """Episode-private randomness ranges (speeds, grasp-failure probability, start
-    delay); see `callosum.envs._skills.RandomizationConfig`."""
+    delay); see `callosum.experiments.arm.skills.RandomizationConfig`."""
 
     slip_prob_range: tuple[float, float] = (0.05, 0.15)
     """Per-hand probability range that a layer TURN ends in an injected slip: the held

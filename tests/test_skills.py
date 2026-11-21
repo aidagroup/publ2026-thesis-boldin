@@ -1,12 +1,12 @@
 """Unit tests for the skill-level registry, partner-visibility rule and sampler.
 
-Tests callosum.envs._skills directly: the module is pure stdlib (no mani_skill/torch),
+Tests callosum.experiments.arm.skills directly: the module is pure stdlib (no mani_skill/torch),
 which is exactly what makes it testable on macOS/CI (see the module's docstring).
 """
 
 import pytest
 
-from callosum.envs._skills import (
+from callosum.experiments.arm.skills import (
     HOLDER_PRIMITIVES,
     PARTNER_VISIBILITY_MODES,
     ROTATOR_PRIMITIVES,

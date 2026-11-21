@@ -1,7 +1,7 @@
 """IPPO for the two-arm envs: two independent PPO learners on one shared GPU simulation.
 
-Run as `python -m callosum.training.ippo --env-id FaceTurn-v0 ...` (flags: `--help`, defaults:
-`callosum.configs.ippo.IPPOConfig`).
+Run as `python -m callosum.experiments.arm.trainer --env-id FaceTurn-v0 ...` (flags: `--help`, defaults:
+`callosum.experiments.arm.ppo_config.IPPOConfig`).
 
 Based on ManiSkill's single-file GPU PPO (`examples/baselines/ppo/ppo.py` @ v3.0.1): same
 rollout/GAE/update structure, `ManiSkillVectorEnv` with partial resets and `record_metrics`,
@@ -32,7 +32,7 @@ rollout/GAE/update structure, `ManiSkillVectorEnv` with partial resets and `reco
   state cannot be saved, so the envs are reset with seeds derived from the resumed iteration.
   `--checkpoint <file>` is the weights-only warm start of a new run.
 * Fine-tuning from demonstrations (IPPO from scratch never finds a grasp on FaceTurn-v0, see
-  `callosum.training.bc`): `--checkpoint <bc.pt>` warm-starts from a BC checkpoint (input widths,
+  `callosum.experiments.arm.bc`): `--checkpoint <bc.pt>` warm-starts from a BC checkpoint (input widths,
   field names and `partner_obs` are checked), `--critic-warmup-iters K` updates only the critics
   for the first K iterations (actors frozen), and `--demos <file> --bc-coef C --bc-decay-iters N`
   add a DAPG-style auxiliary loss `C * mse(actor_mean(demo_obs), demo_action)` to every PPO
@@ -72,7 +72,7 @@ from mani_skill.utils import gym_utils
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from torch.utils.tensorboard import SummaryWriter
 
-import callosum.envs.face_turn  # noqa: F401  (registers TwoSO101-v0 and FaceTurn-v0)
+import callosum.experiments.arm.face_turn_env  # noqa: F401  (registers TwoSO101-v0 and FaceTurn-v0)
 from callosum.common.categorical import CategoricalPolicy
 from callosum.common.checkpoint import (
     TrainingState,
@@ -91,7 +91,15 @@ from callosum.common.logging import (
 )
 from callosum.common.nonfinite import NonFiniteTracker, guard_step
 from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
-from callosum.configs.ippo import (
+from callosum.experiments.arm import skills_obs as _skills_obs
+from callosum.experiments.arm.agent_obs import AgentObsBuilder
+from callosum.experiments.arm.demos import (
+    agent_demo_tensors,
+    check_layout_matches,
+    episode_length_mismatch,
+    load_demos,
+)
+from callosum.experiments.arm.ppo_config import (
     IPPOConfig,
     bc_coef_at,
     critic_warmup_active,
@@ -100,16 +108,8 @@ from callosum.configs.ippo import (
     parse_args,
     resolve_episode_length,
 )
-from callosum.envs import _skills_obs
-from callosum.envs._sim_compat import prepare_sim_backend
-from callosum.training._agent_obs import AgentObsBuilder
-from callosum.training._demos import (
-    agent_demo_tensors,
-    check_layout_matches,
-    episode_length_mismatch,
-    load_demos,
-)
-from callosum.training._skills_agent_obs import SkillsObsBuilder
+from callosum.experiments.arm.sim_compat import prepare_sim_backend
+from callosum.experiments.arm.skills_agent_obs import SkillsObsBuilder
 
 AGENT_NAMES = ("agent_a", "agent_b")
 
@@ -876,7 +876,7 @@ def _train(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: `python -m callosum.training.ippo [flags]`."""
+    """CLI entry point: `python -m callosum.experiments.arm.trainer [flags]`."""
     # The server runs this detached under nohup with stdout redirected to a file: flush per line.
     sys.stdout.reconfigure(line_buffering=True)
     run(parse_args(argv))

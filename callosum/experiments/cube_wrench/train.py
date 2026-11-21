@@ -35,7 +35,7 @@ wrench-specific contract around them:
   latent MSE + VICReg terms (`compute_aux_loss`, EMA target, stop-gradient) with their own
   Adam optimizer, `aux_coef * loss` per update, then `update_target()`; the trainer logs
   `aux/*`, `latent/std`, `latent/effective_rank` and a held-out linear-probe quality of `ẑ_j`
-  (`callosum.training._bijepa_probe.ridge_probe`);
+  (`callosum.common.bijepa_probe.ridge_probe`);
 * GAE bootstraps only on time-limit truncations: success and failure are true terminals,
   so the shared success bonus is not fed back through `V(final observation)`
   (`compute_advantages`);
@@ -88,6 +88,7 @@ import torch
 from torch import nn
 
 from callosum.common.bijepa import BiJEPA, latent_stats
+from callosum.common.bijepa_probe import ridge_probe
 from callosum.common.logging import MetricLogger
 from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
 from callosum.experiments.cube_wrench.logic import AGENT_KEYS, obs_size
@@ -98,7 +99,6 @@ from callosum.experiments.cube_wrench.ppo_config import (
     parse_args_with_explicit,
     task_obs_size,
 )
-from callosum.training._bijepa_probe import ridge_probe
 
 CHECKPOINT_FORMAT = 1
 """Format of the trainer's checkpoints: weights, optimizer states, config and counters."""

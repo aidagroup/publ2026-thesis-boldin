@@ -1,4 +1,4 @@
-"""Control-tracking parameters of the scripted FaceTurn expert (`callosum.experts.face_turn_expert`).
+"""Control-tracking parameters of the scripted FaceTurn expert (`callosum.experiments.arm.expert`).
 
 Plain stdlib, no torch / mani_skill, so the validation is unit-testable everywhere. The expert's
 geometry (grasp offsets, tilts, roll angle) lives next to the IK in the expert module; what is
@@ -22,7 +22,7 @@ class ExpertControlConfig:
     direction is kept, so the tool still moves on the straight line the waypoints describe). A
     waypoint counts as reached once every joint of the env is within a tolerance, or the env is
     stalled (blocked by contact or a joint limit), or after a timeout. In delta mode every env
-    runs its own phase state machine (`callosum.experts._phases`): nobody waits for another env.
+    runs its own phase state machine (`callosum.experiments.arm.phases`): nobody waits for another env.
     Under this controller (target = current position + action) a steady disturbance leaves a
     steady-state error, which the integral term (`ki`, `bias_max`) compensates, so the loops end
     by tolerance and not by timeout.

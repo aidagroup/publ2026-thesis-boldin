@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from callosum.configs.face_turn import FaceTurnPhysicsConfig
-from callosum.envs._face_lock import update_face_lock
+from callosum.experiments.arm.face_lock import update_face_lock
+from callosum.experiments.arm.face_turn_config import FaceTurnPhysicsConfig
 
 
 def _state(locked, angle):

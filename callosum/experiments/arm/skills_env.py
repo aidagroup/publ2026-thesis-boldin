@@ -6,8 +6,8 @@ top of FaceTurn's physics plumbing (`TwoSO101Base` + the layer lock generalized 
 `FaceTurn`): one `env.step` is one DECISION -- both policies pick one primitive id each
 (`Dict {"so101_pg-0": Discrete(9), "so101_pg-1": Discrete(7)}`), the choice is executed
 for `decision_period` simulation substeps by the phase machinery of
-`callosum.experts.skills_runtime` (planning from the CURRENT state; a changed choice
-interrupts), and the observation/info contract of `callosum.envs._skills_obs` comes
+`callosum.experiments.arm.skills_runtime` (planning from the CURRENT state; a changed choice
+interrupts), and the observation/info contract of `callosum.experiments.arm.skills_obs` comes
 back: one flat shared vector `[holder_own_block | rotator_own_block]` plus per-agent
 proprioception under the agent keys.
 
@@ -30,7 +30,7 @@ reward per decision is `success_bonus * success - step_penalty` (`SkillsRewardCo
 
 [gpu]: the heavy path (SAPIEN articulation, GPU batched buffers) only runs on Linux;
 this module imports mani_skill at module level and is therefore not importable on
-macOS, exactly like `callosum.envs.face_turn` (see `scripts/smoke_face_turn_skills.py`
+macOS, exactly like `callosum.experiments.arm.face_turn_env` (see `scripts/smoke_face_turn_skills.py`
 for the [cloud] smoke check and `tests/test_face_turn_skills_logic.py` for the pure
 logic).
 """
@@ -45,18 +45,18 @@ import torch
 from mani_skill.utils import common
 from mani_skill.utils.registration import register_env
 
-from callosum.configs.face_turn_skills import FaceTurnSkillsConfig, SkillsRewardConfig
-from callosum.configs.multi_face_cube import MultiFaceCubeConfig
-from callosum.envs._face_lock import update_face_lock
-from callosum.envs._multi_face_cube import build_multi_face_cube
-from callosum.envs._plans import FACES
-from callosum.envs._skills import (
+from callosum.experiments.arm.face_lock import update_face_lock
+from callosum.experiments.arm.scene import NUM_ARM_JOINTS, TwoSO101Base
+from callosum.experiments.arm.skills import (
     ROTATOR_PRIMITIVES,
     Role,
     num_primitives,
     sample_episode_randomization,
 )
-from callosum.envs._skills_obs import (
+from callosum.experiments.arm.skills_config import FaceTurnSkillsConfig, SkillsRewardConfig
+from callosum.experiments.arm.skills_cube import build_multi_face_cube
+from callosum.experiments.arm.skills_cube_config import MultiFaceCubeConfig
+from callosum.experiments.arm.skills_obs import (
     INFO_ACTIVE_LAYER_ANGLE_DEG,
     INFO_PLAN_INDEX,
     INFO_PRIMITIVE_HOLDER,
@@ -67,8 +67,8 @@ from callosum.envs._skills_obs import (
     INFO_USELESS_HOLDER,
     INFO_USELESS_ROTATOR,
 )
-from callosum.envs.two_so101_base import NUM_ARM_JOINTS, TwoSO101Base
-from callosum.experts.skills_runtime import (
+from callosum.experiments.arm.skills_plans import FACES
+from callosum.experiments.arm.skills_runtime import (
     LAYER_DETENTS_RAD,
     STEP_SECONDS,
     DecisionFacts,
@@ -85,7 +85,7 @@ from callosum.robots.so101_parallel_gripper import ARM_DELTA_LIMIT, GRIPPER_MAX_
 
 AGENT_UIDS = ("so101_pg-0", "so101_pg-1")
 """Dict action-space keys: agent_a (holder) first -- the trainer's and eval harness's
-convention (`callosum.training._skills_agent_obs.ROLES`)."""
+convention (`callosum.experiments.arm.skills_agent_obs.ROLES`)."""
 
 _NEAR_TOL = 0.05  # m: a TCP within this of its grasp target counts as "near" (useless facts)
 
@@ -119,7 +119,7 @@ class _EnvInjection(InjectionSource):
     * FaceTurnSkillsConfig().decision_period,
 )
 class FaceTurnSkills(TwoSO101Base):
-    """The skill-level cube assembly; see the module doc and `callosum.envs._skills_obs`.
+    """The skill-level cube assembly; see the module doc and `callosum.experiments.arm.skills_obs`.
 
     One step = one decision (`decision_period` substeps). The observation is the shared
     skills vector (both own blocks, `_get_obs_extra` emits exactly `own_block_key_layout`'s
@@ -131,7 +131,7 @@ class FaceTurnSkills(TwoSO101Base):
     Layer lock (generalized FaceTurn face lock): while the holder does not grasp the
     core, every layer joint is kinematically clamped at the angle latched when the lock
     engaged, after every physics substep (same mechanism and same GPU-buffer caveats as
-    `callosum.envs.face_turn.FaceTurn`; per joint column now).
+    `callosum.experiments.arm.face_turn_env.FaceTurn`; per joint column now).
     """
 
     def __init__(

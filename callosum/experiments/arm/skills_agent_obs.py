@@ -2,7 +2,7 @@
 
 The skills env returns ONE flat state observation per env, shared by both agents:
 ``[holder_own_block | rotator_own_block]`` in the fixed field order of
-`callosum.envs._skills_obs.own_block_fields`, with each agent's proprioception additionally
+`callosum.experiments.arm.skills_obs.own_block_fields`, with each agent's proprioception additionally
 under the obs dict's agent keys (the same shape as FaceTurn-v0). The partner-related block is
 NOT part of that vector (see `_skills_obs`): this module appends it per the partner-visibility
 mode, exactly like the joint-level `_agent_obs` applies `partner_obs` -- masking happens at
@@ -12,7 +12,7 @@ Two layers over the same index constants (`_skills_obs` is the single source of 
 
 * numpy: `extract`, `agent_obs_dim`, `build_agent_obs` -- plain arrays, no torch; this is the
   contract the eval harness and the tests exercise;
-* torch: `SkillsObsBuilder` (used by `callosum.training.ippo`) cuts the same columns out of
+* torch: `SkillsObsBuilder` (used by `callosum.experiments.arm.trainer`) cuts the same columns out of
   the trainer's flat torch observations and appends the same partner block on-device, so GPU
   rollouts never round-trip through numpy.
 
@@ -32,7 +32,7 @@ authoritative source ("a policy never needs the partner's qpos"), the shared vec
 are not trusted. Pass `None` to keep the shared vector's values.
 
 Roles: agent_a = holder, agent_b = rotator (the fixed-role convention of
-`callosum.envs._skills.Role`), so the shared vector's block order matches the agent order.
+`callosum.experiments.arm.skills.Role`), so the shared vector's block order matches the agent order.
 
 The index logic works on anything with a `.shape`; torch is imported lazily by the builder,
 as in `_agent_obs`. No mani_skill import.
@@ -44,12 +44,13 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-from callosum.envs._skills import (
+from callosum.experiments.arm.agent_obs import Layout, check_layout, obs_layout
+from callosum.experiments.arm.skills import (
     Role,
     num_primitives,
     validate_partner_visibility,
 )
-from callosum.envs._skills_obs import (
+from callosum.experiments.arm.skills_obs import (
     INFO_PRIMITIVE_HOLDER,
     INFO_PRIMITIVE_ROTATOR,
     own_block_fields,
@@ -57,7 +58,6 @@ from callosum.envs._skills_obs import (
     own_block_slices,
     policy_input_size,
 )
-from callosum.training._agent_obs import Layout, check_layout, obs_layout
 
 ROLES = (Role.HOLDER, Role.ROTATOR)
 """agent_a's and agent_b's roles, in agent order (fixed-role E1/E2 configuration)."""
@@ -111,7 +111,7 @@ def extract(shared_vec, role: Role) -> np.ndarray:
     if vec.shape[-1] != shared_vec_size():
         raise ValueError(
             f"shared vector has {vec.shape[-1]} columns, expected {shared_vec_size()} "
-            "([holder_own_block | rotator_own_block], see callosum.envs._skills_obs)"
+            "([holder_own_block | rotator_own_block], see callosum.experiments.arm.skills_obs)"
         )
     start = _own_offsets()[role]
     return vec[..., start : start + own_block_size(num_primitives(role))]

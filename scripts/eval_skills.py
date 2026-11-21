@@ -16,12 +16,12 @@ files directly; several at once and/or as glob patterns:
         --checkpoints 'runs/skills_oracle_s*' --partner-mode oracle \
         --episodes 100 --cross-play --recovery --out results.json
 
-Policies are loaded the way `callosum.training.ippo --eval-only` loads them: the actor
+Policies are loaded the way `callosum.experiments.arm.trainer --eval-only` loads them: the actor
 weights come from the checkpoint payload's per-agent state dicts (agent_a = holder,
 agent_b = rotator), driven deterministically. The categorical policies are agent B's
 `callosum.common.categorical.CategoricalPolicy` and the per-agent inputs are cut by
-agent B's `callosum.training._skills_agent_obs.SkillsObsBuilder` (the documented eval
-contract). The env itself is agent A's `callosum.envs.face_turn_skills`, still being
+agent B's `callosum.experiments.arm.skills_agent_obs.SkillsObsBuilder` (the documented eval
+contract). The env itself is agent A's `callosum.experiments.arm.skills_env`, still being
 written in parallel: its module import and the `gym.make` kwargs below carry the remaining
 `TODO(integration)` marks. All heavy imports (torch, gym, mani_skill) stay inside the
 functions so this file remains lintable and importable on macOS.
@@ -55,14 +55,14 @@ from callosum.common.metrics import (
     summarize,
     summary_dict,
 )
-from callosum.envs._skills import (
+from callosum.experiments.arm.skills import (
     PARTNER_VISIBILITY_MODES,
     RandomizationConfig,
     Role,
     num_primitives,
     validate_partner_visibility,
 )
-from callosum.envs._skills_obs import (
+from callosum.experiments.arm.skills_obs import (
     INFO_SUCCESS,
     INFO_TIME_TO_SUCCESS,
     INFO_USELESS_HOLDER,
@@ -138,7 +138,7 @@ def _make_env(args: argparse.Namespace, inject: bool):
     import gymnasium as gym
     import mani_skill.envs  # noqa: F401  (registers the stock ManiSkill envs)
 
-    from callosum.envs._sim_compat import prepare_sim_backend
+    from callosum.experiments.arm.sim_compat import prepare_sim_backend
 
     prepare_sim_backend(args.sim_backend)
     kwargs: dict = {
@@ -227,8 +227,8 @@ def evaluate_pair(
     import numpy as np
     import torch
 
-    import callosum.envs.face_turn_skills  # noqa: F401  TODO(integration): agent A's module
-    from callosum.training._skills_agent_obs import SkillsObsBuilder
+    import callosum.experiments.arm.skills_env  # noqa: F401  TODO(integration): agent A's module
+    from callosum.experiments.arm.skills_agent_obs import SkillsObsBuilder
 
     env = _make_env(args, inject)
     try:

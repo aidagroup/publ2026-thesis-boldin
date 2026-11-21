@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from callosum.experts._noise import perturb_arm_action
+from callosum.experiments.arm.noise import perturb_arm_action
 
 
 def test_noise_touches_only_arm_entries_and_stays_in_range() -> None:

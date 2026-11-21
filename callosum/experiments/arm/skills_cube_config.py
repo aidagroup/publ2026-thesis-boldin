@@ -1,6 +1,6 @@
 """Config of the multi-layer cube: a core body plus six outer layers (E2+).
 
-The generalization of the one-face "turntable" of `callosum.envs._turntable_cube` to
+The generalization of the one-face "turntable" of `callosum.experiments.arm.turntable` to
 every face: the core is the articulation's root link (grasped and flipped by the
 holder), each labeled face U/D/L/R/F/B carries one outer layer on a revolute joint
 whose axis is the face normal in the body frame. Plan moves are executed by turning
@@ -24,7 +24,7 @@ FACE_NORMALS: dict[str, tuple[float, float, float]] = {
     "B": (0.0, -1.0, 0.0),
 }
 """Unit normal of each labeled face in the cube's BODY frame (the same face labeling
-`callosum.envs._plans` uses; the labels travel with the body when it is flipped)."""
+`callosum.experiments.arm.skills_plans` uses; the labels travel with the body when it is flipped)."""
 
 LAYER_JOINT_LIMITS_DEG = (0.0, 180.0)
 """Every layer joint turns clockwise-only [0, 180] deg: a quarter and a half turn are
@@ -104,7 +104,7 @@ def default_layers() -> tuple[LayerSpec, ...]:
 class MultiFaceCubeConfig:
     """Geometry and joint setup of the core-plus-six-layers cube.
 
-    Sizes follow the one-face turntable (`callosum.envs._turntable_cube`): a ~5.7 cm
+    Sizes follow the one-face turntable (`callosum.experiments.arm.turntable`): a ~5.7 cm
     cube (fits the SO-ARM101 workspace) with layers a real third of the edge thick,
     so each layer is pinchable by the parallel gripper.
     """

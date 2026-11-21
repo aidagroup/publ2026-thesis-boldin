@@ -2,7 +2,7 @@
 
 import pytest
 
-from callosum.envs._plans import (
+from callosum.experiments.arm.skills_plans import (
     FACES,
     AssemblyPlan,
     CubeOrientation,

@@ -15,11 +15,11 @@ from mani_skill.utils import common
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 
-from callosum.configs.face_turn import FaceTurnPhysicsConfig, FaceTurnRewardConfig
-from callosum.envs._diag import DIAG_PREFIX
-from callosum.envs._face_lock import update_face_lock
-from callosum.envs._turntable_cube import build_turntable_cube
-from callosum.envs.two_so101_base import TwoSO101Base
+from callosum.common.diag_names import DIAG_PREFIX
+from callosum.experiments.arm.face_lock import update_face_lock
+from callosum.experiments.arm.face_turn_config import FaceTurnPhysicsConfig, FaceTurnRewardConfig
+from callosum.experiments.arm.scene import TwoSO101Base
+from callosum.experiments.arm.turntable import build_turntable_cube
 
 TARGET_FACE_ANGLE = math.pi / 2  # a quarter turn
 _DEFAULT_REWARD_CONFIG = FaceTurnRewardConfig()
@@ -51,11 +51,11 @@ class FaceTurn(TwoSO101Base):
     turning the face by knocking the whole cube around does not count.
 
     `partner_obs` does not change this env's observation (both TCP poses are always in the
-    shared extra-obs dict; who sees which one is decided in `callosum.training._agent_obs`), and
+    shared extra-obs dict; who sees which one is decided in `callosum.experiments.arm.agent_obs`), and
     `compute_dense_reward` / `evaluate` read TCP poses straight off `self.agent_a`/`agent_b`
     (privileged, CTDE-style access).
 
-    Diagnostics: `evaluate` also publishes `diag_*` info keys (see `callosum.envs._diag`): both
+    Diagnostics: `evaluate` also publishes `diag_*` info keys (see `callosum.common.diag_names`): both
     grasps (`diag_holder_grasp`, `diag_rotator_grasp`, `diag_both_grasp`), body position/rotation
     drift, the two TCP-to-target distances, the face angle, and every reward term's contribution
     in normalised-reward units (`diag_r_*`, signed: the drift penalties are negative). They do not

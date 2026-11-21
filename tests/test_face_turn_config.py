@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from callosum.configs.face_turn import FaceTurnRewardConfig
+from callosum.experiments.arm.face_turn_config import FaceTurnRewardConfig
 
 
 def test_defaults() -> None:

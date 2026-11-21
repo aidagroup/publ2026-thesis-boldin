@@ -5,16 +5,16 @@ import math
 
 import pytest
 
-from callosum.configs.bc import BCConfig, parse_args
-from callosum.configs.face_turn_expert import ExpertControlConfig
-from callosum.configs.ippo import (
+from callosum.experiments.arm.bc_config import BCConfig, parse_args
+from callosum.experiments.arm.expert_config import ExpertControlConfig
+from callosum.experiments.arm.ppo_config import (
     IPPOConfig,
     bc_coef_at,
     build_parser,
     critic_warmup_active,
     load_resume_values,
 )
-from callosum.configs.ippo import (
+from callosum.experiments.arm.ppo_config import (
     parse_args as parse_ippo_args,
 )
 

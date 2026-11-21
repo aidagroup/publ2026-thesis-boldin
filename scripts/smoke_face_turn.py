@@ -21,8 +21,8 @@ from mani_skill.utils.structs.pose import Pose
 # @register_env("FaceTurn-v0", ...) decorator. callosum.envs itself stays
 # import-clean on macOS/CI (no mani_skill there), so it deliberately does not
 # re-export this submodule -- see docs/implementation-plan.md section 0.
-import callosum.envs.face_turn  # noqa: F401
-from callosum.envs.face_turn import TARGET_FACE_ANGLE
+import callosum.experiments.arm.face_turn_env  # noqa: F401
+from callosum.experiments.arm.face_turn_env import TARGET_FACE_ANGLE
 
 
 def main() -> None:

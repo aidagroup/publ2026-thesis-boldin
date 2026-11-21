@@ -5,16 +5,9 @@ import pytest
 
 torch = pytest.importorskip("torch")  # only the SkillsObsBuilder half needs it
 
-from callosum.envs._skills import PARTNER_VISIBILITY_MODES, Role, num_primitives
-from callosum.envs._skills_obs import (
-    INFO_PRIMITIVE_HOLDER,
-    INFO_PRIMITIVE_ROTATOR,
-    own_block_size,
-    own_block_slices,
-    policy_input_size,
-)
-from callosum.training._agent_obs import flatten_structured
-from callosum.training._skills_agent_obs import (
+from callosum.experiments.arm.agent_obs import flatten_structured
+from callosum.experiments.arm.skills import PARTNER_VISIBILITY_MODES, Role, num_primitives
+from callosum.experiments.arm.skills_agent_obs import (
     PROPRIO_DIM,
     SkillsObsBuilder,
     agent_obs_dim,
@@ -22,6 +15,13 @@ from callosum.training._skills_agent_obs import (
     extract,
     partner_primitive_key,
     shared_vec_size,
+)
+from callosum.experiments.arm.skills_obs import (
+    INFO_PRIMITIVE_HOLDER,
+    INFO_PRIMITIVE_ROTATOR,
+    own_block_size,
+    own_block_slices,
+    policy_input_size,
 )
 
 UIDS = ("so101_pg-0", "so101_pg-1")

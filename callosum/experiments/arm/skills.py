@@ -12,7 +12,7 @@ the index into its own set. Names shared by both sets ("wait", "grasp", "release
 "retreat") are different primitives per role; the global key is `(role, name)`.
 
 Nothing here imports or reuses the expert's runtime primitives
-(`callosum.experts._phases`): those are executable phase machines (torch-free but
+(`callosum.experiments.arm.phases`): those are executable phase machines (torch-free but
 per-env numpy state). This module is only the *menu* the policy chooses from.
 """
 
@@ -25,7 +25,7 @@ class Role(Enum):
     """Which hand plays which fixed part in the role-split configuration (E1/E2).
 
     agent_a (azimuth -pi/2, the low clamp) is the holder, agent_b the rotator --
-    the same assignment as FaceTurn-v0 (see `callosum.configs.layout.ArmLayout`).
+    the same assignment as FaceTurn-v0 (see `callosum.experiments.arm.layout.ArmLayout`).
     """
 
     HOLDER = "holder"

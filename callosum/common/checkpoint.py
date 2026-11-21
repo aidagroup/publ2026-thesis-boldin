@@ -7,7 +7,7 @@ counters. `ippo --resume <run dir>` restores all of it with `load_training_state
 at any point continues as if it had not been interrupted (the simulator state itself cannot be
 saved; the trainer re-seeds the env resets instead). Format 1 (weights, config and counters only)
 is still read: it is enough for a weights-only warm start (`--checkpoint`, `load_agent_weights`)
-but not for a resume. The BC pretraining (`callosum.training.bc`) writes format 1 too
+but not for a resume. The BC pretraining (`callosum.experiments.arm.bc`) writes format 1 too
 (`save_weights_checkpoint`), with the per-agent input widths and field names added;
 `check_warm_start_compat` compares those and `partner_obs` with the trainer's before the weights
 are loaded, so a checkpoint made for other policy inputs fails loudly.
@@ -24,8 +24,6 @@ from typing import Any
 
 import torch
 from torch import nn
-
-from callosum.configs.ippo import IPPOConfig
 
 CHECKPOINT_FORMAT = 2
 SUPPORTED_FORMATS = (1, 2)
@@ -48,7 +46,7 @@ class TrainingState:
 def save_checkpoint(
     path: Path,
     agents: list[nn.Module],
-    cfg: IPPOConfig,
+    cfg: Any,
     obs_dims: list[int],
     agent_uids: list[str],
     iteration: int,
@@ -100,7 +98,7 @@ def save_weights_checkpoint(
 ) -> None:
     """Write a weights-only checkpoint (format 1) to `path` (atomically).
 
-    This is what `callosum.training.bc` produces: both agents' weights plus the config it was made
+    This is what `callosum.experiments.arm.bc` produces: both agents' weights plus the config it was made
     with (a plain dict, must hold `partner_obs`), the per-agent input widths and field names, and
     free-form `extra` (training statistics). `ippo --checkpoint` loads it as a warm start; it
     holds no optimizer state, so it cannot be resumed.

@@ -8,7 +8,7 @@ torch = pytest.importorskip("torch")  # CI installs only the dev extra; run with
 
 from callosum.common.categorical import CategoricalPolicy
 from callosum.common.ppo_core import ppo_update
-from callosum.configs.ippo import IPPOConfig
+from callosum.experiments.arm.ppo_config import IPPOConfig
 
 
 def test_forward_returns_logits_and_value() -> None:

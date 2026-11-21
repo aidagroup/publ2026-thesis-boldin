@@ -117,7 +117,7 @@ data root (default `~/.callosum`).
 | temporary files (`TMPDIR`) | `/tmp` | no |
 
 A restart therefore costs nothing: open a terminal, `cd ~/callosum`, continue
-(`python -m callosum.training.ippo --resume runs/<name>` continues a killed run from its
+(`python -m callosum.experiments.arm.trainer --resume runs/<name>` continues a killed run from its
 full-state checkpoint). One data root serves one active checkout (the editable install in
 the venv points at the checkout that ran setup last).
 

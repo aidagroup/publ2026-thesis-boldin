@@ -5,7 +5,7 @@ Sections (openspec tasks 2.1/2.5):
      proprioception), the Dict-of-Discrete action space, the info keys;
   2. a short random rollout (garbage decisions must not crash and must report the
      useless-action flags);
-  3. the scripted conductor (oracle info, `callosum.experts.skills_conductor`) on a
+  3. the scripted conductor (oracle info, `callosum.experiments.arm.skills_conductor`) on a
      plan of length 1 and on 2-3 moves: success rate, decisions and sim steps to
      success, useless totals -- the environment's sanity validation;
   4. timing: batch reset and one decision step (the task 2.4 measurement; batched IK
@@ -24,15 +24,15 @@ import numpy as np
 import torch
 from _sim_utils import make_env, parse_args
 
-import callosum.envs.face_turn_skills  # noqa: F401  (registers FaceTurnSkills-v0)
-from callosum.envs._skills_obs import (
+import callosum.experiments.arm.skills_env  # noqa: F401  (registers FaceTurnSkills-v0)
+from callosum.experiments.arm.skills_agent_obs import SkillsObsBuilder
+from callosum.experiments.arm.skills_conductor import SkillsConductor
+from callosum.experiments.arm.skills_obs import (
     INFO_SUCCESS,
     INFO_TIME_TO_SUCCESS,
     INFO_USELESS_HOLDER,
     INFO_USELESS_ROTATOR,
 )
-from callosum.experts.skills_conductor import SkillsConductor
-from callosum.training._skills_agent_obs import SkillsObsBuilder
 
 
 def _extra_flags(parser):

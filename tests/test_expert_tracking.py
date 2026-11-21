@@ -1,14 +1,14 @@
 """Delta-mode tracking logic of the scripted expert: action, integral bias, reach monitoring.
 
-Everything here is numpy only (`callosum.experts._tracking`, `callosum.configs.face_turn_expert`),
+Everything here is numpy only (`callosum.experiments.arm.tracking`, `callosum.experiments.arm.expert_config`),
 so it runs on macOS and in CI without the simulator.
 """
 
 import numpy as np
 import pytest
 
-from callosum.configs.face_turn_expert import ExpertControlConfig
-from callosum.experts._tracking import (
+from callosum.experiments.arm.expert_config import ExpertControlConfig
+from callosum.experiments.arm.tracking import (
     ReachMonitor,
     describe_progress,
     effective_tol,

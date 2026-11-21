@@ -9,8 +9,8 @@ while its jaws are closed. The expert's own tracking functions drive it, exactly
 import numpy as np
 import pytest
 
-from callosum.configs.face_turn_expert import ExpertControlConfig
-from callosum.experts._phases import (
+from callosum.experiments.arm.expert_config import ExpertControlConfig
+from callosum.experiments.arm.phases import (
     STALL,
     TIMEOUT,
     TOL,
@@ -22,7 +22,7 @@ from callosum.experts._phases import (
     TrackPath,
     started,
 )
-from callosum.experts._program import (
+from callosum.experiments.arm.program import (
     HALF_TURN,
     HOLDER_CLOSE,
     HOLDER_GRASP,
@@ -36,7 +36,7 @@ from callosum.experts._program import (
     ExpertPlan,
     build_programs,
 )
-from callosum.experts._tracking import noise_jitter, tracking_action, update_bias
+from callosum.experiments.arm.tracking import noise_jitter, tracking_action, update_bias
 
 LIMIT = 0.05
 STEP_FRACTION = 0.39
@@ -310,7 +310,7 @@ def test_a_primitive_can_be_reused_with_a_live_planner_and_a_custom_gate() -> No
 
     go = TrackPath(n, "go", live_planner, settle=0)
     close = Grip(n, "close", -1.0, 20)
-    from callosum.experts._phases import PhaseSpec
+    from callosum.experiments.arm.phases import PhaseSpec
 
     programs = [[PhaseSpec(go)], [PhaseSpec(close, gate=started("go"))]]
     ctx = Context(cfg, plant.cmd, plant.observe())

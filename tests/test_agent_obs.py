@@ -1,6 +1,6 @@
 """Per-agent policy inputs of the IPPO trainer (step 2.1): shapes, content, partner leakage.
 
-`callosum.training._agent_obs` has no mani_skill dependency and its index logic no torch
+`callosum.experiments.arm.agent_obs` has no mani_skill dependency and its index logic no torch
 dependency, so most of this runs in CI (numpy only); the tests that slice real tensors are
 skipped when torch is absent. The structured observations mirror what the real envs return
 for `obs_mode="state"` (checked on the Mac CPU sim): per-uid `qpos` (7) / `qvel` (7), `extra`
@@ -11,7 +11,7 @@ with both TCP poses (always, under either `partner_obs`), `cube_pose` (7) and, f
 import numpy as np
 import pytest
 
-from callosum.training._agent_obs import (
+from callosum.experiments.arm.agent_obs import (
     AGENT_UIDS,
     AgentObsBuilder,
     obs_layout,
@@ -232,7 +232,7 @@ def test_none_input_content_is_own_proprio_own_tcp_then_shared_state() -> None:
 
 def test_check_layout_catches_wrong_order_and_size() -> None:
     torch = pytest.importorskip("torch")
-    from callosum.training._agent_obs import check_layout, flatten_structured
+    from callosum.experiments.arm.agent_obs import check_layout, flatten_structured
 
     structured = {k: v for k, v in make_obs("full").items()}
     tensors = {

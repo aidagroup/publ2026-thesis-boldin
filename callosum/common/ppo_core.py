@@ -2,16 +2,16 @@
 
 The network, the GAE recursion (with the `final_values` bootstrap across partial resets) and the
 clipped-surrogate update are those of ManiSkill's `examples/baselines/ppo/ppo.py` @ v3.0.1.
-They live apart from `callosum.training.ippo` because that module needs ManiSkill (not
+They live apart from `callosum.experiments.arm.trainer` because that module needs ManiSkill (not
 importable on macOS/CI) while this one is unit-testable everywhere.
 """
+
+from typing import Any
 
 import numpy as np
 import torch
 from torch import nn
 from torch.distributions.normal import Normal
-
-from callosum.configs.ippo import IPPOConfig
 
 
 def layer_init(layer: nn.Linear, std: float = float(np.sqrt(2)), bias_const: float = 0.0):
@@ -115,7 +115,7 @@ def bc_mse(agent: ActorCritic, obs: torch.Tensor, actions: torch.Tensor) -> torc
 
 
 def _value_loss(
-    new_value: torch.Tensor, batch: dict[str, torch.Tensor], idx: torch.Tensor, cfg: IPPOConfig
+    new_value: torch.Tensor, batch: dict[str, torch.Tensor], idx: torch.Tensor, cfg: Any
 ) -> torch.Tensor:
     """The (optionally clipped) value loss of one minibatch, as in ManiSkill's PPO."""
     returns = batch["returns"][idx]
@@ -130,7 +130,7 @@ def ppo_update(
     agent: ActorCritic,
     optimizer: torch.optim.Optimizer,
     batch: dict[str, torch.Tensor],
-    cfg: IPPOConfig,
+    cfg: Any,
     *,
     update_actor: bool = True,
     demo_batch: dict[str, torch.Tensor] | None = None,

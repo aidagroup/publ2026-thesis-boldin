@@ -1,12 +1,12 @@
 """Behaviour-cloning pretraining of the two IPPO actor-critics from scripted-expert demonstrations.
 
-Run as `python -m callosum.training.bc --demos runs/demos/X.pt --partner-obs full --exp-name NAME`
-(flags: `--help`, defaults: `callosum.configs.bc.BCConfig`). No simulator is needed (the demo file
+Run as `python -m callosum.experiments.arm.bc --demos runs/demos/X.pt --partner-obs full --exp-name NAME`
+(flags: `--help`, defaults: `callosum.experiments.arm.bc_config.BCConfig`). No simulator is needed (the demo file
 carries the observation layout), so it runs on CPU in the macOS project venv as well as on the GPU
 server.
 
 Why: IPPO from scratch never finds a grasp on FaceTurn-v0 (diagnostics of a 10M-step run: no arm
-ever grasps anything). The scripted expert (`callosum.experts.face_turn_expert`) does, so the
+ever grasps anything). The scripted expert (`callosum.experiments.arm.expert`) does, so the
 policies start from its demonstrations (`scripts/collect_demos.py`) and PPO fine-tunes from there
 (`ippo --checkpoint <run>/bc.pt`, optionally with `--critic-warmup-iters` and the auxiliary demo
 loss `--demos/--bc-coef`).
@@ -41,9 +41,9 @@ import torch
 
 from callosum.common.checkpoint import AGENT_NAMES, save_weights_checkpoint
 from callosum.common.ppo_core import ActorCritic
-from callosum.configs.bc import BCConfig, parse_args
-from callosum.training._agent_obs import AgentObsBuilder
-from callosum.training._demos import (
+from callosum.experiments.arm.agent_obs import AgentObsBuilder
+from callosum.experiments.arm.bc_config import BCConfig, parse_args
+from callosum.experiments.arm.demos import (
     agent_demo_tensors,
     discounted_returns,
     layout_from_meta,
@@ -311,7 +311,7 @@ def run(cfg: BCConfig) -> Path:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: `python -m callosum.training.bc [flags]`."""
+    """CLI entry point: `python -m callosum.experiments.arm.bc [flags]`."""
     sys.stdout.reconfigure(line_buffering=True)
     run(parse_args(argv))
 

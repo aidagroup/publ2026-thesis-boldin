@@ -1,7 +1,7 @@
 """Unit tests of the FaceTurnSkills pure logic (config, runtime, conductor).
 
-Everything here imports ONLY the macOS-safe modules (`callosum.configs.face_turn_skills`,
-`callosum.experts.skills_runtime`, `callosum.experts.skills_conductor`, the `_skills*`
+Everything here imports ONLY the macOS-safe modules (`callosum.experiments.arm.skills_config`,
+`callosum.experiments.arm.skills_runtime`, `callosum.experiments.arm.skills_conductor`, the `_skills*`
 contracts): no mani_skill / sapien / torch anywhere, per the project's standing rule
 (the env module itself is exercised by the [cloud] smoke script).
 
@@ -16,12 +16,12 @@ import math
 import numpy as np
 import pytest
 
-from callosum.configs.face_turn_skills import FaceTurnSkillsConfig, SkillsRewardConfig
-from callosum.envs._plans import FACES, CubeOrientation, Flip, PlanMove
-from callosum.envs._skills import Role, num_primitives
-from callosum.envs._skills_obs import own_block_size, own_block_slices
-from callosum.experts.skills_conductor import HOLDER_ID, ROTATOR_ID, SkillsConductor
-from callosum.experts.skills_runtime import (
+from callosum.experiments.arm.skills import Role, num_primitives
+from callosum.experiments.arm.skills_conductor import HOLDER_ID, ROTATOR_ID, SkillsConductor
+from callosum.experiments.arm.skills_config import FaceTurnSkillsConfig, SkillsRewardConfig
+from callosum.experiments.arm.skills_obs import own_block_size, own_block_slices
+from callosum.experiments.arm.skills_plans import FACES, CubeOrientation, Flip, PlanMove
+from callosum.experiments.arm.skills_runtime import (
     DecisionFacts,
     RuntimeView,
     SkillsRuntime,
@@ -218,7 +218,7 @@ def test_flip_macro_holds_the_cube_through_the_flip() -> None:
     press the cube onto the table), re-centres it, then RELEASES it onto the
     lower jaw: the tine ride keeps the layer lock open through contact and
     gives the rotator the low rim where its vertical-finger grasp is feasible."""
-    from callosum.experts.skills_runtime import Sequence
+    from callosum.experiments.arm.skills_runtime import Sequence
 
     runtime = SkillsRuntime(1)
     for name in ("flip90", "flip180"):
@@ -324,7 +324,7 @@ def test_up_face_and_orientation_from_quat() -> None:
 
 
 def test_own_block_key_layout_matches_the_contract() -> None:
-    from callosum.envs._skills_obs import own_block_fields
+    from callosum.experiments.arm.skills_obs import own_block_fields
 
     for role, n_own in ((Role.HOLDER, N_HOLDER), (Role.ROTATOR, N_ROTATOR)):
         layout = own_block_key_layout(role)
@@ -339,7 +339,7 @@ def test_own_block_key_layout_matches_the_contract() -> None:
 
 def test_own_block_assembly_through_the_trainer_contract() -> None:
     """Marker values written per `own_block_slices` survive the trainer's slicing."""
-    from callosum.training._skills_agent_obs import build_agent_obs, extract, shared_vec_size
+    from callosum.experiments.arm.skills_agent_obs import build_agent_obs, extract, shared_vec_size
 
     shared = np.zeros((1, shared_vec_size()), dtype=np.float32)
     for role, n_own, face in ((Role.HOLDER, N_HOLDER, 3), (Role.ROTATOR, N_ROTATOR, 1)):
@@ -626,9 +626,9 @@ def test_plan_move_face_matches_onehot_order() -> None:
 
 
 def test_env_module_imports_resolve() -> None:
-    """Every `from X import name` in face_turn_skills.py must exist in X.
+    """Every `from X import name` in skills_env.py must exist in X.
 
-    face_turn_skills.py imports mani_skill at module level, so macOS never executes
+    skills_env.py imports mani_skill at module level, so macOS never executes
     its imports in tests -- this static check catches wrong-module imports (the
     review blocker: `own_block_key_layout` imported from `_skills_obs` instead of
     `skills_runtime`) before the cloud run does.
@@ -637,9 +637,9 @@ def test_env_module_imports_resolve() -> None:
     import importlib
     from pathlib import Path
 
-    import callosum.envs
+    import callosum.experiments.arm
 
-    env_path = Path(callosum.envs.__file__).parent / "face_turn_skills.py"
+    env_path = Path(callosum.experiments.arm.__file__).parent / "skills_env.py"
     tree = ast.parse(env_path.read_text())
     checked = 0
     for node in ast.walk(tree):
@@ -663,7 +663,7 @@ def test_orientation_from_quat_degenerate_45deg() -> None:
     """A mid-flip 45-deg quaternion must still yield a valid permutation."""
     import numpy as np
 
-    from callosum.experts.skills_runtime import orientation_from_quat
+    from callosum.experiments.arm.skills_runtime import orientation_from_quat
 
     half = np.cos(np.pi / 4)
     quat = (half, half, 0.0, 0.0)  # 90 deg about +x == two 45-deg assignments meet

@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 
-from callosum.training._demos import (
+from callosum.experiments.arm.demos import (
     check_layout_matches,
     discounted_returns,
     episode_length_mismatch,
@@ -73,7 +73,7 @@ def test_layout_meta_round_trip_and_match_check() -> None:
 
 torch = pytest.importorskip("torch")  # the rest needs tensors
 
-from callosum.training._demos import (
+from callosum.experiments.arm.demos import (
     assemble_demos,
     load_demos,
     save_demos,

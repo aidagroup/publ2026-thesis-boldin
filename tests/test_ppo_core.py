@@ -13,7 +13,7 @@ from callosum.common.checkpoint import (
     save_checkpoint,
 )
 from callosum.common.ppo_core import ActorCritic, compute_gae, ppo_update
-from callosum.configs.ippo import IPPOConfig
+from callosum.experiments.arm.ppo_config import IPPOConfig
 
 
 def test_gae_matches_discounted_return_without_values() -> None:

@@ -3,10 +3,10 @@
 The readiness check for step 1.5, and a worked example of a feasible strategy. There is no
 teleporting or pinning of anything: both arms are driven only through their joint controllers
 and the cube is only ever touched by the grippers. The strategy itself lives in
-`callosum.experts.face_turn_expert` (shared with `scripts/collect_demos.py`); `--control delta`
+`callosum.experiments.arm.expert` (shared with `scripts/collect_demos.py`); `--control delta`
 runs it under the training controller (`pd_joint_delta_pos`) instead of `pd_joint_pos`.
 
-Strategy (arms stand 90 degrees apart around the cube, see `callosum.configs.layout`):
+Strategy (arms stand 90 degrees apart around the cube, see `callosum.experiments.arm.layout`):
 
   1. `holder pregrasp`, `holder grasp`: the holder (agent_a) comes in low and almost horizontal,
      fingers pointing at the cube 10 degrees below horizontal and jaws open horizontally across
@@ -35,7 +35,7 @@ disables the rule (for the record: what the rotator alone can do without it), an
 prints `face_lock_steps`, the control steps each env spent locked, which on the GPU shows that the
 lock acts per env.
 
-With `--control delta` every env runs its own phase state machine (`callosum.experts._phases`):
+With `--control delta` every env runs its own phase state machine (`callosum.experiments.arm.phases`):
 no env waits for another one. A status report is printed once per phase, when half of the envs
 have completed it (a snapshot of all envs at that moment, so envs are in different phases), and at
 the end the per-phase distribution of the env step at which each env completed the phase (min /
@@ -57,11 +57,11 @@ import torch
 from _sim_utils import make_env, parse_args
 from mani_skill.utils import common
 
-import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-from callosum.configs.face_turn import FaceTurnPhysicsConfig
-from callosum.configs.face_turn_expert import CONTROL_MODES, ExpertControlConfig
-from callosum.envs.face_turn import TARGET_FACE_ANGLE
-from callosum.experts.face_turn_expert import ArmModel, Rig, run_expert
+import callosum.experiments.arm.face_turn_env  # noqa: F401  (registers FaceTurn-v0)
+from callosum.experiments.arm.expert import ArmModel, Rig, run_expert
+from callosum.experiments.arm.expert_config import CONTROL_MODES, ExpertControlConfig
+from callosum.experiments.arm.face_turn_config import FaceTurnPhysicsConfig
+from callosum.experiments.arm.face_turn_env import TARGET_FACE_ANGLE
 
 
 def report(rig: Rig, phase: str) -> dict:

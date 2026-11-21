@@ -3,7 +3,7 @@
 What the clip shows
 -------------------
 `FaceTurn-v0` from this repository driven by the scripted two-arm expert
-(`callosum.experts.face_turn_expert`): the holder SO-ARM101 clamps the cube body, then the
+(`callosum.experiments.arm.expert`): the holder SO-ARM101 clamps the cube body, then the
 rotator SO-ARM101 clamps the turnable top face and rolls its wrist 90 degrees, and the
 holder keeps the body still. The env reports success at about step 330 and the expert opens
 the jaws at about step 350. This is the "real robotics" companion clip of the thesis demo:
@@ -115,7 +115,7 @@ frames both arm bases and the cube at 640x480 with a 0.85 rad fov."""
 DEFAULT_FOV = 0.85
 
 CUBE_HALF_SIZE = 0.0285
-"""Half edge length of the turntable cube (`callosum.envs._turntable_cube`)."""
+"""Half edge length of the turntable cube (`callosum.experiments.arm.turntable`)."""
 FACE_THICKNESS = 2 * CUBE_HALF_SIZE / 3
 """Thickness of the turnable top face."""
 FACE_MARKER_LOCAL = ([0.013, 0.0, FACE_THICKNESS / 2 + 0.0015], [0.0, 0.0, 0.0, 1.0])
@@ -369,11 +369,11 @@ def _run_demo(args: argparse.Namespace) -> dict:
     from mani_skill.utils.registration import register_env
     from mani_skill.utils.structs.pose import Pose as MSPose
 
-    import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-    from callosum.configs.face_turn import FaceTurnPhysicsConfig
-    from callosum.configs.face_turn_expert import ExpertControlConfig
-    from callosum.envs.face_turn import FaceTurn
-    from callosum.experts.face_turn_expert import ArmModel, Rig, run_expert
+    import callosum.experiments.arm.face_turn_env  # noqa: F401  (registers FaceTurn-v0)
+    from callosum.experiments.arm.expert import ArmModel, Rig, run_expert
+    from callosum.experiments.arm.expert_config import ExpertControlConfig
+    from callosum.experiments.arm.face_turn_config import FaceTurnPhysicsConfig
+    from callosum.experiments.arm.face_turn_env import FaceTurn
 
     camera_config = CameraConfig(
         uid="demo_camera",

@@ -1,6 +1,6 @@
 """Bookkeeping of the FaceTurn "face lock" as pure array logic (no mani_skill/torch import).
 
-The rule (see `callosum.envs.face_turn.FaceTurn`): while the holder does not grasp the cube
+The rule (see `callosum.experiments.arm.face_turn_env.FaceTurn`): while the holder does not grasp the cube
 body, the face joint is held at the angle it had when the lock engaged; while the holder
 grasps, the face is free. The state is two per-env arrays: a boolean `locked` and the float
 `lock_angle` to hold. The helper only uses elementwise operators that behave the same on numpy

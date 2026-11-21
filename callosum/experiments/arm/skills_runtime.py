@@ -1,7 +1,7 @@
 """Skill-level primitive runtime: turns discrete primitive choices into joint commands.
 
-The adapter between the skill action space (`callosum.envs._skills` registries) and the
-executable phase machinery of `callosum.experts._phases`: the ENV decodes each decision
+The adapter between the skill action space (`callosum.experiments.arm.skills` registries) and the
+executable phase machinery of `callosum.experiments.arm.phases`: the ENV decodes each decision
 into per-arm primitive ids, and this module keeps, per arm and per env, WHICH primitive
 is currently selected, starts a fresh one when the choice changes (planning from the
 CURRENT physical state -- never from a pose fixed at reset), interrupts the old one,
@@ -9,7 +9,7 @@ steps the running primitives after every simulation substep, and turns the comma
 targets into `pd_joint_delta_pos` actions with the episode's speed multipliers.
 
 Importability follows the `_phases` rule (numpy + stdlib at module level, testable on
-macOS): the scipy IK (`callosum.experts.face_turn_expert.ArmModel`) is imported lazily
+macOS): the scipy IK (`callosum.experiments.arm.expert.ArmModel`) is imported lazily
 inside the planners, which only run inside the simulator process. The pure pieces --
 the decision/interruption machine, the useless-action classifier, the layer-target and
 orientation math, the own-block layout helper -- are exercised by
@@ -26,16 +26,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from callosum.configs.face_turn_expert import ExpertControlConfig
-from callosum.envs._plans import _FACE_VECTORS, CubeOrientation
-from callosum.envs._skills import (
-    HOLDER_PRIMITIVES,
-    ROTATOR_PRIMITIVES,
-    Role,
-    num_primitives,
-)
-from callosum.envs._skills_obs import own_block_fields
-from callosum.experts._phases import (
+from callosum.experiments.arm.expert_config import ExpertControlConfig
+from callosum.experiments.arm.phases import (
     Commands,
     Context,
     Grip,
@@ -43,7 +35,15 @@ from callosum.experts._phases import (
     Primitive,
     TrackPath,
 )
-from callosum.experts._tracking import tracking_action, update_bias
+from callosum.experiments.arm.skills import (
+    HOLDER_PRIMITIVES,
+    ROTATOR_PRIMITIVES,
+    Role,
+    num_primitives,
+)
+from callosum.experiments.arm.skills_obs import own_block_fields
+from callosum.experiments.arm.skills_plans import _FACE_VECTORS, CubeOrientation
+from callosum.experiments.arm.tracking import tracking_action, update_bias
 
 NUM_ARM_JOINTS = 5
 GRIPPER_OPEN, GRIPPER_CLOSED = 1.0, -1.0
@@ -54,11 +54,11 @@ PATH_STEPS = 8  # IK waypoints on each straight-line leg
 STEP_SECONDS = 0.05
 """One control substep's duration (s): decision_period=20 steps ~ 1 s, sized on the
 A40 probe so a 150-decision episode spans a multi-move plan (see
-`callosum.configs.face_turn_skills`). Used only to convert the randomization's
+`callosum.experiments.arm.skills_config`). Used only to convert the randomization's
 start-delay seconds into substeps.
 TODO(review): read the real control-step dt on the first cloud probe instead."""
 
-# Strategy geometry, copied from `callosum.experts.face_turn_expert` (whose module pulls
+# Strategy geometry, copied from `callosum.experiments.arm.expert` (whose module pulls
 # torch/mani_skill at import time and so cannot be imported here). Metres / radians.
 HOLDER_GRASP_OFFSET = 0.02  # holder TCP this far from the cube centre, towards the holder
 HOLDER_GRASP_Z = -0.005  # TCP height offset from the cube centre (the core's equator)
@@ -209,7 +209,7 @@ def own_block_key_layout(role: Role) -> tuple[tuple[str, int], ...]:
 
     `_get_obs_extra` emits exactly these keys in this order (holder block first, then
     the rotator's), so the flattened state observation carries the shared skills vector
-    `[holder_own_block | rotator_own_block]` that `callosum.training._skills_agent_obs`
+    `[holder_own_block | rotator_own_block]` that `callosum.experiments.arm.skills_agent_obs`
     expects (all non-agent fields contiguous, width `shared_vec_size()`).
     """
     prefix = "holder_" if role is Role.HOLDER else "rotator_"
@@ -718,7 +718,7 @@ class SkillsRuntime:
     def _arm_model(self):
         """The numpy FK/IK model of the SO-ARM101 (lazy: scipy + URDF, sim machines only)."""
         if self._model is None:
-            from callosum.experts.face_turn_expert import ArmModel
+            from callosum.experiments.arm.expert import ArmModel
 
             self._model = ArmModel()
         return self._model

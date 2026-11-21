@@ -9,7 +9,7 @@ import argparse
 
 import gymnasium as gym
 
-from callosum.envs._sim_compat import is_cpu_backend, prepare_sim_backend
+from callosum.experiments.arm.sim_compat import is_cpu_backend, prepare_sim_backend
 
 
 def parse_args(description: str, extra_args=None) -> argparse.Namespace:

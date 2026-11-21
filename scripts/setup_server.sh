@@ -703,8 +703,8 @@ else:
 
 # --- our environments (need mani_skill, so untestable on macOS) --------------
 import callosum
-import callosum.envs.face_turn  # noqa: F401  (registers FaceTurn-v0)
-import callosum.envs.two_so101_base  # noqa: F401  (registers TwoSO101-v0)
+import callosum.experiments.arm.face_turn_env  # noqa: F401  (registers FaceTurn-v0)
+import callosum.experiments.arm.scene  # noqa: F401  (registers TwoSO101-v0)
 from mani_skill.utils.registration import REGISTERED_ENVS
 
 for env_id in ("TwoSO101-v0", "FaceTurn-v0"):

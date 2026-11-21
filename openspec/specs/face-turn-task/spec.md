@@ -45,7 +45,7 @@
 
 ### Requirement: Термы награды с гейтами
 
-`normalized_dense` награда SHALL быть суммой термов с весами в конфиге (`callosum/configs/face_turn.py`): reach holder→корпус (1) + reach rotator→грань (1) + захват корпуса holder'ом (1) + захват грани rotator'ом (1) + прогресс угла (3) − штраф за смещение корпуса (5) − штраф за поворот корпуса (5); нормировка на сумму положительных весов (7).
+`normalized_dense` награда SHALL быть суммой термов с весами в конфиге (`callosum/experiments/arm/face_turn_config.py`): reach holder→корпус (1) + reach rotator→грань (1) + захват корпуса holder'ом (1) + захват грани rotator'ом (1) + прогресс угла (3) − штраф за смещение корпуса (5) − штраф за поворот корпуса (5); нормировка на сумму положительных весов (7).
 
 - **Гейты по захвату holder'а** (`gate_rotator_on_holder`): награда за захват грани и прогресс угла rotator'а умножаются на `gate = floor + (1 − floor)·holder_grasp`; reach rotator'а не гейтится.
 - Захват грани — мягкий гейт, `rotator_grasp_gate_floor = 0.5` (иначе rotator не имеет градиента захвата, пока holder не научился, а мерцание `is_grasping` при вращении даёт мерцающую награду).

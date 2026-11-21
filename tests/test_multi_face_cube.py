@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from callosum.configs.multi_face_cube import (
+from callosum.experiments.arm.skills_cube_config import (
     FACE_NORMALS,
     LAYER_JOINT_LIMITS_DEG,
     LayerSpec,

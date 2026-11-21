@@ -11,7 +11,7 @@ Where the rule lives: with obs_mode="state" ManiSkill flattens the env's extra-o
 ONE tensor shared by both agents, so the env itself cannot hide anything from one agent. The
 env therefore ALWAYS emits both agents' TCP poses (`tcp_pose_fields`) and `partner_obs` no
 longer changes the env's observation. The visibility rule is `tcp_pose_visible`, applied by the
-per-agent input builder `callosum.training._agent_obs`:
+per-agent input builder `callosum.experiments.arm.agent_obs`:
 
 * an agent's OWN TCP pose is always in its input (under both modes -- otherwise "none" would
   also take away the agent's own end-effector position, which is not partner information);

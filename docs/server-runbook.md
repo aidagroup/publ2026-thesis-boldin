@@ -186,7 +186,7 @@ rule, `--face-friction` / `--face-damping` override the face joint.
 
 | Question | Where | If it fails |
 |---|---|---|
-| Do both arms reach the cube in the 90-degree layout (holder 0.32 m on -y, rotator 0.24 m on +x, `ArmLayout` in `callosum/configs/layout.py`)? Can check on the Mac CPU sim. | `smoke_env.py`, `probe_face_turn.py` | adjust the radii/azimuths in `ArmLayout`; SO-101 top-down reach at cube height is ~0.27 m |
+| Do both arms reach the cube in the 90-degree layout (holder 0.32 m on -y, rotator 0.24 m on +x, `ArmLayout` in `callosum/experiments/arm/layout.py`)? Can check on the Mac CPU sim. | `smoke_env.py`, `probe_face_turn.py` | adjust the radii/azimuths in `ArmLayout`; SO-101 top-down reach at cube height is ~0.27 m |
 | Can a holder and a rotator arm do the face turn together without colliding (holder clamps the body, rotator clamps the face and rolls 90 degrees, body stays put)? Can check on the Mac CPU sim. | `probe_face_turn.py` | check which arm links collide (the wrist housings are 12.8 cm wide); adjust the layout or the probe's grasp parameters |
 | Does the face articulation look/behave right (no jitter, face sits on the body)? | `smoke_face_turn.py` | check `disable_self_collisions`; review the joint pose |
 | Are the joint friction/damping sane at cube scale? | `smoke_face_turn.py` | tune `face_friction`/`face_damping` in `FaceTurnPhysicsConfig` |
@@ -197,12 +197,12 @@ Record the actual printed output; it is the evidence that phase 1 works.
 
 ### 3. First training run — the "does it learn at all" gate
 
-The trainer is `callosum/training/ippo.py` (step 2.1): two independent PPO learners, one per
+The trainer is `callosum/experiments/arm/trainer.py` (step 2.1): two independent PPO learners, one per
 arm, on one shared GPU simulation (details in its module docstring; every flag is a field of
-`callosum/configs/ippo.py`, `--help` lists them). Both arms train on the env's shared
+`callosum/experiments/arm/ppo_config.py`, `--help` lists them). Both arms train on the env's shared
 *normalised dense* reward; each arm's policy input is cut out of the flat state observation
 (own joint state, own TCP pose, task state, plus the partner's TCP pose only for `--partner-obs full`), see
-`callosum/training/_agent_obs.py`. It prints, at start, the exact input fields of each arm: check
+`callosum/experiments/arm/agent_obs.py`. It prints, at start, the exact input fields of each arm: check
 that the lines look right before trusting a long run.
 
 Defaults worth knowing: `--num-envs 256` (raise on the A100 once it runs), `--num-steps 100`
@@ -220,14 +220,14 @@ source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
 
 # 1. Sanity: reach only. 1M steps = 39 iterations (a few minutes on the A100).
 NAME=twoso101_sanity; mkdir -p runs/$NAME
-setsid nohup uv run python -m callosum.training.ippo \
+setsid nohup uv run python -m callosum.experiments.arm.trainer \
     --env-id TwoSO101-v0 --total-timesteps 1000000 --exp-name $NAME \
     > runs/$NAME/stdout.log 2>&1 < /dev/null &
 echo $! > runs/$NAME/pid
 
 # 2. The real target, after the sanity run shows a rising reward.
 NAME=faceturn_s1; mkdir -p runs/$NAME
-setsid nohup uv run python -m callosum.training.ippo \
+setsid nohup uv run python -m callosum.experiments.arm.trainer \
     --env-id FaceTurn-v0 --total-timesteps 10000000 --seed 1 --exp-name $NAME \
     > runs/$NAME/stdout.log 2>&1 < /dev/null &
 echo $! > runs/$NAME/pid
@@ -249,7 +249,7 @@ iteration). `ret`/`succ` are the
 training episodes that finished during the iteration (`n` = how many; `ret -` / `n=0` until the
 first one ends, and `ret`/`succ` then keep their last value). On `FaceTurn-v0` `ret` and
 `eval_ret` include the one-step success bonus (`success_bonus`, 100 in normalised units, see
-`callosum/configs/face_turn.py`), so a successful episode adds about 100 to its return and
+`callosum/experiments/arm/face_turn_config.py`), so a successful episode adds about 100 to its return and
 numbers are **not comparable with runs from before the bonus** (those had `ret` of 12 to 57
 late in training; successful episodes ended early and collected less); judge such runs by
 `succ` / `eval_succ` and `success_at_end`. Success is also a true terminal for value
@@ -295,11 +295,11 @@ setsid nohup bash -c '
 for SEED in 1 2 3; do
   NAME=faceturn_v2_s$SEED; mkdir -p runs/$NAME
   if [ -f runs/$NAME/latest.pt ]; then
-    uv run python -m callosum.training.ippo --resume runs/$NAME \
+    uv run python -m callosum.experiments.arm.trainer --resume runs/$NAME \
         >> runs/$NAME/stdout.log 2>&1 < /dev/null
   else
     rm -rf runs/$NAME; mkdir -p runs/$NAME   # a run killed before its first latest.pt
-    uv run python -m callosum.training.ippo --env-id FaceTurn-v0 \
+    uv run python -m callosum.experiments.arm.trainer --env-id FaceTurn-v0 \
         --total-timesteps 30000000 --seed $SEED --exp-name $NAME \
         > runs/$NAME/stdout.log 2>&1 < /dev/null
   fi
@@ -310,7 +310,7 @@ echo $! > runs/faceturn_v2_driver.pid
 
 Watch the current seed with `tail -f runs/faceturn_v2_s1/stdout.log` (then `_s2`, `_s3`). To
 stop: first `kill $(cat runs/faceturn_v2_driver.pid)` (the driver, so no further seed starts),
-then `pkill -TERM -f "python -m callosum.training.ippo"` (polite stop of the running seed); the
+then `pkill -TERM -f "python -m callosum.experiments.arm.trainer"` (polite stop of the running seed); the
 `tar` step is skipped in that case, archive by hand. Do not run `update_server.sh` mid-job
 (later seeds would import the new code).
 
@@ -319,7 +319,7 @@ verified with before the server run):
 
 ```bash
 PYTHONPATH=. uv run -q --no-project --python 3.12 --with mani-skill==3.0.1 --with torch --with tensorboard \
-    python -m callosum.training.ippo --env-id FaceTurn-v0 --sim-backend cpu --num-envs 1 \
+    python -m callosum.experiments.arm.trainer --env-id FaceTurn-v0 --sim-backend cpu --num-envs 1 \
     --total-timesteps 600 --num-minibatches 4 --eval-freq 3 --exp-name smoke   # then: rm -r runs/smoke
 ```
 
@@ -363,7 +363,7 @@ two runs are in section 3; the pattern is):
 source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
 NAME=<run name>                               # one directory per run
 mkdir -p runs/$NAME
-setsid nohup uv run python -m callosum.training.ippo \
+setsid nohup uv run python -m callosum.experiments.arm.trainer \
     --env-id <env> --exp-name $NAME [flags] \
     > runs/$NAME/stdout.log 2>&1 < /dev/null &
 echo $! > runs/$NAME/pid                      # best effort; see pgrep below
@@ -375,7 +375,7 @@ Check and stop it:
 tail -f runs/$NAME/stdout.log                 # Ctrl-C leaves the run alone
 pgrep -af callosum.training                   # alive? (pid, command line)
 nvidia-smi                                    # GPU utilisation and memory
-pkill -TERM -f "python -m callosum.training.ippo"   # polite stop (SIGTERM), see below
+pkill -TERM -f "python -m callosum.experiments.arm.trainer"   # polite stop (SIGTERM), see below
 kill <pid>                                    # same, if the pid file is right
 ```
 
@@ -383,7 +383,7 @@ SIGTERM makes the trainer finish the current iteration, run an evaluation and wr
 `latest.pt` before exiting (`kill -9` or a container restart loses only what happened since the
 last periodic save, `checkpoint_freq` iterations at most).
 
-**Resume after a kill or a container restart:** `uv run python -m callosum.training.ippo
+**Resume after a kill or a container restart:** `uv run python -m callosum.experiments.arm.trainer
 --resume runs/$NAME` (detached with `setsid nohup`, appending to the log with `>>`, like above).
 The run continues in the same directory from the iteration of `latest.pt`: same learning-rate
 schedule position, Adam moments, RNG states, step counters and best-eval tracking; the
@@ -417,7 +417,7 @@ Why: IPPO from scratch on `FaceTurn-v0` never grasps anything (10M-step run: `ev
 rot 0.00`; the policies only learn to hover near the cube). A grasp needs a sustained wide
 gripper opening during a precise approach and then a close, which Gaussian exploration does not
 find. So both policies are pretrained by behaviour cloning on demonstrations of the scripted
-expert (`callosum/experts/face_turn_expert.py`, the strategy of `scripts/probe_face_turn.py`),
+expert (`callosum/experiments/arm/expert.py`, the strategy of `scripts/probe_face_turn.py`),
 then fine-tuned with PPO. Use the same pipeline for every `--partner-obs` mode (run BC and the
 fine-tune with the same `--partner-obs`).
 
@@ -430,7 +430,7 @@ envs nothing succeeded within 400 steps: every waypoint waited for the slowest e
 waited for a wrist target the face's joint limit makes unreachable. The tracking was reworked
 (per-env waypoint progress, integral bias, stall detection, turn ends when the face is at 90
 degrees) and then restructured into **per-env asynchronous phase state machines**
-(`callosum/experts/_phases.py`, the FaceTurn program in `_program.py`): every env has its own
+(`callosum/experiments/arm/phases.py`, the FaceTurn program in `_program.py`): every env has its own
 phase per arm and moves on as soon as its own criterion is met (waypoint tolerance or stall,
 jaws at rest, face turned, its own timeout), nobody waits for another env, and an env whose IK
 fails is marked failed at once and holds. Ordering between the arms is per env (the rotator
@@ -471,7 +471,7 @@ single success prints how far its episodes got (holder / rotator grasp, both at 
 angle, body drift against the tolerances). To see how
 long the expert needs at all, collect with a longer episode, e.g. `--max-episode-steps 700
 --num-envs 16 --num-batches 1` (diagnosis only: the demos record the limit in their metadata, and
-`callosum.training.ippo --demos` refuses to run in an env with another episode length; BC
+`callosum.experiments.arm.trainer --demos` refuses to run in an env with another episode length; BC
 checkpoints remember it and the IPPO warm start warns). Reference values from the Mac CPU sim (one env per reset): clean expert 120/120
 successful, first success at step 290 to 364 (median 310); with `--action-noise 0.1` 385/400
 (96%; one of the failures is an unreachable cube placement, reported as "IK failure" and
@@ -491,11 +491,11 @@ uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --out runs
 # 2. Behaviour cloning (needs no simulator; the demo file carries the observation layout).
 #    300 epochs on 120 demos took 2.5 min on a Mac CPU; with CUDA it is faster.
 NAME=bc_full; mkdir -p runs/$NAME
-setsid nohup uv run python -m callosum.training.bc --demos runs/demos/faceturn_a.pt \
+setsid nohup uv run python -m callosum.experiments.arm.bc --demos runs/demos/faceturn_a.pt \
     --partner-obs full --exp-name $NAME --epochs 100 > runs/$NAME/stdout.log 2>&1 < /dev/null &
 
 # 3. Judge the BC policy alone (deterministic, no training): 16 envs x 4 rounds = 64 episodes.
-uv run python -m callosum.training.ippo --eval-only --checkpoint runs/$NAME/bc.pt \
+uv run python -m callosum.experiments.arm.trainer --eval-only --checkpoint runs/$NAME/bc.pt \
     --partner-obs full --eval-repeats 4 --exp-name ${NAME}_eval
 ```
 
@@ -525,9 +525,9 @@ source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
 NAME=faceturn_bc_s1; mkdir -p runs/$NAME
 setsid nohup bash -c '
 if [ -f runs/'$NAME'/latest.pt ]; then
-  uv run python -m callosum.training.ippo --resume runs/'$NAME' >> runs/'$NAME'/stdout.log 2>&1
+  uv run python -m callosum.experiments.arm.trainer --resume runs/'$NAME' >> runs/'$NAME'/stdout.log 2>&1
 else
-  uv run python -m callosum.training.ippo --env-id FaceTurn-v0 --seed 1 --exp-name '$NAME' \
+  uv run python -m callosum.experiments.arm.trainer --env-id FaceTurn-v0 --seed 1 --exp-name '$NAME' \
       --total-timesteps 10000000 --partner-obs full \
       --checkpoint runs/bc_full/bc.pt --critic-warmup-iters 10 \
       --demos runs/demos/faceturn_a.pt --bc-coef 1.0 --bc-decay-iters 100 \
@@ -564,7 +564,7 @@ Mac CPU smoke of the whole fine-tune path (one env; about 30 s; remove `runs/smo
 
 ```bash
 PYTHONPATH=. uv run -q --no-project --python 3.12 --with mani-skill==3.0.1 --with torch --with tensorboard \
-    python -m callosum.training.ippo --sim-backend cpu --num-steps 20 --num-minibatches 4 \
+    python -m callosum.experiments.arm.trainer --sim-backend cpu --num-steps 20 --num-minibatches 4 \
     --total-timesteps 800 --eval-freq 10 --checkpoint runs/bc_full/bc.pt \
     --critic-warmup-iters 2 --demos runs/demos/faceturn_a.pt --bc-coef 1.0 --bc-decay-iters 5 \
     --exp-name smoke_ft
@@ -582,12 +582,12 @@ ls ~/callosum-runs/ft_full_s1/
 
 # If latest.pt exists, continue from there (stdout appends):
 if [ -f runs/ft_full_s1/latest.pt ]; then
-  setsid nohup uv run python -m callosum.training.ippo --resume runs/ft_full_s1 \
+  setsid nohup uv run python -m callosum.experiments.arm.trainer --resume runs/ft_full_s1 \
       >> runs/ft_full_s1/train.log 2>&1 < /dev/null &
 else
   # Otherwise (first-time setup), launch with the same command as before.
   # This is the template; fill in the exact flags from your earlier run.
-  setsid nohup uv run python -m callosum.training.ippo --resume runs/ft_full_s1 \
+  setsid nohup uv run python -m callosum.experiments.arm.trainer --resume runs/ft_full_s1 \
       --checkpoint runs/bc_full/bc.pt --demos runs/demos/faceturn_a.pt \
       --critic-warmup-iters 10 --bc-coef 1.0 --bc-decay-iters 100 \
       --learning-rate 1e-4 --partner-obs full --total-timesteps 10000000 \

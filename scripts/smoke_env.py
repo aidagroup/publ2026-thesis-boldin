@@ -10,7 +10,7 @@ from _sim_utils import make_env, parse_args
 # @register_env("TwoSO101-v0", ...) decorator. callosum.envs itself stays
 # import-clean on macOS/CI (no mani_skill there), so it deliberately does not
 # re-export this submodule -- see docs/implementation-plan.md section 0.
-import callosum.envs.two_so101_base  # noqa: F401
+import callosum.experiments.arm.scene  # noqa: F401
 
 
 def main() -> None:

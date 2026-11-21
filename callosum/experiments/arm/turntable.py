@@ -2,7 +2,7 @@
 
 This is the "turntable-abstraction" from docs/thesis/04-experiment-design.md:
 a simplified twisty-puzzle mechanism (one turnable face) instead of a full
-26-cubie Rubik's cube, used by callosum.envs.face_turn.
+26-cubie Rubik's cube, used by callosum.experiments.arm.face_turn_env.
 """
 
 import numpy as np
@@ -11,7 +11,7 @@ import sapien.render
 from mani_skill.envs.scene import ManiSkillScene
 from mani_skill.utils.structs.articulation import Articulation
 
-# ~5.7 cm real Rubik's cube edge length (matches callosum.envs.two_so101_base).
+# ~5.7 cm real Rubik's cube edge length (matches callosum.experiments.arm.scene).
 CUBE_HALF_SIZE = 0.0285
 # A real 3x3 layer (one third of the cube), not an arbitrary thin plate --
 # also what makes the face actually graspable: a 1.9 cm layer can be pinched

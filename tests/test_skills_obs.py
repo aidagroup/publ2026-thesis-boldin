@@ -2,8 +2,8 @@
 
 import pytest
 
-from callosum.envs._skills import Role
-from callosum.envs._skills_obs import (
+from callosum.experiments.arm.skills import Role
+from callosum.experiments.arm.skills_obs import (
     INFO_PRIMITIVE_HOLDER,
     INFO_SUCCESS,
     own_block_fields,

@@ -1,4 +1,4 @@
-"""Config and CLI of the IPPO trainer (`callosum.training.ippo`, step 2.1).
+"""Config and CLI of the IPPO trainer (`callosum.experiments.arm.trainer`, step 2.1).
 
 Plain stdlib (dataclass + argparse), no torch / mani_skill, so parsing and validation are
 unit-testable on macOS and in CI. ManiSkill's PPO baseline (`examples/baselines/ppo/ppo.py` @
@@ -15,8 +15,8 @@ from pathlib import Path
 
 from callosum.common.cli import build_dataclass_parser
 from callosum.common.visibility import PARTNER_OBS_MODES, validate_partner_obs
-from callosum.envs._sim_compat import is_cpu_backend
-from callosum.envs._skills import PARTNER_VISIBILITY_MODES, validate_partner_visibility
+from callosum.experiments.arm.sim_compat import is_cpu_backend
+from callosum.experiments.arm.skills import PARTNER_VISIBILITY_MODES, validate_partner_visibility
 
 SIM_BACKENDS = ("gpu", "cpu", "physx_cuda", "physx_cpu")
 
@@ -47,7 +47,7 @@ class IPPOConfig:
     sim_backend: str = "gpu"
     """"gpu" (server) or "cpu" (macOS smoke runs; forces a single env and a single eval env)."""
     partner_obs: str = "full"
-    """Who sees which TCP pose in the per-agent inputs (`callosum.training._agent_obs`): "full"
+    """Who sees which TCP pose in the per-agent inputs (`callosum.experiments.arm.agent_obs`): "full"
     = own and partner's, "none" = own only. The env always emits both poses; the visibility rule
     is applied by the trainer's input builder, not by the env."""
     control_mode: str | None = "pd_joint_delta_pos"
@@ -58,7 +58,7 @@ class IPPOConfig:
     plan_length: int = 1
     """Skills env: random plan length per episode (E1 = 1 move, E2 = 2-3). Ignored
     for the joint-level envs."""
-    """Skill-level partner-information mode (`callosum.training._skills_agent_obs`): which
+    """Skill-level partner-information mode (`callosum.experiments.arm.skills_agent_obs`): which
     partner block is appended to the per-agent inputs of the discrete (FaceTurnSkills) envs --
     "none" / "oracle" / "predicted" / "predicted-direct". Only read when the env's action space
     is discrete; the joint-level envs keep using `partner_obs` instead."""
@@ -111,7 +111,7 @@ class IPPOConfig:
     target_kl: float | None = 0.1
     reward_scale: float = 1.0
 
-    # --- Fine-tuning from demonstrations (see callosum.training.bc) ----------------------------
+    # --- Fine-tuning from demonstrations (see callosum.experiments.arm.bc) ----------------------------
     critic_warmup_iters: int = 0
     """For the first this many iterations only the critics are updated and the actors stay frozen.
     After a BC warm start (`checkpoint`) the critic does not know the noisy on-policy returns yet,

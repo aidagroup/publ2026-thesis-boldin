@@ -8,7 +8,7 @@ from typing import Literal
 class FaceTurnRewardConfig:
     """Dense-reward term weights, shaping options and success tolerances for FaceTurn-v0.
 
-    See `callosum.envs.face_turn.FaceTurn.compute_dense_reward` (weights, shaping) and
+    See `callosum.experiments.arm.face_turn_env.FaceTurn.compute_dense_reward` (weights, shaping) and
     `.evaluate` (tolerances) for how each field is used.
     """
 
@@ -139,8 +139,8 @@ class FaceTurnRewardConfig:
 class FaceTurnPhysicsConfig:
     """The face-lock rule and the face joint's resistance for FaceTurn-v0.
 
-    See `callosum.envs.face_turn.FaceTurn` (the lock) and
-    `callosum.envs._turntable_cube.build_turntable_cube` (friction and damping).
+    See `callosum.experiments.arm.face_turn_env.FaceTurn` (the lock) and
+    `callosum.experiments.arm.turntable.build_turntable_cube` (friction and damping).
     """
 
     lock_face_unless_held: bool = True

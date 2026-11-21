@@ -2,10 +2,8 @@
 
 import callosum
 import callosum.common
-import callosum.configs
-import callosum.envs
+import callosum.experiments
 import callosum.robots
-import callosum.training
 
 
 def test_import_callosum() -> None:
@@ -13,8 +11,6 @@ def test_import_callosum() -> None:
 
 
 def test_import_subpackages() -> None:
-    assert callosum.envs
+    assert callosum.experiments
     assert callosum.robots
     assert callosum.common
-    assert callosum.training
-    assert callosum.configs

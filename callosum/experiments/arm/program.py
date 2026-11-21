@@ -1,7 +1,7 @@
 """The scripted FaceTurn program as per-arm lists of phases (pure numpy, unit-testable).
 
-The strategy is the one described in `callosum.experts.face_turn_expert`; here it is written as the
-two arms' programs of `callosum.experts._phases` (one primitive per phase, ordering between the
+The strategy is the one described in `callosum.experiments.arm.expert`; here it is written as the
+two arms' programs of `callosum.experiments.arm.phases` (one primitive per phase, ordering between the
 arms as gates) over an `ExpertPlan`, the per-env joint waypoints the expert planned with IK.
 
 Holder (agent_a):  `holder pregrasp` -> `holder grasp` -> `holder close`
@@ -23,8 +23,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from callosum.configs.face_turn_expert import ExpertControlConfig
-from callosum.experts._phases import (
+from callosum.experiments.arm.expert_config import ExpertControlConfig
+from callosum.experiments.arm.phases import (
     Context,
     Grip,
     PhaseSpec,
