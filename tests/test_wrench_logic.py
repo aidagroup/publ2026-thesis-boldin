@@ -39,8 +39,9 @@ from callosum.envs._wrench_logic import (
     param_value_fields,
     partner_fields,
     partner_of,
+    potential,
+    potential_shaping,
     sample_episode_randomization,
-    shaping_reward,
     success,
     team_reward,
     validate_partner_mode,
@@ -71,8 +72,8 @@ def test_config_defaults_match_the_design_numbers() -> None:
     assert cfg.layer_frictionloss_range == (0.0, 2.0e-5)
     assert cfg.initial_angle_range == (0.0, 0.05)
     assert cfg.success_bonus == 1.0
-    assert cfg.step_penalty == 0.01
-    assert cfg.failure_penalty == -1.0
+    assert cfg.step_penalty == 0.001
+    assert cfg.failure_penalty == -2.0
     assert cfg.seed == 0
     # The derived helpers agree with the fields.
     assert math.isclose(cfg.control_dt, cfg.dt * cfg.control_every)
@@ -158,7 +159,8 @@ def test_config_rejects_losing_non_additivity() -> None:
         {"step_penalty": 1.0},  # >= success_bonus
         {"failure_penalty": 0.0},
         {"failure_penalty": 1.0},
-        {"failure_penalty": -0.001},  # better than -step_penalty
+        {"failure_penalty": -0.0005},  # better than -step_penalty
+        {"step_penalty": 0.5, "failure_penalty": -2.0},  # better than a full timeout
         {"seed": -1},
     ],
 )
@@ -560,17 +562,36 @@ def test_drift_excess_bounds_and_validation() -> None:
         drift_excess(0.0, 0.0, pos_tol=0.1, rot_tol=0.1, pos_drift=0.05, rot_drift=0.5)
 
 
-def test_shaping_reward_semantics_and_validation() -> None:
-    assert shaping_reward(
-        angle_progress_frac=0.5, drift_excess_frac=0.0, angle_coef=0.5, drift_coef=0.5
-    ) == pytest.approx(0.25)
-    assert shaping_reward(
-        angle_progress_frac=0.0, drift_excess_frac=1.0, angle_coef=0.5, drift_coef=0.5
-    ) == pytest.approx(-0.5)
+def test_potential_is_bounded_and_penalises_drift() -> None:
+    kwargs = {
+        "angle_initial": 0.0,
+        "goal_angle": math.pi / 2,
+        "pos_tol": 0.001,
+        "rot_tol": 0.1,
+        "pos_drift": 0.05,
+        "rot_drift": 0.5,
+        "angle_coef": 0.5,
+        "drift_coef": 0.5,
+    }
+    reset = potential(angle=0.0, drift_pos=0.0, drift_rot=0.0, **kwargs)
+    assert reset == 0.0
+    goal = potential(angle=math.pi / 2, drift_pos=0.0, drift_rot=0.0, **kwargs)
+    assert goal == pytest.approx(0.5)  # bounded by angle_coef, not path-dependent
+    mid = potential(angle=math.pi / 4, drift_pos=0.0, drift_rot=0.0, **kwargs)
+    assert 0.0 < mid < goal
+    drifted = potential(angle=math.pi / 2, drift_pos=0.05, drift_rot=0.5, **kwargs)
+    assert drifted == pytest.approx(goal - 0.5)
     with pytest.raises(ValueError):
-        shaping_reward(
-            angle_progress_frac=0.0, drift_excess_frac=0.0, angle_coef=-1.0, drift_coef=0.0
-        )
+        potential(angle=0.0, drift_pos=0.0, drift_rot=0.0, **{**kwargs, "angle_coef": -1.0})
+
+
+def test_potential_shaping_telescopes() -> None:
+    potentials = [i * 0.1 for i in range(6)]
+    deltas = [
+        potential_shaping(potential_now=potentials[i], potential_prev=potentials[i - 1])
+        for i in range(1, len(potentials))
+    ]
+    assert sum(deltas) == pytest.approx(potentials[-1] - potentials[0])
 
 
 def test_config_rejects_negative_shaping_coefficients() -> None:

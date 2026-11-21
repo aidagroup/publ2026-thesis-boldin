@@ -229,15 +229,22 @@ class WrenchCubeConfig:
     success_bonus: float = 1.0
     """Team reward granted on the step that first satisfies the success condition."""
 
-    step_penalty: float = 0.01
-    """Team reward subtracted on every control step (the shared time cost)."""
+    step_penalty: float = 0.001
+    """Team reward subtracted on every control step (the shared time cost).
 
-    failure_penalty: float = -1.0
+    Kept small on purpose: the timeout return is `-step_penalty * max_control_steps`
+    (0.35 at the defaults), and the failure penalty must be worse than that, otherwise
+    the first probes learned to FAIL FAST (return -1.57 at 9 steps) instead of surviving
+    to the timeout (-3.5 with the old 0.01 penalty). Learning the coordination is the
+    goal; time-to-success stays a reported metric, not a strong reward term."""
+
+    failure_penalty: float = -2.0
     """Team reward on the step that first violates the failure condition -- it replaces
     the plain `-step_penalty` there, so drifting the core out of bounds is punished rather
-    than merely costing one more step. Must be negative and no better than a step penalty
-    (`failure_penalty <= -step_penalty`). The success step keeps
-    `success_bonus - step_penalty`."""
+    than merely costing one more step. It MUST be strictly worse than the whole-episode
+    timeout return (`failure_penalty < -step_penalty * max_control_steps`), otherwise an
+    early crash is the optimal policy (observed in the first shape-reward probes). The
+    success step keeps `success_bonus - step_penalty`."""
 
     shaping_angle_coef: float = 0.5
     """Coefficient of the potential-style angle-progress shaping term (shared reward).
@@ -384,6 +391,14 @@ class WrenchCubeConfig:
             raise ValueError(
                 "failure_penalty must be no better than a step penalty "
                 f"(<= -step_penalty = {-self.step_penalty}), got {self.failure_penalty}"
+            )
+        timeout_return = -self.step_penalty * self.max_control_steps
+        if self.failure_penalty >= timeout_return:
+            raise ValueError(
+                "failure_penalty must be strictly worse than the whole-episode timeout "
+                f"return (failure_penalty < -step_penalty * max_control_steps = "
+                f"{timeout_return}), got {self.failure_penalty}: otherwise failing fast "
+                "is the optimal policy and the agents never learn to survive"
             )
         for name in ("shaping_angle_coef", "shaping_drift_coef"):
             if getattr(self, name) < 0:

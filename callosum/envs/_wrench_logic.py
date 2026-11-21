@@ -524,32 +524,79 @@ def drift_excess(
     return min(excess_pos + excess_rot, 1.0)
 
 
-def shaping_reward(
+def potential(
     *,
-    angle_progress_frac: float,
-    drift_excess_frac: float,
+    angle: float,
+    angle_initial: float,
+    goal_angle: float,
+    drift_pos: float,
+    drift_rot: float,
     angle_coef: float,
     drift_coef: float,
+    pos_tol: float,
+    rot_tol: float,
+    pos_drift: float,
+    rot_drift: float,
 ) -> float:
-    """The shared potential-style shaping term of one control step.
+    """The bounded shaping potential `Φ(s)` of one control step.
 
-    `angle_coef * angle_progress_frac - drift_coef * drift_excess_frac`. Added to the
-    base `team_reward` on non-terminal steps only; terminal steps keep the pure
-    `success_bonus` / `failure_penalty` semantics, so the success condition stays exactly
-    the conjunction of `_wrench_logic.success`.
+    `angle_coef * normalised_progress - drift_coef * drift_excess`, where the progress
+    `(|angle_initial - goal| - |angle - goal|) / goal` is clipped to `[0, 1]` and the
+    drift excess comes from :func:`drift_excess`. The potential is used with
+    :func:`potential_shaping`, so the shaping reward of an episode telescopes to
+    `Φ(final) - Φ(initial)`: a successful turn pays at most `angle_coef` extra, and no
+    path can farm unbounded shaping reward. Penalising the drift potential keeps the
+    holder's stabilising role learnable, while the rest of the reward (success bonus /
+    failure penalty) keeps the non-additive semantics.
 
     Args:
-        angle_progress_frac: Gated progress toward the goal angle (see `angle_progress`).
-        drift_excess_frac: Normalised drift excess (see `drift_excess`).
-        angle_coef: Weight of the progress term (>= 0; 0 disables).
-        drift_coef: Weight of the drift penalty (>= 0; 0 disables).
+        angle: Current layer hinge angle (rad).
+        angle_initial: Episode-initial layer angle (rad).
+        goal_angle: Target layer angle (rad); non-positive disables the progress term.
+        drift_pos: Core position drift (m).
+        drift_rot: Core rotation drift (rad).
+        angle_coef: Weight of the progress potential (>= 0).
+        drift_coef: Weight of the drift penalty potential (>= 0).
+        pos_tol: Success position-drift tolerance (m).
+        rot_tol: Success rotation-drift tolerance (rad).
+        pos_drift: Failure position-drift bound (m).
+        rot_drift: Failure rotation-drift bound (rad).
 
     Returns:
-        The shaping reward of the step.
+        The potential value.
     """
     if angle_coef < 0 or drift_coef < 0:
         raise ValueError(f"shaping coefficients must be >= 0, got {(angle_coef, drift_coef)}")
-    return angle_coef * angle_progress_frac - drift_coef * drift_excess_frac
+    if goal_angle <= 0:
+        progress = 0.0
+    else:
+        progress = (abs(angle_initial - goal_angle) - abs(angle - goal_angle)) / goal_angle
+        progress = min(max(progress, 0.0), 1.0)
+    return angle_coef * progress - drift_coef * drift_excess(
+        drift_pos,
+        drift_rot,
+        pos_tol=pos_tol,
+        rot_tol=rot_tol,
+        pos_drift=pos_drift,
+        rot_drift=rot_drift,
+    )
+
+
+def potential_shaping(*, potential_now: float, potential_prev: float) -> float:
+    """Potential-based shaping reward of one step: `Φ(s_t) - Φ(s_{t-1})`.
+
+    Telescopes over the episode to `Φ(final) - Φ(initial)`, so the shaping cannot
+    dominate the terminal `success_bonus` / `failure_penalty` (the reason the naive
+    per-step shaping gave the successful oracle a return of -3.7).
+
+    Args:
+        potential_now: `potential` of the current state.
+        potential_prev: `potential` of the previous state (or the reset state).
+
+    Returns:
+        The shaping delta.
+    """
+    return potential_now - potential_prev
 
 
 def team_reward(
