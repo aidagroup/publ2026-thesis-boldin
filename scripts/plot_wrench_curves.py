@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Plot the CubeWrench-v0 learning curves (greedy eval success vs PPO update).
 
 Reads the trainer's stdout logs (``eval @ update N: ... success_rate=...`` lines) and
@@ -13,7 +12,6 @@ y-axis is the greedy success rate on the trainer's 32-episode eval.
 from __future__ import annotations
 
 import argparse
-import math
 import re
 import sys
 from pathlib import Path
