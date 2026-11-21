@@ -19,6 +19,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 _EVAL_RE = re.compile(r"eval @ update (\d+):.*?success_rate=([0-9.]+)")
+_TRAIN_RE = re.compile(r"update (\d+)/\d+ \|.*? success ([0-9.]+) len")
 _MODE_RE = re.compile(r"wrench_(?:warp_)?(oracle|none|predicted)")
 _COLORS = {
     "oracle": (46, 160, 67),
@@ -38,8 +39,12 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def parse_curves(paths: list[Path]) -> dict[str, list[tuple[int, float]]]:
-    """Map a run label to its sorted `[(update, success_rate), ...]` curve."""
+def parse_curves(paths: list[Path], source: str = "eval") -> dict[str, list[tuple[int, float]]]:
+    """Map a run label to its sorted `[(update, success_rate), ...]` curve.
+
+    `source="eval"` parses the trainer's periodic greedy eval lines (32 held-out episodes),
+    `source="train"` the aggregate completed-episode success of the rollout (unbiased by
+    the eval sampling protocol, but noisier per update)."""
     curves: dict[str, list[tuple[int, float]]] = {}
     for path in paths:
         label = path.stem
@@ -47,8 +52,9 @@ def parse_curves(paths: list[Path]) -> dict[str, list[tuple[int, float]]]:
         if mode_match is not None:
             label = f"{mode_match.group(1)} ({path.stem.split('_s')[0].split('wrench_')[-1]})"
         points: list[tuple[int, float]] = []
+        pattern = _EVAL_RE if source == "eval" else _TRAIN_RE
         for line in path.read_text(errors="ignore").splitlines():
-            match = _EVAL_RE.search(line)
+            match = pattern.search(line)
             if match is not None:
                 points.append((int(match.group(1)), float(match.group(2))))
         if points:
@@ -113,10 +119,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("logs", nargs="+", type=Path, help="trainer stdout logs")
     parser.add_argument("-o", "--out", type=Path, default=Path("demo/learning_curves.png"))
-    parser.add_argument("--title", default="CubeWrench-v0: greedy success vs PPO updates")
+    parser.add_argument("--title", default="CubeWrench-v0: success vs PPO updates")
     parser.add_argument("--group-mode", action="store_true", help="average runs by partner mode")
+    parser.add_argument(
+        "--source", choices=("eval", "train"), default="eval", help="eval lines or train success"
+    )
     args = parser.parse_args(argv)
-    curves = parse_curves(args.logs)
+    curves = parse_curves(args.logs, args.source)
     if not curves:
         print("no eval lines found", file=sys.stderr)
         return 1
