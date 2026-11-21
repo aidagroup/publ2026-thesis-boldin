@@ -17,9 +17,22 @@ on a render-only copy of the scene, see `scripts/_render_utils.py`):
    input mode comes from ``--input-mode`` (or the checkpoint):
    ``none`` / ``oracle`` engine observations or ``predicted`` (Bi-JEPA ``ẑ_partner``, built by
    `callosum.training.wrench_ppo.LatentInputBuilder`).
+5. ``demo_wrench_arrows.mp4`` -- only with ``--scene policy-vs-rotator``: the learned policy
+   (both agents) next to the rotator-only failure, again with the wrench overlay; the
+   clearest "who does what" clip (green holder arrows on the left, none on the right).
+
+Every frame carries the agents' **commanded wrenches** so the viewer can see who does what
+(the reduced model itself is invisible): a green ``holder: stabilise core`` block with
+``|F|`` and ``|τ|``, an orange ``rotator: turn layer`` block with ``τ_z`` (both computed as
+``authority * normalized action`` from `WrenchCubeConfig`, i.e. what the policy/script
+command), green hold arrows from the core centre (length ∝ ``|F|``) and an orange arc around
+the top layer in the turn direction (sweep/thickness ∝ ``|τ_z|``), plus a small bottom legend
+(green = hold, orange = turn). The arrows are anchored by finding the layer / tab / cube
+pixels in the rendered frame (`_render_utils.scene_anchors`), not by camera math.
 
 Plus ``demo_preview.gif`` (looping preview; it prefers the learned-policy-vs-oracle clip when
-that scene is rendered and falls back to the oracle-vs-rotator clip), the first three
+that scene is rendered, then the policy-vs-rotator clip, and falls back to the
+oracle-vs-rotator clip), the first three
 frames of every video as PNG stills (``oracle_frame0.png`` ...; they are identical by
 construction, because the slow-motion expansion holds frame 0), a middle frame (``*_mid.png``)
 and the final frame (``*_final.png``) of every clip, and ``demo_summary.json`` with the episode
@@ -71,15 +84,19 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from _render_utils import (
     FAILURE_COLOR,
+    HOLDER_COLOR,
     MUTED_COLOR,
     SUCCESS_COLOR,
+    TURN_COLOR,
     DemoRenderer,
     annotate_frame,
     degrees,
+    draw_action_arrows,
     hstack_side_by_side,
     mean_luma,
     probe_video,
     save_png_stills,
+    scene_anchors,
     write_gif,
     write_mp4,
 )
@@ -113,6 +130,23 @@ SBS_MID_FRACTION = 0.6
 FAILURE_DRIFT_RAD = 0.5
 """Core-rotation failure bound of the env config (`failure_rot_drift`, used in labels)."""
 
+ARROWS_VIDEO = "demo_wrench_arrows.mp4"
+"""Caption of the learned-policy-vs-rotator-only clip: the same scene with the arrows."""
+ARROWS_STEM = "wrench_arrows"
+
+HOLDER_FORCE_DISPLAY_FRACTION = 0.06
+"""Green-arrow scale: this fraction of the holder force authority (norm) fills the arrow.
+
+The rendered magnitudes are the *commanded* wrenches `authority * normalized action`, as the
+HUD shows them; the arrow lengths are linear in them, clipped at this display reference.
+"""
+
+LEGEND = (
+    (HOLDER_COLOR, "hold (both agents needed)"),
+    (TURN_COLOR, "turn"),
+)
+"""Bottom legend: green = the holder's stabilising wrench, orange = the rotator's turn."""
+
 
 @dataclass
 class DemoFrame:
@@ -124,6 +158,9 @@ class DemoFrame:
     angle_deg: float
     drift_mm: float
     drift_deg: float
+    holder_force_n: float = 0.0
+    holder_torque_nm: float = 0.0
+    rotator_torque_z_nm: float = 0.0
     is_final: bool = False
 
 
@@ -157,6 +194,13 @@ class DemoEpisode:
             "status": self.status,
             "status_detail": self.status_detail,
             "unique_frames": len(self.frames),
+            "final_actions": {
+                "holder_force_n": round(self.frames[-1].holder_force_n, 4),
+                "holder_torque_nm": round(self.frames[-1].holder_torque_nm, 5),
+                "rotator_torque_z_nm": round(self.frames[-1].rotator_torque_z_nm, 5),
+            }
+            if self.frames
+            else {},
         }
 
 
@@ -395,11 +439,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scene",
-        choices=("all", "oracle", "rotator-only", "side-by-side", "policy-vs-oracle"),
+        choices=(
+            "all",
+            "oracle",
+            "rotator-only",
+            "side-by-side",
+            "policy-vs-oracle",
+            "policy-vs-rotator",
+        ),
         default="all",
         help=(
             "'all' also renders the policy scene when --checkpoint is given; "
-            "'policy-vs-oracle' requires --checkpoint"
+            "'policy-vs-oracle' and 'policy-vs-rotator' require --checkpoint"
         ),
     )
     parser.add_argument(
@@ -485,6 +536,25 @@ def _scene_wanted(scene: str) -> tuple[bool, bool, bool]:
     )
 
 
+def _action_stats(action: dict[str, np.ndarray], config: Any) -> tuple[float, float, float]:
+    """Commanded wrench magnitudes of both agents: `authority * normalized action`.
+
+    Returns:
+        `(|F_holder| in N, |tau_holder| in Nm, tau_z_rotator in Nm)` -- the holder's force and
+        torque norms and the rotator's hinge-axis torque with sign (`+` turns the layer angle
+        up). The env applies its private gain/limit scaling on top, but the demo shows the
+        agents' commanded wrenches, which is what the policies/scripts actually output.
+    """
+    holder_authority = np.asarray(config.holder_authority, dtype=np.float64)
+    rotator_authority = np.asarray(config.rotator_authority, dtype=np.float64)
+    holder = np.asarray(action["holder"], dtype=np.float64)
+    rotator = np.asarray(action["rotator"], dtype=np.float64)
+    force = float(np.linalg.norm(holder[:3] * holder_authority[:3]))
+    torque = float(np.linalg.norm(holder[3:] * holder_authority[3:]))
+    turning = float(rotator[5] * rotator_authority[5])
+    return force, torque, turning
+
+
 def run_episode(
     env: WrenchCubeEnv,
     controller: DemoController,
@@ -500,9 +570,12 @@ def run_episode(
 ) -> DemoEpisode:
     """Run one rollout and return its rendered frames plus the outcome.
 
-    Frames are captured at the start of every `step_stride`-th control step and once more
-    after the terminating step (the final frame carries the SUCCESS / FAILED status).
-    `renderer=None` runs the same rollout without rendering (the `--dry-run` path).
+    Every frame is rendered with the *_commanded* action of that control step, because the
+    overlay draws both agents' wrench HUD blocks and the holder/turn arrows (see
+    `_action_stats`, `_render_utils.draw_action_arrows`). Frames are captured at the start of
+    every `step_stride`-th control step and once more after the terminating step (the final
+    frame carries the SUCCESS / FAILED status). `renderer=None` runs the same rollout without
+    rendering (the `--dry-run` path).
 
     The controller seam is `reset(obs)` once, then `act(env, obs)` before every step and
     `observe(obs)` after every non-terminal step (the Bi-JEPA `predicted` input needs it).
@@ -512,10 +585,22 @@ def run_episode(
     controller.reset(obs)
     initial = env.state()
     goal = float(config.goal_angle)
+    holder_authority = np.asarray(config.holder_authority, dtype=np.float64)
+    holder_force_reference = HOLDER_FORCE_DISPLAY_FRACTION * float(
+        np.linalg.norm(holder_authority[:3])
+    )
+    rotator_torque_authority = float(np.asarray(config.rotator_authority, dtype=np.float64)[5])
     frames: list[DemoFrame] = []
+
+    def commanded_action() -> dict[str, np.ndarray]:
+        action = controller.act(env, obs)
+        if holder_off:
+            action = {"holder": np.zeros(6), "rotator": action["rotator"]}
+        return action
 
     def capture(
         step: int,
+        action: dict[str, np.ndarray],
         *,
         status: str | None = None,
         status_color: tuple[int, int, int, int] = MUTED_COLOR,
@@ -523,11 +608,21 @@ def run_episode(
     ) -> DemoFrame:
         state = env.state()
         angle_deg, drift_mm, drift_deg = _state_metrics(state, initial)
+        holder_force_n, holder_torque_nm, rotator_torque_z_nm = _action_stats(action, config)
         if renderer is None:
             image = np.zeros((8, 8, 3), dtype=np.uint8)
         else:
+            raw = renderer.render_state(state)
+            anchors = scene_anchors(raw)
+            if anchors is not None:
+                raw = draw_action_arrows(
+                    raw,
+                    anchors,
+                    holder_force_ratio=holder_force_n / max(holder_force_reference, 1e-9),
+                    rotator_torque_ratio=rotator_torque_z_nm / max(rotator_torque_authority, 1e-9),
+                )
             image = annotate_frame(
-                renderer.render_state(state),
+                raw,
                 title=title,
                 subtitle=subtitle,
                 hud_lines=(
@@ -535,6 +630,15 @@ def run_episode(
                     f"layer angle {angle_deg:.1f}°   →   goal {degrees(goal):.1f}°",
                     f"core drift {drift_mm:.1f} mm · {drift_deg:.1f}°",
                 ),
+                agent_blocks=(
+                    (
+                        "holder: stabilise core",
+                        (f"|F| = {holder_force_n:.3f} N", f"|τ| = {holder_torque_nm:.4f} Nm"),
+                        HOLDER_COLOR,
+                    ),
+                    ("rotator: turn layer", (f"τ_z = {rotator_torque_z_nm:+.4f} Nm",), TURN_COLOR),
+                ),
+                legend=LEGEND,
                 angle_fraction=angle_deg / degrees(goal),
                 status=status,
                 status_color=status_color,
@@ -547,21 +651,20 @@ def run_episode(
             angle_deg=angle_deg,
             drift_mm=drift_mm,
             drift_deg=drift_deg,
+            holder_force_n=holder_force_n,
+            holder_torque_nm=holder_torque_nm,
+            rotator_torque_z_nm=rotator_torque_z_nm,
             is_final=status is not None,
         )
         frames.append(frame)
         return frame
 
-    capture(0)
+    action = commanded_action()
+    capture(0, action)
     steps = 0
     terminated = truncated = False
     info: dict[str, Any] = {}
     while not (terminated or truncated):
-        if steps and steps % step_stride == 0:
-            capture(steps)
-        action = controller.act(env, obs)
-        if holder_off:
-            action = {"holder": np.zeros(6), "rotator": action["rotator"]}
         obs, _reward, terminated, truncated, info = env.step(action)
         steps += 1
         if terminated or truncated:
@@ -570,6 +673,9 @@ def run_episode(
         if steps >= max_steps:
             truncated = True
             break
+        action = commanded_action()
+        if steps % step_stride == 0:
+            capture(steps, action)
 
     final_angle_deg, final_drift_mm, final_drift_deg = _state_metrics(env.state(), initial)
     if terminated and bool(info.get("success")):
@@ -584,7 +690,7 @@ def run_episode(
         status = "TIMEOUT"
         detail = f"{steps} control steps used"
         status_color = MUTED_COLOR
-    capture(steps, status=status, status_color=status_color, detail=detail)
+    capture(steps, action, status=status, status_color=status_color, detail=detail)
     return DemoEpisode(
         name=name,
         title=title,
@@ -906,10 +1012,10 @@ def _load_policy_controller(
     """Build the learned-policy controller when the scene needs it (clean CLI error)."""
     if args.checkpoint is None:
         return None
-    if not (args.scene in ("all", "policy-vs-oracle")):
+    if args.scene not in ("all", "policy-vs-oracle", "policy-vs-rotator"):
         print(
             f"note: --checkpoint is ignored for --scene {args.scene} "
-            "(use --scene all or --scene policy-vs-oracle)"
+            "(use --scene all, policy-vs-oracle or policy-vs-rotator)"
         )
         return None
     try:
@@ -927,8 +1033,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(f"--step-stride must be >= 1, got {args.step_stride}")
     if args.fps < 1:
         raise SystemExit(f"--fps must be >= 1, got {args.fps}")
-    if args.scene == "policy-vs-oracle" and args.checkpoint is None:
-        raise SystemExit("--scene policy-vs-oracle requires --checkpoint PATH")
+    if args.scene in ("policy-vs-oracle", "policy-vs-rotator") and args.checkpoint is None:
+        raise SystemExit(f"--scene {args.scene} requires --checkpoint PATH")
     _configure_gl()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -936,7 +1042,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     want_oracle, want_rotator, want_oracle_sbs = _scene_wanted(args.scene)
     policy_controller = _load_policy_controller(args)
-    want_policy = policy_controller is not None
+    want_policy_oracle = policy_controller is not None and args.scene in (
+        "all",
+        "policy-vs-oracle",
+    )
+    want_policy_rotator = policy_controller is not None and args.scene == "policy-vs-rotator"
+    want_policy = want_policy_oracle or want_policy_rotator
     env = WrenchCubeEnv(partner_mode="none")
     oracle_controller = OracleDemoController(env.config)
     max_steps = int(args.max_steps or env.config.max_control_steps)
@@ -980,7 +1091,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"[dry-run] {name}: {json.dumps(episodes[name].summary())}")
             if want_policy and policy_controller is not None:
                 reference_steps = episodes["oracle"].steps if "oracle" in episodes else None
-                if reference_steps is None:
+                if reference_steps is None and want_policy_oracle:
                     upper = run_episode(
                         env,
                         oracle_controller,
@@ -1102,7 +1213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 gif_width=args.gif_width,
             )
 
-        if want_policy and policy_controller is not None:
+        if want_policy_oracle and policy_controller is not None:
             oracle_upper = run_episode(
                 env,
                 oracle_controller,
@@ -1163,6 +1274,67 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fps=args.fps,
                 gif_width=args.gif_width,
             )
+
+        if want_policy_rotator and policy_controller is not None:
+            rotator_only = run_episode(
+                env,
+                oracle_controller,
+                renderer,
+                name="rotator-only",
+                title=TITLE_ROTATOR,
+                subtitle=SUBTITLE_ROTATOR,
+                seed=args.seed,
+                step_stride=args.step_stride,
+                max_steps=max_steps,
+                holder_off=True,
+            )
+            print(
+                f"rotator only (no partner): {rotator_only.status} after "
+                f"{rotator_only.steps} steps, angle {rotator_only.final_angle_deg:.1f} deg"
+            )
+            policy_steps = _policy_max_steps(args, max_steps, rotator_only.steps)
+            policy_env = WrenchCubeEnv(partner_mode=policy_controller.env_mode)
+            policy_episode = run_episode(
+                policy_env,
+                policy_controller,
+                renderer,
+                name="policy",
+                title=policy_controller.title,
+                subtitle=policy_controller.subtitle,
+                seed=args.seed,
+                step_stride=args.step_stride,
+                max_steps=policy_steps,
+                holder_off=False,
+            )
+            print(
+                f"learned policy ({policy_controller.input_mode}): {policy_episode.status} "
+                f"after {policy_episode.steps} steps (cap {policy_steps}), "
+                f"angle {policy_episode.final_angle_deg:.1f} deg"
+            )
+            clip = _write_sbs_clip(
+                args.out,
+                ARROWS_VIDEO,
+                ARROWS_STEM,
+                policy_episode,
+                rotator_only,
+                fps=args.fps,
+                target_seconds=args.target_seconds,
+                sync="end",
+                encoders=encoders,
+            )
+            clip["policy"] = policy_controller.metadata()
+            clip["policy_max_steps"] = policy_steps
+            clips["policy-vs-rotator"] = clip
+            if "preview-gif" not in clips:
+                clips["preview-gif"] = _write_gif_preview(
+                    args.out,
+                    policy_episode,
+                    rotator_only,
+                    duplicate_left=int(clip["duplicate_left"]),
+                    duplicate_right=int(clip["duplicate_right"]),
+                    fps=args.fps,
+                    gif_width=args.gif_width,
+                )
     finally:
         renderer.close()
         if policy_env is not None:

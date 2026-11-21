@@ -21,9 +21,11 @@ with Pillow (`ImageDraw`), not OpenCV, so both encoder paths work without extra 
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
 from typing import Any
@@ -60,6 +62,12 @@ ACCENT_RGBA = (242, 140, 40, 235)
 SUCCESS_COLOR = (110, 230, 140, 255)
 FAILURE_COLOR = (255, 105, 105, 255)
 MUTED_COLOR = (150, 162, 180, 255)
+HOLDER_COLOR = (96, 214, 138, 255)
+"""Green: the holder's "hold the core" action (HUD block, arrows and legend)."""
+TURN_COLOR = (242, 140, 40, 255)
+"""Orange: the rotator's "turn the layer" action (HUD block, arrow and legend)."""
+ARROW_OUTLINE_COLOR = (10, 12, 18, 205)
+"""Dark outline under the arrows, so they stay readable on the yellow layer / blue core."""
 
 _FONT_CANDIDATES = {
     False: (
@@ -298,24 +306,166 @@ def _fit_font(
     return load_font(size, bold=bold)
 
 
+@dataclass(frozen=True)
+class SceneAnchors:
+    """Screen-space anchors of the demo scene, found from the rendered pixels.
+
+    The projection is taken from the image itself instead of the camera matrices: the layer
+    is the only yellow region, the tab on it is the only red region, and the cube is the
+    bright region. This keeps the arrows glued to the cube under perspective and drift,
+    without duplicating MuJoCo's free-camera conventions.
+    """
+
+    layer_center: tuple[float, float]
+    layer_radius: tuple[float, float]
+    tab_angle: float
+    core_center: tuple[float, float]
+
+
+def scene_anchors(frame: np.ndarray) -> SceneAnchors | None:
+    """Locate the layer (centre, screen radii, red-tab angle) and the core centre in a frame."""
+    image = np.asarray(frame, dtype=np.int16)
+    red, green, blue = image[:, :, 0], image[:, :, 1], image[:, :, 2]
+    layer_mask = (red > 150) & (green > 110) & (blue < 120)
+    if not layer_mask.any():
+        return None
+    rows, cols = np.nonzero(layer_mask)
+    layer_cx, layer_cy = float(cols.mean()), float(rows.mean())
+    radius_x = max(4.0, float(cols.max() - cols.min()) / 2.0)
+    radius_y = max(3.0, float(rows.max() - rows.min()) / 2.0)
+    tab_mask = (red > 140) & (green < 90) & (blue < 90)
+    tab_angle = 0.0
+    if tab_mask.any():
+        tab_rows, tab_cols = np.nonzero(tab_mask)
+        tab_angle = math.atan2(
+            (float(tab_rows.mean()) - layer_cy) / radius_y,
+            (float(tab_cols.mean()) - layer_cx) / radius_x,
+        )
+    bright = np.maximum(np.maximum(red, green), blue) > 95
+    cube_rows, cube_cols = np.nonzero(bright)
+    if not len(cube_rows):
+        return None
+    top, bottom = int(cube_rows.min()), int(cube_rows.max())
+    core_center = (
+        (float(cube_cols.min()) + float(cube_cols.max())) / 2.0,
+        top + 0.62 * (bottom - top),
+    )
+    return SceneAnchors(
+        layer_center=(layer_cx, layer_cy),
+        layer_radius=(radius_x, radius_y),
+        tab_angle=tab_angle,
+        core_center=core_center,
+    )
+
+
+def _arrow_head(
+    draw: ImageDraw.ImageDraw,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    line_width: int,
+    color: tuple[int, int, int, int],
+) -> None:
+    """Draw a V-shaped arrow head at `end`, pointing along `start -> end`."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    norm = math.hypot(dx, dy)
+    if norm < 1e-6:
+        return
+    ux, uy = dx / norm, dy / norm
+    size = max(7.0, 2.6 * line_width)
+    px, py = -uy, ux
+    left = (end[0] - ux * size + px * size * 0.62, end[1] - uy * size + py * size * 0.62)
+    right = (end[0] - ux * size - px * size * 0.62, end[1] - uy * size - py * size * 0.62)
+    draw.line([end, left], fill=ARROW_OUTLINE_COLOR, width=line_width + 2)
+    draw.line([end, right], fill=ARROW_OUTLINE_COLOR, width=line_width + 2)
+    draw.line([end, left], fill=color, width=line_width)
+    draw.line([end, right], fill=color, width=line_width)
+
+
+def draw_action_arrows(
+    frame: np.ndarray,
+    anchors: SceneAnchors,
+    *,
+    holder_force_ratio: float,
+    rotator_torque_ratio: float,
+) -> np.ndarray:
+    """Draw the wrench arrows of both agents on top of a rendered frame.
+
+    Green arrows start at the core centre and point outward/down (the holder's "keep the core
+    still" action); their length is linear in |F| / the display reference. The orange arc runs
+    around the top layer from the red tab and sweeps in the direction of the hinge torque; its
+    sweep length and thickness are linear in |tau_z| / the rotator torque authority.
+
+    Args:
+        frame: RGB uint8 frame of the scene (without the HUD).
+        anchors: Screen anchors of the layer/core (see `scene_anchors`).
+        holder_force_ratio: `|F|` divided by the holder's display reference (clipped to [0,1]).
+        rotator_torque_ratio: `tau_z` divided by the rotator torque authority (signed, [-1,1]).
+    """
+    height, width = frame.shape[:2]
+    scale = height / 640.0
+    image = Image.fromarray(np.ascontiguousarray(frame)).convert("RGBA")
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    holder_ratio = float(np.clip(holder_force_ratio, 0.0, 1.0))
+    if holder_ratio > 0.02:
+        length = (24.0 + 70.0 * holder_ratio) * scale
+        line_width = max(3, round((4.0 + 5.0 * holder_ratio) * scale))
+        start = anchors.core_center
+        for angle_deg in (55.0, 90.0, 125.0):
+            angle = math.radians(angle_deg)
+            end = (start[0] + length * math.cos(angle), start[1] + length * math.sin(angle))
+            draw.line([start, end], fill=ARROW_OUTLINE_COLOR, width=line_width + 3)
+            draw.line([start, end], fill=HOLDER_COLOR, width=line_width)
+            _arrow_head(draw, start, end, line_width, HOLDER_COLOR)
+
+    turn_ratio = float(np.clip(rotator_torque_ratio, -1.0, 1.0))
+    if abs(turn_ratio) > 0.02:
+        centre_x, centre_y = anchors.layer_center
+        radius_x = anchors.layer_radius[0] * 0.92
+        radius_y = anchors.layer_radius[1] * 0.92
+        # Positive hinge torque increases the layer angle, which moves the red tab towards
+        # decreasing screen angle in this camera; negative torque sweeps the other way.
+        sweep = (0.45 + 1.7 * abs(turn_ratio)) * (-1.0 if turn_ratio > 0 else 1.0)
+        steps = 22
+        points = [
+            (
+                centre_x + radius_x * math.cos(anchors.tab_angle + sweep * index / steps),
+                centre_y + radius_y * math.sin(anchors.tab_angle + sweep * index / steps),
+            )
+            for index in range(steps + 1)
+        ]
+        line_width = max(3, round((3.5 + 6.0 * abs(turn_ratio)) * scale))
+        draw.line(points, fill=ARROW_OUTLINE_COLOR, width=line_width + 3, joint="curve")
+        draw.line(points, fill=TURN_COLOR, width=line_width, joint="curve")
+        _arrow_head(draw, points[-2], points[-1], line_width, TURN_COLOR)
+
+    return np.asarray(Image.alpha_composite(image, overlay).convert("RGB"), dtype=np.uint8)
+
+
 def annotate_frame(
     frame: np.ndarray,
     *,
     title: str,
     subtitle: str,
     hud_lines: Sequence[str],
+    agent_blocks: Sequence[tuple[str, Sequence[str], tuple[int, int, int, int]]] = (),
+    legend: Sequence[tuple[tuple[int, int, int, int], str]] = (),
     angle_fraction: float | None = None,
     status: str | None = None,
     status_color: tuple[int, int, int, int] = MUTED_COLOR,
     status_detail: str | None = None,
 ) -> np.ndarray:
-    """Draw the demo overlay (title panel, HUD, status, angle bar) and return RGB uint8.
+    """Draw the demo overlay (title, agent action blocks, HUD, legend, status, bar).
 
     Args:
-        frame: RGB uint8 frame from `DemoRenderer`.
+        frame: RGB uint8 frame from `DemoRenderer` (the wrench arrows are already drawn).
         title: Scene caption, e.g. "hold + turn (both agents)".
         subtitle: One-line explanation under the title.
         hud_lines: Bottom-left live numbers (time, angle, drift), one line each.
+        agent_blocks: Top-right action blocks, `(title, lines, colour)` each -- the holder's
+            stabilise-wrench block and the rotator's turn-torque block.
+        legend: Bottom legend items `(colour, label)` -- green "hold", orange "turn".
         angle_fraction: `layer_angle / goal_angle` in `[0, 1]` for the bottom progress bar.
         status: Optional big status word ("SUCCESS", "FAILED") in the bottom-right corner.
         status_color: Colour of the status word.
@@ -325,6 +475,7 @@ def annotate_frame(
     image = Image.fromarray(np.ascontiguousarray(frame)).convert("RGBA")
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
+    radius = max(3, height // 110)
 
     margin = max(8, height // 40)
     pad = max(6, height // 80)
@@ -340,9 +491,7 @@ def annotate_frame(
     panel_w = max(title_w, subtitle_w) + 2 * pad
     panel_h = title_h + subtitle_h + 3 * pad
     draw.rounded_rectangle(
-        [margin, margin, margin + panel_w, margin + panel_h],
-        radius=max(3, height // 110),
-        fill=PANEL_RGBA,
+        [margin, margin, margin + panel_w, margin + panel_h], radius=radius, fill=PANEL_RGBA
     )
     draw.text(
         (margin + pad, margin + pad),
@@ -360,6 +509,52 @@ def annotate_frame(
         stroke_width=1,
         stroke_fill=(0, 0, 0, 180),
     )
+
+    # Top-right per-agent action blocks ("who does what"), stacked below the title panel.
+    if agent_blocks:
+        block_title_font = load_font(max(9, round(height / 38)), bold=True)
+        block_line_font = load_font(max(9, round(height / 44)))
+        bar_w = max(3, height // 90)
+        block_top = margin + panel_h + 2 * pad
+        block_x1 = width - margin
+        for block_title, block_lines, block_color in agent_blocks:
+            block_title_w, block_title_h = _text_box(draw, block_title, block_title_font)
+            line_h = max(
+                (_text_box(draw, line, block_line_font)[1] for line in block_lines), default=0
+            )
+            line_w = max(
+                (_text_box(draw, line, block_line_font)[0] for line in block_lines), default=0
+            )
+            block_w = max(block_title_w, line_w) + 3 * pad + bar_w
+            block_h = block_title_h + len(block_lines) * line_h + 3 * pad
+            x0 = block_x1 - block_w
+            draw.rounded_rectangle(
+                [x0, block_top, block_x1, block_top + block_h], radius=radius, fill=PANEL_RGBA
+            )
+            draw.rounded_rectangle(
+                [x0 + pad // 2, block_top + pad, x0 + pad // 2 + bar_w, block_top + block_h - pad],
+                radius=bar_w // 2,
+                fill=block_color,
+            )
+            text_x = x0 + pad + bar_w + pad // 2
+            draw.text(
+                (text_x, block_top + pad),
+                block_title,
+                font=block_title_font,
+                fill=block_color,
+                stroke_width=2,
+                stroke_fill=(0, 0, 0, 200),
+            )
+            for index, line in enumerate(block_lines):
+                draw.text(
+                    (text_x, block_top + 2 * pad + block_title_h + index * line_h),
+                    line,
+                    font=block_line_font,
+                    fill=HUD_COLOR,
+                    stroke_width=1,
+                    stroke_fill=(0, 0, 0, 170),
+                )
+            block_top += block_h + pad
 
     # Bottom: angle progress bar (0 -> goal 90 degrees).
     bar_height = max(5, height // 90)
@@ -380,16 +575,54 @@ def annotate_frame(
                 fill=ACCENT_RGBA,
             )
 
+    # Bottom legend strip (green = hold, orange = turn), centred above the progress bar.
+    legend_h = 0
+    if legend:
+        legend_font = load_font(max(9, round(height / 46)))
+        text_h = max(_text_box(draw, label, legend_font)[1] for _, label in legend)
+        swatch = max(8, height // 48)
+        item_widths = [
+            swatch + pad // 2 + _text_box(draw, label, legend_font)[0] for _, label in legend
+        ]
+        legend_w = sum(item_widths) + (len(legend) + 1) * pad
+        legend_h = text_h + 2 * pad
+        x0 = max(margin, (width - legend_w) // 2)
+        y0 = bar_y - pad - legend_h
+        draw.rounded_rectangle(
+            [x0, y0, x0 + legend_w, y0 + legend_h], radius=radius, fill=PANEL_RGBA
+        )
+        cursor = x0 + pad
+        for (color, label), item_w in zip(legend, item_widths):
+            draw.rounded_rectangle(
+                [
+                    cursor,
+                    y0 + (legend_h - swatch) // 2,
+                    cursor + swatch,
+                    y0 + (legend_h + swatch) // 2,
+                ],
+                radius=max(2, swatch // 4),
+                fill=color,
+            )
+            draw.text(
+                (cursor + swatch + pad // 2, y0 + (legend_h - text_h) // 2),
+                label,
+                font=legend_font,
+                fill=HUD_COLOR,
+            )
+            cursor += item_w + pad
+
+    bottom_limit = bar_y - pad - (legend_h + pad if legend_h else 0)
+
     # Bottom-left HUD panel with the live numbers.
     if hud_lines:
         line_h = max(_text_box(draw, line, hud_font)[1] for line in hud_lines)
         hud_w = max(_text_box(draw, line, hud_font)[0] for line in hud_lines)
         hud_h = len(hud_lines) * line_h + (len(hud_lines) + 1) * pad
-        hud_y1 = bar_y - pad
+        hud_y1 = bottom_limit
         hud_y0 = hud_y1 - hud_h
         draw.rounded_rectangle(
             [margin, hud_y0, margin + hud_w + 2 * pad, hud_y1],
-            radius=max(3, height // 110),
+            radius=radius,
             fill=PANEL_RGBA,
         )
         for index, line in enumerate(hud_lines):
@@ -411,14 +644,10 @@ def annotate_frame(
         block_w = max(status_w, detail_w) + 2 * pad
         block_h = status_h + (detail_h + pad // 2 if detail else 0) + 2 * pad
         x1 = width - margin
-        y1 = bar_y - pad
+        y1 = bottom_limit
         x0 = x1 - block_w
         y0 = y1 - block_h
-        draw.rounded_rectangle(
-            [x0, y0, x1, y1],
-            radius=max(3, height // 110),
-            fill=PANEL_RGBA,
-        )
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=PANEL_RGBA)
         draw.text(
             (x0 + pad, y0 + pad),
             status,
