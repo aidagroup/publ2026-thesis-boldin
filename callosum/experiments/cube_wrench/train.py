@@ -115,6 +115,9 @@ never trains on.
 """
 
 RUNTIME_RESOURCE_FIELDS = ("backend", "device")
+RUNTIME_OVERRIDE_FIELDS = RUNTIME_RESOURCE_FIELDS + ("total_updates",)
+"""Fields the CLI may override on --resume: runtime resources plus the update budget
+(extending a finished run is a continuation, not a new experiment)."""
 """Config fields `--resume` takes from the CLI instead of the checkpoint.
 
 They describe WHERE the run executes (CPU loop vs the warp GPU env, torch device), not the
@@ -942,11 +945,11 @@ def apply_runtime_overrides(
         defaults = WrenchPPOConfig()
         explicit = frozenset(
             field
-            for field in RUNTIME_RESOURCE_FIELDS
+            for field in RUNTIME_OVERRIDE_FIELDS
             if getattr(requested, field) != getattr(defaults, field)
         )
     overrides = {
-        field: getattr(requested, field) for field in RUNTIME_RESOURCE_FIELDS if field in explicit
+        field: getattr(requested, field) for field in RUNTIME_OVERRIDE_FIELDS if field in explicit
     }
     if not overrides:
         return saved

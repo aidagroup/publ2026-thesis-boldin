@@ -496,3 +496,39 @@ def test_resume_continues_the_update_counter_and_restores_the_weights(tmp_path) 
     continued = load_checkpoint(run_dir / "latest.pt")
     assert continued["update"] == 3
     assert continued["global_step"] == 3 * extended.batch_size
+
+
+def test_resume_total_updates_can_be_extended_from_the_cli(tmp_path) -> None:
+    """`--resume run --total-updates N` continues the run with a larger budget."""
+    torch.manual_seed(0)
+    base = {
+        "exp_name": "toy",
+        "num_envs": 4,
+        "rollout_steps": 8,
+        "num_minibatches": 2,
+        "update_epochs": 1,
+        "eval_every": 10,
+        "eval_episodes": 2,
+        "eval_envs": 2,
+        "checkpoint_every": 10,
+        "target_kl": None,
+    }
+    cfg = WrenchPPOConfig(total_updates=1, **base)
+    run_dir = tmp_path / "toy"
+    run_dir.mkdir()
+    wrench_ppo.train(
+        cfg,
+        run_dir,
+        _ToyVecWrenchCube(cfg.num_envs, cfg.obs_size),
+        _ToyVecWrenchCube(cfg.eval_envs, cfg.obs_size),
+    )
+    payload = load_checkpoint(run_dir / "latest.pt")
+    requested, explicit = wrench_ppo.parse_args_with_explicit(
+        ["--resume", str(run_dir), "--total-updates", "3"]
+    )
+    assert "total_updates" in explicit
+    merged = wrench_ppo.apply_runtime_overrides(
+        wrench_ppo._config_from_payload(payload, run_dir), requested, explicit
+    )
+    assert merged.total_updates == 3
+    assert merged.exp_name == "toy"
