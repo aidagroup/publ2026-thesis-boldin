@@ -3,10 +3,15 @@
 Two independent PPO learners -- one Gaussian actor-critic per role (`holder`, `rotator`) --
 share one environment step and one **team** reward, so the coordination has to be learned
 from the decentralised observations alone (the `none` / `oracle` / `predicted` ablation of
-the plan). The env (`callosum.envs.wrench_cube.WrenchCubeEnv`) is single-instance MuJoCo on
-the CPU, so the vectorisation is a Python loop:
+the plan). The default env backend (`--backend cpu`) is the single-instance MuJoCo CPU env
+(`callosum.envs.wrench_cube.WrenchCubeEnv`), so its vectorisation is a Python loop:
 `callosum.training._vec_wrench.VecWrenchCube` drives `num_envs` copies with auto-reset and
-the finished-episode statistics.
+the finished-episode statistics. The optional GPU backend (`--backend warp --device cuda`)
+replaces the loop with `callosum.envs.wrench_cube.env_gpu.WrenchCubeBatchGPU`, which steps
+all `num_envs` worlds together through `mujoco_warp` (same env contract, same policies and
+checkpoints; see the config module for the manual install note). The trainer's rollout code
+is backend-agnostic: it only asks the vec env for its `torch_io` marker, so a GPU step
+consumes CUDA tensors instead of the numpy copies of the CPU loop.
 
 Reused from `callosum.training._ppo_core` (the ManiSkill PPO baseline's blocks, shared with
 the arms IPPO trainer): `ActorCritic` (3 x 256 tanh MLPs, state-independent log-std),
@@ -14,7 +19,7 @@ the arms IPPO trainer): `ActorCritic` (3 x 256 tanh MLPs, state-independent log-
 wrench-specific contract around them:
 
 * the policy input is the env's flat observation, width `obs_size(partner_mode)` (26 for
-  `none`, 39 for `oracle`), and the action is the normalized 6D wrench of the role;
+  `none`, 45 for `oracle`), and the action is the normalized 6D wrench of the role;
 * under `predicted` (`use_bijepa=True`) the env stays at `partner_mode="none"` and the policy
   input becomes `[own observation (26), ẑ_partner (latent_dim, 32)]` = 58: the agent predicts
   its partner's latent from its OWN observation history (`LatentInputBuilder` ->
@@ -91,7 +96,7 @@ def make_policies(
     """One independent Gaussian actor-critic per role, in `AGENT_KEYS` order.
 
     The input width is `callosum.envs._wrench_logic.obs_size(partner_mode) + latent_dim`: the
-    env's flat observation for that mode (28 for `none`, 39 for `oracle`) plus the predicted
+    env's flat observation for that mode (28 for `none`, 45 for `oracle`) plus the predicted
     partner latent appended under `predicted` (`latent_dim=cfg.latent_dim`, so 28 + 32 = 60).
     The output is the role's normalized 6D wrench. Sharing no parameters is what makes the
     pair an IPPO-style decentralised team rather than a single joint policy.
@@ -338,6 +343,7 @@ def evaluate_greedy(
         The aggregated `EvalSummary`.
     """
     obs = _to_torch(vec.reset(seed=seed), device)
+    torch_io = bool(getattr(vec, "torch_io", False))
     builder = LatentInputBuilder(bijepa, device) if bijepa is not None else None
     inputs = builder.reset(obs) if builder is not None else obs
     max_steps = (episodes // int(vec.num_envs) + 2) * int(vec.config.max_control_steps)
@@ -355,7 +361,8 @@ def evaluate_greedy(
         actions = {}
         for name, policy in zip(AGENT_KEYS, policies):
             action = policy.get_action(inputs[name], deterministic=True)
-            actions[name] = torch.clamp(action, -1.0, 1.0).cpu().numpy()
+            clipped = torch.clamp(action, -1.0, 1.0)
+            actions[name] = clipped if torch_io else clipped.cpu().numpy()
         result = vec.step(actions)
         obs = _to_torch(result.obs, device)
         if builder is not None:
@@ -763,7 +770,10 @@ def _check_resumed_state(payload: dict, cfg: WrenchPPOConfig) -> None:
 
 def run(cfg: WrenchPPOConfig) -> Path:
     """Train (or continue with `cfg.resume`) and return the run directory."""
-    from callosum.training._vec_wrench import VecWrenchCube
+    if cfg.backend == "warp":
+        from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
+    else:
+        from callosum.training._vec_wrench import VecWrenchCube
 
     # The policies are tiny MLPs; on a many-core server the default thread pool
     # oversubscribes and makes the env loop 30x slower (measured on 96-core RunPod).
@@ -792,8 +802,23 @@ def run(cfg: WrenchPPOConfig) -> Path:
         run_dir = Path(cfg.runs_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    train_vec = VecWrenchCube(cfg.num_envs, cfg.partner_mode, seed=cfg.seed)
-    eval_vec = VecWrenchCube(cfg.eval_envs, cfg.partner_mode, seed=cfg.seed + 1_000_003)
+    if cfg.backend == "warp":
+        # Lazy import above: the GPU stack (mujoco_warp/warp) is only needed for this branch.
+        train_vec = WrenchCubeBatchGPU(
+            cfg.num_envs,
+            partner_mode=cfg.partner_mode,
+            seed=cfg.seed,
+            device=cfg.device,
+        )
+        eval_vec = WrenchCubeBatchGPU(
+            cfg.eval_envs,
+            partner_mode=cfg.partner_mode,
+            seed=cfg.seed + 1_000_003,
+            device=cfg.device,
+        )
+    else:
+        train_vec = VecWrenchCube(cfg.num_envs, cfg.partner_mode, seed=cfg.seed)
+        eval_vec = VecWrenchCube(cfg.eval_envs, cfg.partner_mode, seed=cfg.seed + 1_000_003)
     try:
         return train(cfg, run_dir, train_vec, eval_vec, resumed)
     finally:
@@ -896,8 +921,9 @@ def train(
 
     print(
         f"run {run_dir} | CubeWrench-v0 | input_mode {cfg.input_mode} (env partner_mode "
-        f"{cfg.partner_mode}) | device {device} | obs {cfg.env_obs_size} + latent {latent_dim} "
-        f"= policy input {cfg.policy_input_size} -> act {_WRENCH_SIZE}",
+        f"{cfg.partner_mode}) | backend {cfg.backend} | device {device} | obs "
+        f"{cfg.env_obs_size} + latent {latent_dim} = policy input "
+        f"{cfg.policy_input_size} -> act {_WRENCH_SIZE}",
         flush=True,
     )
     if bijepa is not None:
@@ -919,6 +945,7 @@ def train(
 
     steps = cfg.rollout_steps
     num_envs = cfg.num_envs
+    torch_io = bool(getattr(train_vec, "torch_io", False))
     obs_dim = cfg.policy_input_size
     obs_buf = [torch.zeros((steps, num_envs, obs_dim), device=device) for _ in policies]
     act_buf = [torch.zeros((steps, num_envs, _WRENCH_SIZE), device=device) for _ in policies]
@@ -985,8 +1012,10 @@ def train(
                     logprob_buf[index][step] = logprob
                     value_buf[index][step] = value.flatten()
                     # The stored action is the unclipped sample the log-prob refers to; the
-                    # env receives the clipped wrench (its action box is [-1, 1]).
-                    env_actions[name] = torch.clamp(action, -1.0, 1.0).cpu().numpy()
+                    # env receives the clipped wrench (its action box is [-1, 1]). The GPU
+                    # backend consumes the CUDA tensor directly (no host round trip).
+                    clipped = torch.clamp(action, -1.0, 1.0)
+                    env_actions[name] = clipped if torch_io else clipped.cpu().numpy()
             result = train_vec.step(env_actions)
             obs_t = _to_torch(result.obs, device)
             rewards[step] = torch.as_tensor(result.reward, device=device, dtype=torch.float32)
@@ -1141,10 +1170,21 @@ def train(
     return run_dir
 
 
-def _to_torch(obs: dict[str, np.ndarray], device: torch.device | str) -> dict[str, torch.Tensor]:
-    """Convert the vec env's numpy observation dict to float32 tensors on `device`."""
+def _to_torch(
+    obs: dict[str, np.ndarray | torch.Tensor], device: torch.device | str
+) -> dict[str, torch.Tensor]:
+    """The vec env's observation dict as float32 tensors on `device`.
+
+    The CPU `VecWrenchCube` returns numpy arrays, the GPU `WrenchCubeBatchGPU` already CUDA
+    tensors; `Tensor.to` is a no-op when the device/dtype already match, so this is a copy
+    only for the CPU backend.
+    """
     return {
-        key: torch.as_tensor(value, device=device, dtype=torch.float32)
+        key: (
+            value.to(device=device, dtype=torch.float32)
+            if torch.is_tensor(value)
+            else torch.as_tensor(value, device=device, dtype=torch.float32)
+        )
         for key, value in obs.items()
     }
 

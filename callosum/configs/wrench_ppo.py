@@ -23,6 +23,19 @@ rollout shape, the Bi-JEPA block, the PPO hyperparameters, and the logging / eva
 checkpointing cadence. The recommended ranges of the plan are 64-256 envs and 32-128 rollout
 control steps; the validation below only enforces the hard sanity conditions, so a small
 `--num-envs 8` server smoke run stays possible.
+
+    backend="cpu"  -- the single-instance `WrenchCubeEnv` in a Python loop (macOS/CI-safe
+                      default; only the `sandbox` extra is needed);
+    backend="warp" -- the batched `WrenchCubeBatchGPU` (mujoco_warp) stepping all worlds on
+                      one CUDA device (`--backend warp --device cuda --num-envs 1024`). It is
+                      an OPTIONAL GPU backend of the same env contract: the weights of a run
+                      are interchangeable between the backends (the policy is the same MLP),
+                      only the rollout speed differs. It needs the OPTIONAL `sandbox-gpu`
+                      extra (Linux/CUDA only, linux-marked in `uv.lock`); the pod's
+                      `uv sync --frozen` (without that extra) removes it from the venv, so
+                      install it before a run, e.g.
+                      `uv pip install --python /root/.callosum/venv/bin/python mujoco-warp`
+                      or sync with `--extra sandbox-gpu`.
 """
 
 import argparse
@@ -37,6 +50,10 @@ INPUT_MODES = ("none", "oracle", "predicted")
 """Policy-input modes: the env's partner visibility (`none`, `oracle`) plus the Bi-JEPA
 `predicted` mode, which keeps the env at `partner_mode="none"` and appends the predicted
 partner latent to the agent's own observation."""
+
+BACKENDS = ("cpu", "warp")
+"""Environment backends: the CPU MuJoCo loop (`callosum.training._vec_wrench`) or the batched
+mujoco_warp GPU env (`callosum.envs.wrench_cube.env_gpu`)."""
 
 
 @dataclass
@@ -77,6 +94,12 @@ class WrenchPPOConfig:
     rollout_steps: int = 64
     """Control steps per env per update (the plan's range is 32-128). One update therefore
     consumes `num_envs * rollout_steps` transitions."""
+    backend: str = "cpu"
+    """Environment backend: `"cpu"` (the default single-instance MuJoCo loop, works on macOS
+    and the pod) or `"warp"` (the batched mujoco_warp GPU env; requires `device="cuda"` and
+    the optional `sandbox-gpu`/`mujoco-warp` install on the pod). The policy/checkpoint
+    format is backend-independent, so a checkpoint trained on one backend evaluates on the
+    other."""
 
     # --- Bi-JEPA (`predicted` input mode) ---------------------------------------------------
     use_bijepa: bool = False
@@ -142,6 +165,8 @@ class WrenchPPOConfig:
     def __post_init__(self) -> None:
         """Reject a config the trainer cannot run (the checks are the plan's sanity rules)."""
         validate_partner_mode(self.partner_mode)
+        if self.backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {BACKENDS}, got {self.backend!r}")
         if self.seed < 0:
             raise ValueError(f"seed must be >= 0, got {self.seed}")
         if self.total_updates < 1:
@@ -187,6 +212,12 @@ class WrenchPPOConfig:
             )
         if not self.device:
             raise ValueError("device must be a non-empty torch device string")
+        if self.backend == "warp" and not self.device.startswith("cuda"):
+            raise ValueError(
+                "backend='warp' steps the worlds on a CUDA device of mujoco_warp, so "
+                f"device must be a CUDA device string ('cuda' or 'cuda:N'), got "
+                f"device={self.device!r}"
+            )
         # The `predicted` input is defined on top of the unprivileged `none` observation: the
         # `oracle` env already exposes the partner block, so combining both would leak the
         # ground truth through the env input and make the ablation uninterpretable.
@@ -233,7 +264,7 @@ class WrenchPPOConfig:
 
     @property
     def env_obs_size(self) -> int:
-        """Width of one agent's flat *env* observation under `partner_mode` (28 none, 39 oracle)."""
+        """Width of one agent's flat *env* observation under `partner_mode` (28 none, 45 oracle)."""
         return obs_size(self.partner_mode)
 
     @property
@@ -277,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     return build_dataclass_parser(
         WrenchPPOConfig,
         "Train two independent Gaussian PPO policies (IPPO) on CubeWrench-v0.",
-        choices={"partner_mode": PARTNER_MODES},
+        choices={"partner_mode": PARTNER_MODES, "backend": BACKENDS},
     )
 
 

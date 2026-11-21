@@ -45,7 +45,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from callosum.configs.wrench_ppo import INPUT_MODES
+from callosum.configs.wrench_cube import WrenchCubeConfig
+from callosum.configs.wrench_ppo import BACKENDS, INPUT_MODES
 from callosum.envs._wrench_logic import AGENT_KEYS, PARTNER_MODES, obs_size
 from callosum.envs.wrench_cube import WrenchCubeEnv
 from callosum.eval.metrics import EpisodeRecord, success_rate, time_to_success_stats
@@ -81,12 +82,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--episodes", type=int, default=64, help="episodes to run")
     parser.add_argument("--seed", type=int, default=0, help="base episode seed")
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default="cpu",
+        help="evaluation backend: cpu (single-instance MuJoCo loop) or warp (GPU batch)",
+    )
+    parser.add_argument(
+        "--device", default="cuda", help="CUDA device of --backend warp (ignored on cpu)"
+    )
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=32,
+        help="worlds stepped together by --backend warp (the episode count is still --episodes)",
+    )
     parser.add_argument("--out", default="results.json", help="JSON output file of the metrics")
     args = parser.parse_args(argv)
     if args.episodes < 1:
         parser.error(f"--episodes must be >= 1, got {args.episodes}")
     if args.seed < 0:
         parser.error(f"--seed must be >= 0, got {args.seed}")
+    if args.num_envs < 1:
+        parser.error(f"--num-envs must be >= 1, got {args.num_envs}")
     if (
         args.input_mode is not None
         and args.partner_mode is not None
@@ -166,6 +184,74 @@ def run_episode(
     return record, info
 
 
+@torch.no_grad()
+def run_batched(
+    env: object,
+    policies: list[torch.nn.Module],
+    episodes: int,
+    seed: int,
+    builder: LatentInputBuilder | None = None,
+) -> tuple[list[EpisodeRecord], list[dict]]:
+    """Run `episodes` greedy episodes in the batched GPU env, one lockstep batch at a time.
+
+    The env is a `callosum.envs.wrench_cube.env_gpu.WrenchCubeBatchGPU` (typed loosely so
+    this module needs no mujoco_warp import): it auto-resets finished worlds and returns the
+    episode statistics of the worlds that ended on each step. The greedy policy input is the
+    same as in training (the env observation, plus the Bi-JEPA latent under `predicted`).
+
+    Args:
+        env: The GPU batch env (`reset`, `step`, `num_envs`, `config`, `torch_io=True`).
+        policies: `[holder_policy, rotator_policy]`, on the env's CUDA device.
+        episodes: Number of finished episodes to collect.
+        seed: Base episode seed of the evaluation (world `i` starts from `seed + i`).
+        builder: The `predicted` run's `LatentInputBuilder`, or `None`.
+
+    Returns:
+        `(records, infos)` exactly like the CPU path of this script (trimmed to `episodes`).
+    """
+    obs = env.reset(seed=seed)
+    inputs = builder.reset(obs) if builder is not None else obs
+    records: list[EpisodeRecord] = []
+    infos: list[dict] = []
+    steps = 0
+    max_steps = (episodes // int(env.num_envs) + 2) * int(env.config.max_control_steps)
+    while len(records) < episodes:
+        if steps >= max_steps:
+            raise RuntimeError(
+                f"evaluation did not finish {episodes} episodes in {max_steps} steps "
+                f"({len(records)} finished); the GPU env's episode budget is broken"
+            )
+        actions = {}
+        for name, policy in zip(AGENT_KEYS, policies):
+            action = policy.get_action(inputs[name], deterministic=True)
+            actions[name] = torch.clamp(action, -1.0, 1.0)
+        result = env.step(actions)
+        obs = result.obs
+        if builder is not None:
+            done = result.terminated | result.truncated
+            inputs = builder.step(obs, done.float())
+        else:
+            inputs = obs
+        for index, length in enumerate(result.finished_lengths):
+            success = bool(result.finished_successes[index])
+            records.append(
+                EpisodeRecord(
+                    success=success,
+                    time_to_success=int(length) if success else None,
+                    decisions=int(length),
+                )
+            )
+            infos.append(
+                {
+                    "angle_deg": float(result.finished_angles[index]),
+                    "drift_pos": float(result.finished_drift_pos[index]),
+                    "drift_rot": float(result.finished_drift_rot[index]),
+                }
+            )
+        steps += 1
+    return records[:episodes], infos[:episodes]
+
+
 def summarize(records: list[EpisodeRecord], infos: list[dict]) -> dict:
     """The JSON-ready metric block of one evaluation."""
     steps = np.asarray([record.decisions for record in records], dtype=np.float64)
@@ -198,37 +284,54 @@ def main(argv: list[str] | None = None) -> int:
             f"{latent_dim}) but its saved config has use_bijepa={cfg.use_bijepa} and "
             f"latent_dim={cfg.latent_dim}"
         )
-    policies = make_policies(env_mode, "cpu", latent_dim=latent_dim)
+    policy_device = args.device if args.backend == "warp" else "cpu"
+    policies = make_policies(env_mode, policy_device, latent_dim=latent_dim)
     load_weights(payload, policies)
     builder: LatentInputBuilder | None = None
-    bijepa = make_bijepa(cfg, "cpu")
+    bijepa = make_bijepa(cfg, policy_device)
     if bijepa is not None:
         load_bijepa_weights(payload, bijepa)
         bijepa.eval()
-        builder = LatentInputBuilder(bijepa, device="cpu")
+        builder = LatentInputBuilder(bijepa, device=policy_device)
 
     records: list[EpisodeRecord] = []
     infos: list[dict] = []
-    env = WrenchCubeEnv(partner_mode=env_mode)
-    try:
-        print(
-            f"eval {args.checkpoint} | input_mode {input_mode} (env partner_mode {env_mode}) | "
-            f"policy input {obs_size(env_mode) + latent_dim} | {args.episodes} episodes from "
-            f"seed {args.seed} | greedy policies",
-            flush=True,
+    print(
+        f"eval {args.checkpoint} | input_mode {input_mode} (env partner_mode {env_mode}) | "
+        f"backend {args.backend} | policy input {obs_size(env_mode) + latent_dim} | "
+        f"{args.episodes} episodes from seed {args.seed} | greedy policies",
+        flush=True,
+    )
+    if args.backend == "warp":
+        from callosum.envs.wrench_cube.env_gpu import WrenchCubeBatchGPU
+
+        env = WrenchCubeBatchGPU(
+            min(args.episodes, args.num_envs),
+            config=WrenchCubeConfig(),
+            partner_mode=env_mode,
+            seed=args.seed,
+            device=args.device,
         )
-        for episode in range(args.episodes):
-            record, info = run_episode(env, policies, args.seed + episode, builder)
-            records.append(record)
-            infos.append(info)
-    finally:
-        env.close()
+        try:
+            records, infos = run_batched(env, policies, args.episodes, args.seed, builder)
+        finally:
+            env.close()
+    else:
+        env = WrenchCubeEnv(partner_mode=env_mode)
+        try:
+            for episode in range(args.episodes):
+                record, info = run_episode(env, policies, args.seed + episode, builder)
+                records.append(record)
+                infos.append(info)
+        finally:
+            env.close()
 
     summary = summarize(records, infos)
     report = {
         "checkpoint": str(Path(args.checkpoint)),
         "input_mode": input_mode,
         "partner_mode": env_mode,
+        "backend": args.backend,
         "policy_input_size": obs_size(env_mode) + latent_dim,
         "latent_dim": latent_dim,
         "seed": args.seed,
