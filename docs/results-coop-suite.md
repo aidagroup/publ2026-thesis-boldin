@@ -59,35 +59,47 @@ Reduced-куб `CubeWrench-v0` — главная линия предзащит�
 - Параллелизм: 2 GPU-прогона одновременно (6 процессов душили GPU: суммарно ~29k sps против
   ~50k у одного); на поде GPU A40, 46 GB.
 
-## Результаты
+## Результаты (GPU, 3 сида × 3 held-out базы, 128 эпизодов)
 
-### GPU, seed 0 (128 эпизодов × 3 held-out base-сида; train seed 0)
+Все числа — batched GPU-eval (`--backend warp`), greedy; среднее по 3 обучающим сидам
+(0,1,2), у каждого — 3 набора held-out сидов (`0 / 1M / 2M` + `EVAL_SEED_OFFSET`).
 
-| задача | режим | success (mean) | базы 0/1M/2M | steps-to-success |
-|---|---|---|---|---|
-| cart-pole (400 upd) | none | **0.958** | 0.958 / 0.958 / 0.958 | ~95 |
-| cart-pole | oracle | **0.943** | 0.943 / 0.943 / 0.943 | ~89 |
-| cart-pole | predicted | **0.599** | 0.599 / 0.599 / 0.599 | ~? |
-| pendulum (200 upd) | none | **0.974** | 0.974 / 0.974 / 0.974 | ~111 |
-| pendulum | oracle | **0.977** | 0.977 / 0.977 / 0.977 | ~111 |
-| pendulum | predicted | **0.974** | 0.974 / 0.974 / 0.974 | ~111 |
-| toss (250 upd, fixed rule) | none | **0.964** | 0.938 / 0.977 / 0.977 | 46.0 |
-| toss | oracle | **0.974** | 0.961 / 0.992 / 0.969 | 47.5 |
-| toss | predicted | **0.927** | 0.922 / 0.945 / 0.914 | 44.3 |
+| задача | режим | success (mean) | по сидам | min–max | доля эпизодов |
+|---|---|---|---|---|---|
+| cart-pole (400 upd) | none | **0.957** | 0.958 / 0.956 / 0.956 | 0.956–0.958 | 9×128 |
+| cart-pole | oracle | **0.909** | 0.943 / 0.823 / 0.961 | 0.823–0.961 | 9×128 |
+| cart-pole | predicted | **0.459** | 0.599 / 0.539 / 0.240 | 0.240–0.599 | 9×128 |
+| pendulum (200 upd) | none | **0.974** | 0.974 / 0.974 / 0.974 | 0.974–0.974 | 9×128 |
+| pendulum | oracle | **0.975** | 0.977 / 0.974 / 0.974 | 0.974–0.977 | 9×128 |
+| pendulum | predicted | **0.976** | 0.974 / 0.979 / 0.974 | 0.974–0.979 | 9×128 |
+| toss (250 upd, fixed rule) | none | **0.966** | 0.964 / 0.964 / 0.971 | 0.964–0.971 | 9×128 |
+| toss | oracle | **0.923** | 0.974 / 0.872 / 0.922 | 0.872–0.974 | 9×128 |
+| toss | predicted | **0.939** | 0.927 / 0.943 / 0.948 | 0.927–0.948 | 9×128 |
 
-**Gaps (seed 0):** cart-pole oracle−none = −0.016, predicted−none = −0.359; pendulum ≈ 0;
-toss oracle−none = +0.010, predicted−none = −0.036. Полная таблица по seeds 0–2 — в
-`results_coop_gpu/summary.json` после завершения residual-прогонов; CPU-пилот (3 сида,
-`results_coop/summary.json`) остаётся как fallback.
+**Gaps:** cart-pole oracle−none = −0.048, predicted−none = −0.497; pendulum ≈ 0 (+0.001/+0.002);
+toss oracle−none = −0.043, predicted−none = −0.027.
+
+Интерпретация:
+- **Все три задачи обучаются** (none ≈ 0.96–0.97); scripted oracle — sanity/верхняя граница, но
+  не оптимален: на cart-pole и toss обученная пара его **обгоняет** (oracle писался вручную и
+  централизованно, а не оптимизировался).
+- **Bi-JEPA `predicted` не даёт выигрыша на простых задачах** (cart-pole хуже, pendulum — в шуме
+  ±0.002, toss — чуть хуже). Это согласуется с гипотезой «реактивной достаточности»: в этих
+  задачах партнёр наблюдаем через общий объект/мяч, латентная антиципация не нужна, а aux-лосс
+  тратит ёмкость/шаги. Положительный эффект latent partner prediction ожидается там, где
+  информация о партнёре скрыта/зашумлена (harsh-режим куба, occluded-постановки) — план проверки
+  в отчёте по кубу.
+- Подробности по сидам и JSON — `results_coop_gpu/summary.json` (артефакты eval'ов:
+  `results_coop_gpu/gpu_coop_<task>_<mode>_s<seed>_base<base>.json`).
 
 ### Исправление exploit'а toss (2026-11-21)
 
 Первая GPU-политика toss «проходила» 3/3 за 9–14 шагов, засчитывая дребезг контактов у пола.
-Правило pass ужесточено (и в CPU, и в GPU): контакт считается передачей только на половине
-**принимающей** ракетки (мяч перелетел центр), с минимальным интервалом 3 control steps; success
-требует мяч выше `floor_z + 0.02`; **failure приоритетнее success**. После фикса: успех ≥28 шагов,
-мин. высота мяча на success 0.090–0.172 м. Pre-fix числа сохранены в
-`results_coop_gpu/exploit_pre_fix/` (none 0.753 за ~11 шагов) — как пример того, почему гейт важен.
+Правило pass ужесточено (CPU и GPU): передача = контакт на половине **принимающей** ракетки
+(мяч перелетел центр), минимальный интервал 3 control steps; success требует мяч выше
+`floor_z + 0.02`; **failure приоритетнее success**. После фикса успех ≥28 шагов, мяч на success
+0.090–0.172 м; pre-fix числа (`results_coop_gpu/exploit_pre_fix/`: none 0.753 за ~11 шагов)
+оставлены как пример, почему гейт важен.
 
 ## GPU-бэкенд (2026-11-21)
 
@@ -142,10 +154,12 @@ python scripts/experiments/coop_tasks/bench_coop_gpu.py --nworld 256 1024 4096
 
 GPU-финальные клипы (policy-vs-oracle + attempts) — в `demo/`:
 `demo_{cartpole,pendulum,toss}_gpu_policy_vs_oracle.mp4`, `..._policy_vs_oracle_predicted.mp4`,
-`..._gpu_attempts_seed{0,1,2}.mp4` + GIF/PNG/JSON (JSON содержит `gpu_provenance`: политика обучена
-на GPU, физика кадров — CPU MuJoCo после parity 1e-6/1e-3). Для toss используй
-`demo_toss_gpu_fixed_*` после фикса правила; старые `demo_toss_gpu_*` — пример exploit'а.
-CPU-пилотные клипы `demo_*_final_*` оставлены как fallback.
+`..._gpu_attempts_seed{0,1,2}.mp4` + GIF/PNG/JSON. Для toss используй
+`demo_toss_gpu_fixed_*` (после фикса): `demo_toss_gpu_fixed_policy_vs_oracle.mp4` (none, SUCCESS 53),
+`..._predicted.mp4` (SUCCESS 59), `..._attempts_seed{0,1,2}.mp4` (3/3 SUCCESS, 45–86 шагов).
+JSON содержит `gpu_provenance`: политика обучена на GPU, физика кадров — CPU MuJoCo после parity
+1e-6 obs / 1e-3 rollout; рендер EGL на A40. Старые `demo_toss_gpu_*` — пример exploit'а, не
+использовать в отчёте. CPU-пилотные клипы `demo_*_final_*` — fallback.
 
 ## Ограничения / честные оговорки
 

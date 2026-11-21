@@ -88,6 +88,18 @@ tests/
 
 **Entry points:** `python -m callosum.experiments.cube_wrench.{train,eval,render}`, `python -m callosum.experiments.coop_tasks.{eval,render}`, `python -m callosum.experiments.arm.{trainer,bc,skills_eval}`, smoke-скрипты — `scripts/experiments/<experiment>/...`. План рефакторинга и финальное дерево: [`docs/refactor-plan.md`](docs/refactor-plan.md).
 
+## Two-robot coop suite на GPU (2026-11-21)
+
+Три простые задачи — `CartPoleCoop-v0`, `PendulumPump-v0`, `TossCatch-v0` — обучены **на GPU**
+(`mujoco_warp`, batched `CoopBatchGPU`, 256 envs; parity CPU↔GPU PASS, ускорение 5–405×). Протокол:
+IPPO, `none`/`oracle`/`predicted` (Bi-JEPA), 3 сида × 3 held-out базы × 128 эпизодов. Итог:
+cart-pole none **0.957** / oracle 0.909 / pred 0.459; pendulum **0.974** / 0.975 / 0.976;
+toss (после фикса правила передач) **0.966** / 0.923 / 0.939. На простых задачах Bi-JEPA не даёт
+выигрыша (реактивная достаточность), но задача/инфраструктура готовы для стресс-тестов.
+Демо: `demo/demo_cartpole_gpu_policy_vs_oracle.mp4`, `demo/demo_pendulum_gpu_policy_vs_oracle.mp4`,
+`demo/demo_toss_gpu_fixed_policy_vs_oracle.mp4` (+ attempts и GIF). Полный отчёт:
+[`docs/results-coop-suite.md`](docs/results-coop-suite.md).
+
 ## Содержание
 
 - [Идея](#идея)
