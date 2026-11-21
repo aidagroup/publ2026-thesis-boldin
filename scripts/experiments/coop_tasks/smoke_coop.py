@@ -1,7 +1,8 @@
 """[local] Smoke-check the two-agent coop suite: 1-2 envs, short scripted rollouts.
 
-The coop suite is CPU-only MuJoCo, so this is one of the allowed local simulation checks
-(1-2 envs, short episodes, no training). It creates the envs one after another (the env is
+This is the CPU single-instance smoke check of the suite (1-2 envs, short episodes, no
+training); the batched GPU backend is exercised by ``env_gpu.CoopBatchGPU`` and the parity
+script ``scripts/experiments/coop_tasks/check_coop_gpu_parity.py``. It creates the envs one after another (the env is
 single-instance; the trainer vectorises later), runs `--episodes` episodes per env for the
 requested controller and prints, per episode, success / steps / task diagnostic (the pole
 angle, the pendulum amplitude or the toss-catch pass count), then the aggregate.

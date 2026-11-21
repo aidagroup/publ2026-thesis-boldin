@@ -25,11 +25,17 @@ box. The evaluation is a FIXED held-out seed set: episode `k` uses the seed
 stream). The env's task config is read from the checkpoint's config, so a run is evaluated
 with the same task parameters it was trained on.
 
-Run it on the server (the coop suite is CPU MuJoCo, but the plan forbids training/sim on the
-laptop outside the small smoke checks):
+The evaluation backend is selectable: `--backend warp` (the default on a CUDA host) runs the
+episodes as one batched `CoopBatchGPU` (`mujoco_warp`), `--backend cpu` uses the single-instance
+MuJoCo loop (parity/CI). Both produce the same JSON report; the warp path evaluates many
+held-out episodes in parallel, which is what makes the 128-episode held-out protocol cheap.
 
-    python callosum/experiments/coop_tasks/eval.py --checkpoint runs/coop_cartpole_oracle_s0/latest.pt \\
+Run it on the server (the plan forbids training/sim on the laptop outside the small smoke
+checks):
+
+    python -m callosum.experiments.coop_tasks.eval --checkpoint runs/coop_cartpole_oracle_s0/latest.pt \\
         --input-mode oracle --episodes 128 --seed 0 --out results_coop_cartpole_oracle_s0.json
+    python -m callosum.experiments.coop_tasks.eval --backend cpu ...
 """
 
 import argparse
@@ -43,7 +49,12 @@ import torch
 from callosum.common.metrics import EpisodeRecord, success_rate, time_to_success_stats
 from callosum.experiments.coop_tasks import make_coop_env
 from callosum.experiments.coop_tasks.logic import task_diagnostic
-from callosum.experiments.cube_wrench.ppo_config import BACKENDS, INPUT_MODES, TASKS
+from callosum.experiments.cube_wrench.ppo_config import (
+    BACKENDS,
+    INPUT_MODES,
+    TASKS,
+    cuda_visible,
+)
 from callosum.experiments.cube_wrench.train import (
     EVAL_SEED_OFFSET,
     LatentInputBuilder,
@@ -75,9 +86,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0, help="base episode seed")
     parser.add_argument(
         "--backend",
-        choices=BACKENDS,
-        default="cpu",
-        help="evaluation backend; the coop suite is CPU-only at this step (warp is cube-only)",
+        choices=("auto",) + BACKENDS,
+        default="auto",
+        help=(
+            "evaluation backend: auto (default: warp when a CUDA device is visible, else cpu), "
+            "warp (batched mujoco_warp GPU) or cpu (single-instance MuJoCo loop)"
+        ),
+    )
+    parser.add_argument(
+        "--device", default=None, help="CUDA device of the warp backend (default: cuda)"
+    )
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=64,
+        help="worlds of the batched warp evaluation (the CPU path ignores it)",
     )
     parser.add_argument("--out", default="results_coop.json", help="JSON output file")
     args = parser.parse_args(argv)
@@ -85,8 +108,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(f"--episodes must be >= 1, got {args.episodes}")
     if args.seed < 0:
         parser.error(f"--seed must be >= 0, got {args.seed}")
-    if args.backend != "cpu":
-        parser.error("the coop suite has no warp backend yet; evaluate with --backend cpu")
+    if args.backend == "auto":
+        args.backend = "warp" if cuda_visible() else "cpu"
+    if args.backend == "warp" and args.device is None:
+        args.device = "cuda"
+    if args.backend == "cpu":
+        args.device = args.device or "cpu"
+    if args.num_envs < 1:
+        parser.error(f"--num-envs must be >= 1, got {args.num_envs}")
     return args
 
 
@@ -187,6 +216,87 @@ def summarize(records: list[EpisodeRecord], infos: list[dict], task: str) -> dic
     return summary
 
 
+@torch.no_grad()
+def evaluate_warp(
+    cfg,
+    env_mode: str,
+    latent_dim: int,
+    policies: list[torch.nn.Module],
+    builder: LatentInputBuilder | None,
+    agent_keys: tuple[str, ...],
+    args: argparse.Namespace,
+    device: torch.device | str,
+) -> tuple[list[EpisodeRecord], list[dict]]:
+    """Greedy evaluation of `--episodes` held-out episodes on the batched GPU env.
+
+    Mirrors `callosum.experiments.cube_wrench.train.evaluate_greedy`: world `i` of a batch is
+    reset with exactly one seed (`args.seed + EVAL_SEED_OFFSET + episode`) and only that
+    world's FIRST episode is recorded, so fast successes cannot dominate the number. The
+    batches run `args.num_envs` worlds at a time; `finished_infos` carries the CPU-compatible
+    terminal info dicts the JSON summary needs.
+    """
+    from callosum.experiments.coop_tasks.env_gpu import CoopBatchGPU
+
+    vec = CoopBatchGPU(
+        cfg.task,
+        args.num_envs,
+        partner_mode=env_mode,
+        config=cfg.coop_env_config(),
+        seed=args.seed + EVAL_SEED_OFFSET,
+        device=args.device,
+    )
+    max_control_steps = int(vec.config.max_control_steps)
+    records: list[EpisodeRecord] = []
+    infos: list[dict] = []
+    try:
+        while len(records) < args.episodes:
+            batch = min(vec.num_envs, args.episodes - len(records))
+            obs = vec.reset(seed=args.seed + EVAL_SEED_OFFSET + len(records))
+            policy_obs = builder.reset(obs) if builder is not None else obs
+            recorded = [False] * vec.num_envs
+            for _step in range(max_control_steps + 1):
+                actions = {}
+                for name, policy in zip(agent_keys, policies):
+                    action = policy.get_action(policy_obs[name], deterministic=True)
+                    actions[name] = torch.clamp(action, -1.0, 1.0)
+                result = vec.step(actions)
+                done = result.terminated | result.truncated
+                policy_obs = (
+                    builder.step(result.obs, done.float()) if builder is not None else result.obs
+                )
+                done_rows = done.nonzero(as_tuple=False).flatten().cpu().tolist()
+                if len(done_rows) != len(result.finished_returns):
+                    raise RuntimeError(
+                        "GPU env contract broken: "
+                        f"{len(done_rows)} worlds finished but "
+                        f"{len(result.finished_returns)} finished statistics reported"
+                    )
+                for position, world in enumerate(done_rows):
+                    if world >= batch or recorded[world]:
+                        continue
+                    recorded[world] = True
+                    success = bool(result.finished_successes[position])
+                    length = int(result.finished_lengths[position])
+                    records.append(
+                        EpisodeRecord(
+                            success=success,
+                            time_to_success=length if success else None,
+                            decisions=length,
+                        )
+                    )
+                    infos.append(result.finished_infos[position])
+                if all(recorded[:batch]):
+                    break
+            else:
+                raise RuntimeError(
+                    "the warp evaluation did not finish the first episode of every world "
+                    f"within {max_control_steps + 1} steps; the env's episode budget is broken"
+                )
+    finally:
+        vec.close()
+    return records, infos
+
+
 def main(argv: list[str] | None = None) -> int:
     """Evaluate the checkpoint, print the summary and write the JSON report."""
     args = parse_args(argv)
@@ -200,44 +310,58 @@ def main(argv: list[str] | None = None) -> int:
     input_mode = resolve_input_mode(payload, args)
     env_mode, latent_dim = check_checkpoint_compat(payload, input_mode)
     env_config = cfg.coop_env_config()
+    device = torch.device(args.device)
     policies = make_policies(
         env_mode,
-        "cpu",
+        device,
         latent_dim=latent_dim,
         input_size=cfg.env_obs_size,
         action_dim=cfg.action_size,
     )
     load_weights(payload, policies, agent_keys=cfg.agent_keys)
     builder: LatentInputBuilder | None = None
-    bijepa = make_bijepa(cfg, "cpu")
+    bijepa = make_bijepa(cfg, device)
     if bijepa is not None:
         load_bijepa_weights(payload, bijepa)
         bijepa.eval()
-        builder = LatentInputBuilder(bijepa, device="cpu", agent_keys=cfg.agent_keys)
+        builder = LatentInputBuilder(bijepa, device=device, agent_keys=cfg.agent_keys)
 
     records: list[EpisodeRecord] = []
     infos: list[dict] = []
     print(
         f"eval {args.checkpoint} | task {cfg.task} | input_mode {input_mode} (env "
-        f"partner_mode {env_mode}) | policy input {cfg.env_obs_size + latent_dim} | "
+        f"partner_mode {env_mode}) | backend {args.backend} | "
+        f"policy input {cfg.env_obs_size + latent_dim} | "
         f"{args.episodes} episodes from held-out seed {args.seed + EVAL_SEED_OFFSET} | "
         "greedy policies",
         flush=True,
     )
-    env = make_coop_env(cfg.task, config=env_config, partner_mode=env_mode)
-    try:
-        for episode in range(args.episodes):
-            record, info = run_episode(
-                env,
-                policies,
-                args.seed + EVAL_SEED_OFFSET + episode,
-                cfg.agent_keys,
-                builder,
-            )
-            records.append(record)
-            infos.append(info)
-    finally:
-        env.close()
+    if args.backend == "warp":
+        records, infos = evaluate_warp(
+            cfg,
+            env_mode,
+            latent_dim,
+            policies,
+            builder,
+            cfg.agent_keys,
+            args,
+            device,
+        )
+    else:
+        env = make_coop_env(cfg.task, config=env_config, partner_mode=env_mode)
+        try:
+            for episode in range(args.episodes):
+                record, info = run_episode(
+                    env,
+                    policies,
+                    args.seed + EVAL_SEED_OFFSET + episode,
+                    cfg.agent_keys,
+                    builder,
+                )
+                records.append(record)
+                infos.append(info)
+        finally:
+            env.close()
 
     summary = summarize(records, infos, cfg.task)
     report = {
@@ -245,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         "task": cfg.task,
         "input_mode": input_mode,
         "partner_mode": env_mode,
-        "backend": "cpu",
+        "backend": args.backend,
         "policy_input_size": cfg.env_obs_size + latent_dim,
         "latent_dim": latent_dim,
         "seed": args.seed,

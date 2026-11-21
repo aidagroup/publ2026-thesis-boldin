@@ -5,20 +5,24 @@ The `--task` flag selects the environment: the default `"cube"` keeps the thesis
 `"cartpole"`/`"pendulum"`/`"toss"` train the two-agent coop suite (`left`/`right`) on the same
 trainer, policies, GAE, checkpoints and Bi-JEPA path -- the env supplies its observation
 width, action width and agent keys (`WrenchPPOConfig.env_obs_size`/`action_size`/
-`agent_keys`), and the coop vectorisation is `callosum.experiments.coop_tasks.vec_env.VecCoopEnv`.
+`agent_keys`), and the coop vectorisation is `callosum.experiments.coop_tasks.vec_env.VecCoopEnv`
+(CPU loop, parity/CI) or, the default when a CUDA device is visible,
+`callosum.experiments.coop_tasks.env_gpu.CoopBatchGPU` (batched `mujoco_warp`).
 
 Two independent PPO learners -- one Gaussian actor-critic per agent -- share one
 environment step and one **team** reward, so the coordination has to be learned from the
 decentralised observations alone (the `none` / `oracle` / `predicted` ablation of the
-plan). The default env backend (`--backend cpu`) is the single-instance MuJoCo CPU env
-(`callosum.experiments.cube_wrench.WrenchCubeEnv`), so its vectorisation is a Python loop:
-`callosum.experiments.cube_wrench.vec_env.VecWrenchCube` drives `num_envs` copies with auto-reset and
-the finished-episode statistics. The optional GPU backend (`--backend warp --device cuda`)
-replaces the loop with `callosum.experiments.cube_wrench.env_gpu.WrenchCubeBatchGPU`, which steps
-all `num_envs` worlds together through `mujoco_warp` (same env contract, same policies and
-checkpoints; see the config module for the manual install note). The trainer's rollout code
-is backend-agnostic: it only asks the vec env for its `torch_io` marker, so a GPU step
-consumes CUDA tensors instead of the numpy copies of the CPU loop.
+plan). The CPU backend (`--backend cpu`) is the single-instance MuJoCo CPU env
+(`callosum.experiments.cube_wrench.WrenchCubeEnv` / `callosum.experiments.coop_tasks.CoopTaskEnv`),
+so its vectorisation is a Python loop: `VecWrenchCube` / `VecCoopEnv` drive `num_envs` copies
+with auto-reset and the finished-episode statistics. The GPU backend
+(`--backend warp --device cuda`) replaces the loop with `WrenchCubeBatchGPU` /
+`CoopBatchGPU`, which step all `num_envs` worlds together through `mujoco_warp` (same env
+contract, same policies and checkpoints; see the config module for the manual install note).
+`--backend` defaults by task: the historical cube path stays on the CPU loop, the coop suite
+runs on the GPU when a CUDA device is visible (`callosum.experiments.cube_wrench.ppo_config.default_backend`).
+The trainer's rollout code is backend-agnostic: it only asks the vec env for its `torch_io`
+marker, so a GPU step consumes CUDA tensors instead of the numpy copies of the CPU loop.
 
 Reused from `callosum.common.ppo_core` (the ManiSkill PPO baseline's blocks, shared with
 the arms IPPO trainer): `ActorCritic` (3 x 256 tanh MLPs, state-independent log-std),
@@ -66,6 +70,14 @@ removes it):
 
     python -m callosum.experiments.cube_wrench.train --backend warp --device cuda --num-envs 1024 \
         --rollout-steps 64 --randomization harsh --partner-mode oracle --total-updates 300
+
+The two-agent coop suite uses the same trainer and the same GPU backend (`--backend` defaults to
+`warp` there on a CUDA host, see `callosum.experiments.cube_wrench.ppo_config.default_backend`):
+
+    python -m callosum.experiments.cube_wrench.train --task cartpole --num-envs 1024 \
+        --rollout-steps 64 --total-updates 400 --exp-name coop_cartpole_gpu_s0
+    python -m callosum.experiments.cube_wrench.train --task toss --num-envs 1024 \
+        --rollout-steps 64 --total-updates 400 --exp-name coop_toss_gpu_s0
 
 `--resume runs/<exp>` continues a killed run from its `latest.pt` (the saved config wins,
 so the hyperparameters cannot drift between restarts). SIGTERM saves a checkpoint after the
@@ -997,8 +1009,8 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Backend selection is task-based: the cube keeps its original CPU/warp paths (the
-    # environment variant follows the run's randomisation preset), while the coop suite has
-    # only the CPU MuJoCo loop (`callosum.experiments.coop_tasks.vec_env`, the same contract).
+    # environment variant follows the run's randomisation preset) and the coop suite uses the
+    # same two backends (the warp one is its CLI default, `ppo_config.default_backend`).
     if cfg.task == "cube":
         env_config = cfg.env_config()
         if cfg.backend == "warp":
@@ -1029,19 +1041,46 @@ def run(cfg: WrenchPPOConfig, *, explicit: frozenset[str] | None = None) -> Path
                 cfg.eval_envs, cfg.partner_mode, config=env_config, seed=cfg.seed + 1_000_003
             )
     else:
-        from callosum.experiments.coop_tasks.vec_env import VecCoopEnv
-
         env_config = cfg.coop_env_config()
-        train_vec = VecCoopEnv(
-            cfg.task, cfg.num_envs, cfg.partner_mode, config=env_config, seed=cfg.seed
-        )
-        eval_vec = VecCoopEnv(
-            cfg.task,
-            cfg.eval_envs,
-            cfg.partner_mode,
-            config=env_config,
-            seed=cfg.seed + 1_000_003,
-        )
+        if cfg.backend == "warp":
+            # Lazy import: the GPU stack (mujoco_warp/warp) is only needed for this branch.
+            from callosum.experiments.coop_tasks.env_gpu import CoopBatchGPU
+
+            train_vec = CoopBatchGPU(
+                cfg.task,
+                cfg.num_envs,
+                partner_mode=cfg.partner_mode,
+                config=env_config,
+                seed=cfg.seed,
+                device=cfg.device,
+            )
+            eval_vec = CoopBatchGPU(
+                cfg.task,
+                cfg.eval_envs,
+                partner_mode=cfg.partner_mode,
+                config=env_config,
+                seed=cfg.seed + 1_000_003,
+                device=cfg.device,
+            )
+        else:
+            print(
+                "warning: the coop CPU loop is for parity checks/CI only; the GPU backend is "
+                "the default on a CUDA host (--backend warp). CPU training of the coop suite "
+                "is limited by the pod's CPU quota.",
+                flush=True,
+            )
+            from callosum.experiments.coop_tasks.vec_env import VecCoopEnv
+
+            train_vec = VecCoopEnv(
+                cfg.task, cfg.num_envs, cfg.partner_mode, config=env_config, seed=cfg.seed
+            )
+            eval_vec = VecCoopEnv(
+                cfg.task,
+                cfg.eval_envs,
+                cfg.partner_mode,
+                config=env_config,
+                seed=cfg.seed + 1_000_003,
+            )
     try:
         return train(cfg, run_dir, train_vec, eval_vec, resumed)
     finally:

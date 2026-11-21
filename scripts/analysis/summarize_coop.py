@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -23,15 +24,13 @@ TASKS = ("cartpole", "pendulum", "toss")
 
 def _parse_name(path: Path) -> tuple[str, str, int, int] | None:
     """`coop_<task>_<mode>_s<seed>_base<base>.json` -> (task, mode, seed, base)."""
-    stem = path.stem
-    if not stem.startswith("coop_"):
+    match = re.fullmatch(
+        r"coop_(?P<task>[a-z]+)_(?P<mode>none|oracle|pred)_s(?P<seed>\d+)_base(?P<base>\d+)",
+        path.stem,
+    )
+    if match is None:
         return None
-    try:
-        head, base = stem.rsplit("_base", 1)
-        task, mode, seed_part = head[len("coop_") :].rsplit("_s", 2)
-        return task, mode, int(seed_part), int(base)
-    except ValueError:
-        return None
+    return match["task"], match["mode"], int(match["seed"]), int(match["base"])
 
 
 def collect(results_dir: Path) -> dict[tuple[str, str], list[dict]]:

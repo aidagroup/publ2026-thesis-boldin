@@ -583,11 +583,14 @@ def test_wrench_ppo_config_is_task_aware() -> None:
         WrenchPPOConfig().coop_env_config()
 
 
-def test_wrench_ppo_config_restricts_the_coop_task_backend_and_preset() -> None:
+def test_wrench_ppo_config_allows_the_gpu_backend_and_restricts_the_preset() -> None:
+    """The coop suite runs on both backends (warp is the CLI default on CUDA hosts)."""
     from callosum.experiments.cube_wrench.ppo_config import WrenchPPOConfig
 
-    with pytest.raises(ValueError, match="CPU MuJoCo backend"):
-        WrenchPPOConfig(task="cartpole", backend="warp")
+    cfg = WrenchPPOConfig(task="cartpole", backend="warp", device="cuda")
+    assert cfg.backend == "warp" and cfg.task == "cartpole"
+    with pytest.raises(ValueError, match="CUDA"):
+        WrenchPPOConfig(task="cartpole", backend="warp", device="cpu")
     with pytest.raises(ValueError, match="randomisation presets"):
         WrenchPPOConfig(task="pendulum", randomization="harsh")
 

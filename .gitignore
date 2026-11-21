@@ -258,3 +258,6 @@ results_gpu/
 
 # Local presentation scratch (PDFs/PNGs/scripts), not part of the package
 presentation/
+
+# Coop-suite evaluation JSONs (server artifacts)
+results_coop/

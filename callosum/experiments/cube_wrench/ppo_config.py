@@ -50,8 +50,11 @@ back to `"default"`).
 """
 
 import argparse
+import shutil
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from callosum.common.bijepa_config import BiJEPAConfig
 from callosum.common.cli import build_dataclass_parser
@@ -83,9 +86,14 @@ from callosum.experiments.cube_wrench.logic import (
 
 TASKS = ("cube",) + COOP_TASKS
 """Environments of a run: the default `CubeWrench-v0` (`"cube"`, the unchanged path) or one
-of the reduced two-agent coop tasks (`"cartpole"`, `"pendulum"`, `"toss"`). The coop suite runs on the
-CPU MuJoCo loop only (no mujoco_warp backend yet) and is vectorised by
-`callosum.experiments.coop_tasks.vec_env`; the cube keeps its original backend selection."""
+of the reduced two-agent coop tasks (`"cartpole"`, `"pendulum"`, `"toss"`).
+
+The coop suite has the same two backends as the cube: the batched GPU `mujoco_warp` backend
+(`callosum.experiments.coop_tasks.env_gpu.CoopBatchGPU`, the DEFAULT on a CUDA host) and the
+CPU `callosum.experiments.coop_tasks.vec_env.VecCoopEnv` loop (parity checks, CI, macOS unit
+tests). `default_backend()`/`parse_args` resolve the `"auto"` backend of a run: the cube keeps
+its historical CPU default, a coop task picks `"warp"` when a CUDA device is visible and falls
+back to `"cpu"` otherwise (with a warning). The cube keeps its original backend selection."""
 
 INPUT_MODES = ("none", "oracle", "predicted")
 """Policy-input modes: the env's partner visibility (`none`, `oracle`) plus the Bi-JEPA
@@ -93,8 +101,52 @@ INPUT_MODES = ("none", "oracle", "predicted")
 partner latent to the agent's own observation."""
 
 BACKENDS = ("cpu", "warp")
-"""Environment backends: the CPU MuJoCo loop (`callosum.experiments.cube_wrench.vec_env`) or the batched
-mujoco_warp GPU env (`callosum.experiments.cube_wrench.env_gpu`)."""
+"""Environment backends: the CPU MuJoCo loop (`callosum.experiments.cube_wrench.vec_env` /
+`callosum.experiments.coop_tasks.vec_env`) or the batched mujoco_warp GPU env
+(`callosum.experiments.cube_wrench.env_gpu` / `callosum.experiments.coop_tasks.env_gpu`)."""
+
+
+def cuda_visible() -> bool:
+    """Whether a CUDA device looks available, without importing torch (this module is stdlib).
+
+    The check is only used to resolve the task-dependent default of :attr:`WrenchPPOConfig.backend`
+    at CLI parse time: the GPU stack itself is imported lazily by the trainer, so a wrong guess
+    falls back to the CPU path and never breaks a pure config/CI run.
+
+    Returns:
+        True on Linux when `/dev/nvidia0` exists or `nvidia-smi` is on `PATH`.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    return Path("/dev/nvidia0").exists() or shutil.which("nvidia-smi") is not None
+
+
+def default_backend(task: str) -> str:
+    """The backend a run of `task` uses when `--backend` is not given.
+
+    The cube keeps its historical CPU default (the old path is unchanged); the coop suite
+    defaults to the batched GPU backend, because the pod's CPU quota makes CPU training of the
+    suite hours instead of minutes (`--backend cpu` remains for parity checks and CI).
+    """
+    if task == "cube":
+        return "cpu"
+    return "warp" if cuda_visible() else "cpu"
+
+
+def _resolve_runtime_defaults(values: dict, explicit: set[str]) -> tuple[dict, set[str]]:
+    """Fill `backend`/`device` of a parsed CLI dict from the task-dependent default.
+
+    Mutates and returns `values` (the parsed field dict) and the explicit-flag set: the
+    resolved backend/device count as explicit so a `--resume` takes them from the CLI instead
+    of the checkpoint's runtime resources.
+    """
+    if "backend" not in explicit:
+        values["backend"] = default_backend(values.get("task", "cube"))
+        explicit = explicit | {"backend"}
+        if values["backend"] == "warp" and "device" not in explicit:
+            values["device"] = "cuda"
+            explicit = explicit | {"device"}
+    return values, explicit
 
 
 def task_obs_size(task: str, partner_mode: str) -> int:
@@ -192,11 +244,13 @@ class WrenchPPOConfig:
     """Control steps per env per update (the plan's range is 32-128). One update therefore
     consumes `num_envs * rollout_steps` transitions."""
     backend: str = "cpu"
-    """Environment backend: `"cpu"` (the default single-instance MuJoCo loop, works on macOS
-    and the pod) or `"warp"` (the batched mujoco_warp GPU env; requires `device="cuda"` and
-    the optional `sandbox-gpu`/`mujoco-warp==4.0.1` install on the pod). The policy/checkpoint
-    format is backend-independent, so a checkpoint trained on one backend evaluates on the
-    other."""
+    """Environment backend: `"cpu"` (the single-instance MuJoCo loop, works on macOS and the
+    pod) or `"warp"` (the batched mujoco_warp GPU env; requires `device="cuda"` and the
+    optional `sandbox-gpu`/`mujoco-warp==4.0.1` install on the pod). The dataclass default is
+    `"cpu"` so the historical cube path stays byte-identical; the CLI resolves the run's
+    default by task (`--backend` omitted: cube -> cpu, coop -> warp on a CUDA host, cpu
+    otherwise, see `default_backend`). The policy/checkpoint format is backend-independent, so
+    a checkpoint trained on one backend evaluates on the other."""
     randomization: str = "default"
     """Episode-randomness preset of the environment (`"default"` or `"harsh"`), see
     `callosum.experiments.cube_wrench.config.RANDOMIZATION_PRESETS`. It is part of the checkpoint's
@@ -276,18 +330,12 @@ class WrenchPPOConfig:
                 f"randomization must be one of {RANDOMIZATION_PRESETS}, got {self.randomization!r}"
             )
         # The coop suite's private randomisation is part of its task configs at this step
-        # (no `default`/`harsh` presets yet), and its vectorisation is the CPU MuJoCo loop.
-        if self.task != "cube":
-            if self.backend != "cpu":
-                raise ValueError(
-                    "the coop tasks run on the CPU MuJoCo backend only at this step "
-                    f"(the warp backend is cube-only), got backend={self.backend!r}"
-                )
-            if self.randomization != "default":
-                raise ValueError(
-                    "the coop tasks do not have randomisation presets yet at this step; "
-                    f"randomization must be 'default', got {self.randomization!r}"
-                )
+        # (no `default`/`harsh` presets yet).
+        if self.task != "cube" and self.randomization != "default":
+            raise ValueError(
+                "the coop tasks do not have randomisation presets yet at this step; "
+                f"randomization must be 'default', got {self.randomization!r}"
+            )
         if self.seed < 0:
             raise ValueError(f"seed must be >= 0, got {self.seed}")
         if self.total_updates < 1:
@@ -486,8 +534,13 @@ def parse_args(argv: Sequence[str] | None = None) -> WrenchPPOConfig:
     `callosum.experiments.cube_wrench.train.run`); the runtime resources (`--backend`, `--device`)
     are the exception -- they are taken from the CLI, see
     `wrench_ppo.apply_runtime_overrides`.
+
+    `--backend` is resolved by task when it is omitted (`default_backend`): the cube stays on
+    the CPU loop, a coop task runs on the GPU when a CUDA device is visible.
     """
-    return WrenchPPOConfig(**vars(build_parser().parse_args(argv)))
+    parsed = vars(build_parser().parse_args(argv))
+    values, _explicit = _resolve_runtime_defaults(dict(parsed), set(parsed))
+    return WrenchPPOConfig(**values)
 
 
 def parse_args_with_explicit(
@@ -497,7 +550,9 @@ def parse_args_with_explicit(
 
     The trainer needs the explicit set for `--resume`: the checkpoint wins for the learning
     hyperparameters, but `backend`/`device` are runtime resources and must come from the CLI
-    (a flag that was not given keeps the checkpoint's value).
+    (a flag that was not given keeps the checkpoint's value; the resolved task default counts
+    as given, so a GPU-default coop run does not resume onto a saved CPU device).
     """
     values = vars(build_parser().parse_args(argv))
-    return WrenchPPOConfig(**values), frozenset(values)
+    values, explicit = _resolve_runtime_defaults(dict(values), set(values))
+    return WrenchPPOConfig(**values), frozenset(explicit)

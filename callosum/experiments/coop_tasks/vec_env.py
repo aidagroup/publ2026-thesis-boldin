@@ -1,10 +1,11 @@
 """Vectorised coop suite: N single-instance MuJoCo envs stepped in a Python loop.
 
-`callosum.experiments.coop_tasks.base.CoopTaskEnv` is single-instance and CPU-only (the vectorisation is
-the trainer's job, exactly as for `CubeWrench-v0`), and the plan keeps the coop suite on the
-CPU loop until the GPU-server throughput says otherwise. This module is that loop: it drives
-`num_envs` copies of one coop task, so `callosum.experiments.cube_wrench.train` can train the new
-tasks with the same PPO code and the same vec-env contract as `VecWrenchCube`.
+`callosum.experiments.coop_tasks.base.CoopTaskEnv` is single-instance and CPU-only (the
+vectorisation is the trainer's job, exactly as for `CubeWrench-v0`). This module is the CPU loop:
+it drives `num_envs` copies of one coop task, so `callosum.experiments.cube_wrench.train` can
+train the tasks with the same PPO code and the same vec-env contract as `VecWrenchCube`. The
+batched GPU twin is `callosum.experiments.coop_tasks.env_gpu.CoopBatchGPU` (the default backend
+for the coop suite on a CUDA host); this loop stays for parity checks, CI and macOS tests.
 
 It is the only place in the training package that imports the coop simulator package:
 `callosum.experiments.cube_wrench.train` imports this module lazily inside `run()`, so the trainer's

@@ -100,7 +100,9 @@ def test_parse_args_with_explicit_reports_the_given_flags() -> None:
     assert cfg.backend == "warp" and cfg.device == "cuda"
     assert explicit == frozenset({"backend", "device"})
     cfg, explicit = parse_args_with_explicit([])
-    assert cfg.backend == "cpu" and explicit == frozenset()
+    # The resolved task-dependent backend counts as an explicit runtime choice (it is what the
+    # run must use, not the checkpoint's saved runtime); the cube's default is the CPU loop.
+    assert cfg.backend == "cpu" and explicit == frozenset({"backend"})
 
 
 def test_resume_keeps_saved_hyperparameters_but_takes_runtime_resources_from_cli() -> None:

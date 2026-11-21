@@ -18,6 +18,45 @@
 - Честная абляция (held-out, 128 эп. × 3 сида): **none 1.000 / oracle 0.901 / predicted 0.932** на default; на harsh — **oracle 0.969 / none 0.839** (gap +0.13). Асимптотического разрыва нет; привилегированная информация даёт скорость обучения и устойчивость, Bi-JEPA в текущей реализации пока не обгоняет none — отрицательный промежуточный результат, план улучшения в отчёте.
 - Демо: [`demo/demo_policy_vs_oracle.mp4`](demo/demo_policy_vs_oracle.mp4), [`demo/demo_preview.gif`](demo/demo_preview.gif), [`demo/demo_wrench_arrows.mp4`](demo/demo_wrench_arrows.mp4) (видно, кто держит/крутит), [`demo/demo_arms_face_turn.mp4`](demo/demo_arms_face_turn.mp4) (реальные две SO-ARM101 в ManiSkill: 90° и SUCCESS), [`demo/learning_curves_honest_seed0.png`](demo/learning_curves_honest_seed0.png), [`demo/learning_curves_harsh.png`](demo/learning_curves_harsh.png).
 
+## Two-robot suite на GPU (2026-11-21)
+
+Три coop-задачи (`CartPoleCoop-v0`, `PendulumPump-v0`, `TossCatch-v0`) переведены на батчевый
+GPU-бэкенд `mujoco_warp`: раньше suite был CPU-only, и квота пода (~7.65 CPU-ядер) делала
+400–1200-апдейтные прогоны часами. Подробности — [`PLAN.md`](PLAN.md), отчёт —
+[`docs/results-coop-suite.md`](docs/results-coop-suite.md).
+
+- **`callosum/experiments/coop_tasks/env_gpu.py`** (`CoopBatchGPU`): все `nworld` миров в одной
+  Warp `Model`/`Data`, control step (латентность, start-delay, односторонняя активация, 8
+  substeps, наблюдения, награда, success/failure, auto-reset) — на GPU, CUDA graph на control
+  step. `toss` — контактная физика (свободный мяч + MOCAP-ракетки): позы ракеток
+  интерполируются по substeps, контакты детектируются per-substep, счётчик передач сохранён.
+- **GPU — дефолт для coop** на Linux+CUDA (`--backend` по умолчанию `warp`; cube по-прежнему
+  CPU; без CUDA — warning и CPU-петля). CPU-бэкенд остаётся для parity/CI/мака.
+- **Parity:** 8/8 сценариев PASS; contact-free задачи совпадают с CPU на ~1e-6 (qpos/obs/reward),
+  toss — на ~1e-3 (float32-контакты); два одинаковых GPU-инстанса bit-identical.
+- **Throughput (A40, control steps/s, 256/1024/4096 миров, warp vs CPU):** cartpole
+  52k/179k/449k vs 9.9k/10.9k/10.9k (**5×/16×/41×**); pendulum 104k/400k/1412k vs
+  14.3k/13.8k/13.2k (**7×/29×/107×**); toss 37k/117k/276k vs 662/649/681 (**56×/181×/405×**).
+- **Обучение:** 1024 env × 64 rollout — cartpole 1.3–1.5 с/апдейт, pendulum 1.2–2.9 с, toss
+  4.9–5.3 с; оценка 1200 апдейтов: ~28 / ~41 / ~100 мин соответственно (CPU — часы).
+  GPU-eval на том же чекпоинте даёт ровно те же метрики, что CPU-eval.
+
+```bash
+# GPU-обучение coop (по умолчанию backend=warp на CUDA-хосте; на поде: /root/.callosum/venv/bin/python)
+python -m callosum.experiments.cube_wrench.train --task cartpole --num-envs 1024 \
+    --rollout-steps 64 --total-updates 400 --exp-name coop_cartpole_gpu_s0
+python -m callosum.experiments.cube_wrench.train --task toss --num-envs 1024 \
+    --rollout-steps 64 --total-updates 400 --exp-name coop_toss_gpu_s0
+# GPU-eval чекпоинта (те же метрики, что CPU-eval)
+python -m callosum.experiments.coop_tasks.eval --checkpoint runs/coop_cartpole_gpu_s0/latest.pt \
+    --input-mode none --episodes 128 --backend warp --num-envs 64 --out results_coop_cartpole_gpu.json
+# parity / throughput на поде
+python scripts/experiments/coop_tasks/check_coop_gpu_parity.py --task toss --controller oracle --steps 30
+python scripts/experiments/coop_tasks/bench_coop_gpu.py --nworld 256 1024 4096
+```
+
+---
+
 ## Структура репозитория (2026-11-21)
 
 Код организован по экспериментам; переиспользуемое — в общем пакете:
@@ -31,7 +70,8 @@ callosum/
     cube_wrench/               # reduced-куб: env(+gpu), logic, config, ppo_config,
                                # train, vec_env, eval, render, oracle
     coop_tasks/                # two-robot suite: base, cartpole, pendulum, toss_catch,
-                               # logic, config, oracle, vec_env, eval
+                               # logic, config, oracle, vec_env (CPU), env_gpu (mujoco_warp),
+                               # eval
     arm/                       # обе линии SO-ARM101: scene/layout/turntable/expert(s),
                                # trainer, agent_obs, demos, bc; skills_* (skill-level),
                                # face_turn_* + bc (joint-level legacy)
