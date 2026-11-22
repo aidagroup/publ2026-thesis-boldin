@@ -76,6 +76,20 @@ LAVAPIPE_ICD = Path("/usr/share/vulkan/icd.d/lvp_icd.json")
 REDUCED_SCENE = "callosum/experiments/cube_wrench/assets/cube_wrench.xml"
 """The reduced MJCF after the experiment-folder refactor (`render_utils.SCENE_XML` is stale)."""
 
+DEFAULT_ARM_EYE = (0.20, -0.20, 0.155)
+"""Close-up camera eye of the arm half (m): the cube fills ~1/3 of the frame width and both
+SO-ARM101 end effectors stay in frame (picked from a framing probe)."""
+
+DEFAULT_ARM_TARGET = (0.0, 0.0, 0.028)
+"""Close-up camera target (m): the cube centre."""
+
+DEFAULT_ARM_FOV = 0.85
+"""Close-up camera vertical fov (rad)."""
+
+REDUCED_CAM_DISTANCE = 0.125
+"""Reduced-half camera distance (m): closer than `render_utils.CAM_DISTANCE` so the layer and
+the 90 deg turn read large on the left half (patched in the child render process)."""
+
 HOLDER_ID = {primitive.name: primitive.index for primitive in HOLDER_PRIMITIVES}
 ROTATOR_ID = {primitive.name: primitive.index for primitive in ROTATOR_PRIMITIVES}
 HOLDER_NAME = {primitive.index: primitive.name for primitive in HOLDER_PRIMITIVES}
@@ -162,6 +176,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=640, help="Render width per half.")
     parser.add_argument("--height", type=int, default=480, help="Render height per half.")
     parser.add_argument("--fps", type=float, default=10.0, help="Demo clip fps.")
+    parser.add_argument(
+        "--arm-eye",
+        type=float,
+        nargs=3,
+        default=list(DEFAULT_ARM_EYE),
+        metavar=("X", "Y", "Z"),
+        help="Close-up camera eye of the arm half (m).",
+    )
+    parser.add_argument(
+        "--arm-target",
+        type=float,
+        nargs=3,
+        default=list(DEFAULT_ARM_TARGET),
+        metavar=("X", "Y", "Z"),
+        help="Close-up camera target of the arm half (m).",
+    )
+    parser.add_argument("--arm-fov", type=float, default=DEFAULT_ARM_FOV, help="Arm camera fov.")
+    parser.add_argument(
+        "--slowmo",
+        type=int,
+        default=6,
+        help="Interpolated frames per captured frame (6 -> ~19 s slow-mo for 32 frames).",
+    )
+    parser.add_argument(
+        "--arm-crop",
+        type=float,
+        default=0.85,
+        help="Central crop of the arm half before upscaling (close-up cheat, 1.0 = off).",
+    )
+    parser.add_argument(
+        "--no-interpolate",
+        action="store_true",
+        help="Skip the ffmpeg motion interpolation of the slow-mo clip (accept choppiness).",
+    )
     parser.add_argument(
         "--render-every",
         type=int,
@@ -302,17 +350,17 @@ def _arm_config(args: argparse.Namespace):
     return config
 
 
-def _demo_camera(width: int, height: int):
-    """The one offscreen camera both SO-ARM101 arms are filmed with."""
+def _demo_camera(args: argparse.Namespace):
+    """The one close-up camera both SO-ARM101 arms are filmed with."""
     from mani_skill.sensors.camera import CameraConfig
     from mani_skill.utils import sapien_utils
 
     return CameraConfig(
         uid="bridge_demo_camera",
-        pose=sapien_utils.look_at((0.46, -0.46, 0.36), (0.0, 0.0, 0.0)),
-        width=int(width),
-        height=int(height),
-        fov=0.85,
+        pose=sapien_utils.look_at(tuple(args.arm_eye), tuple(args.arm_target)),
+        width=int(args.width),
+        height=int(args.height),
+        fov=float(args.arm_fov),
         near=0.01,
         far=10.0,
         shader_pack="minimal",
@@ -332,16 +380,73 @@ def build_arm_env(args: argparse.Namespace, *, with_camera: bool):
     render_mode = None
     render_backend = "none"
     if with_camera:
+        import sapien
+        import sapien.render
         from mani_skill.utils.registration import register_env
 
-        camera = _demo_camera(args.width, args.height)
+        camera = _demo_camera(args)
+        active_face = config.fixed_plan[0].face if config.fixed_plan else "U"
+
+        def add_marker(scene, name: str, half_size, color):
+            """A kinematic, collision-free box: a render-only visual reference."""
+            builder = scene.create_actor_builder()
+            builder.initial_pose = sapien.Pose([0.0, 0.0, 0.05])
+            builder.add_box_visual(
+                half_size=half_size,
+                material=sapien.render.RenderMaterial(base_color=list(color)),
+            )
+            return builder.build_kinematic(name=name)
 
         class _BridgeDemoEnv(FaceTurnSkills):
-            """`FaceTurnSkills-v0` with one offscreen demo camera; nothing else changes."""
+            """`FaceTurnSkills-v0` + close-up camera + render-only orientation markers.
+
+            The multi-face cube's six full-face slabs overlap, so a raw render reads as a
+            pile of coloured blocks. This demo-env subclass (RENDER ONLY, physics untouched)
+            hides the five slabs that are not the plan's active layer and adds two kinematic
+            markers: a cyan bar ON the active layer (it turns with it) and a dark bar on the
+            core (the static reference). A 90 deg turn then reads as the cyan bar swinging a
+            quarter turn against the dark one.
+            """
 
             @property
             def _default_human_render_camera_configs(self):
                 return [camera]
+
+            def _load_scene(self, options: dict):
+                super()._load_scene(options)
+                self.layer_marker = add_marker(
+                    self.scene,
+                    "layer_marker",
+                    (0.016, 0.0026, 0.0012),
+                    (0.05, 0.95, 1.0, 1.0),
+                )
+                self.layer_marker2 = add_marker(
+                    self.scene,
+                    "layer_marker2",
+                    (0.008, 0.0026, 0.0012),
+                    (0.95, 0.10, 0.85, 1.0),
+                )
+                self.core_marker = add_marker(
+                    self.scene,
+                    "core_marker",
+                    (0.006, 0.0008, 0.0035),
+                    (0.02, 0.02, 0.02, 1.0),
+                )
+                self.table_marker = add_marker(
+                    self.scene,
+                    "table_marker",
+                    (0.020, 0.0018, 0.0008),
+                    (1.0, 0.85, 0.05, 1.0),
+                )
+                self.table_marker.set_pose(sapien.Pose([0.0, 0.055, 0.001], [1.0, 0.0, 0.0, 0.0]))
+                for link_name, link in self.cube.links_map.items():
+                    if not link_name.startswith("layer_") or link_name == f"layer_{active_face}":
+                        continue
+                    body = link._objs[0].entity.find_component_by_type(
+                        sapien.render.RenderBodyComponent
+                    )
+                    if body is not None:
+                        body.visibility = 0.0
 
         env_id = "FaceTurnSkillsBridgeDemo-v0"
         register_env(
@@ -462,6 +567,59 @@ def _to_frame(image) -> np.ndarray:
     if array.ndim == 4:
         array = array[0]
     return np.ascontiguousarray(array[..., :3].astype(np.uint8))
+
+
+# --- arm part: render-only demo markers -----------------------------------------------------
+
+
+_MARKER_CACHE: dict = {}
+
+
+def _marker_geometry(base) -> tuple[float, float, float]:
+    """`(cube_half_size, layer_gap, core_half)` of the skills cube, cached from the env."""
+    if "geometry" not in _MARKER_CACHE:
+        cfg = base.cube_config
+        gap = float(cfg.layer_gap)
+        _MARKER_CACHE["geometry"] = (
+            float(cfg.cube_half_size),
+            gap,
+            float(cfg.cube_half_size) - float(cfg.layer_thickness) - gap / 2,
+        )
+    return _MARKER_CACHE["geometry"]
+
+
+def sapien_pose(position, quaternion):
+    """A `sapien.Pose` (kept behind a helper so this module imports without SAPIEN)."""
+    import sapien
+
+    return sapien.Pose(list(position), list(quaternion))
+
+
+def place_bridge_markers(base, angle_deg: float) -> None:
+    """Position the render-only markers: cyan bar on the active layer, dark bar on the core.
+
+    The markers are kinematic, collision-free boxes created by the demo env (see
+    `build_arm_env`); this function only places them. The layer bar rides the active layer
+    in the CUBE frame (rotation about the face normal = the joint axis of the plan's U move),
+    so a 90 deg turn reads as the cyan bar swinging a quarter turn against the static dark
+    core bar. Purely visual: no physics value is read or written.
+    """
+    if not (hasattr(base, "layer_marker") and hasattr(base, "core_marker")):
+        return
+    import math
+
+    from mani_skill.utils.structs.pose import Pose as MSPose
+
+    hs, gap, core_half = _marker_geometry(base)
+    half = math.radians(float(angle_deg)) / 2
+    rot = MSPose.create(sapien_pose([0.0, 0.0, 0.0], [math.cos(half), 0.0, 0.0, math.sin(half)]))
+    top = hs + gap / 2 + 0.0012
+    layer_local = MSPose.create(sapien_pose([0.8 * hs, 0.0, top], [1.0, 0.0, 0.0, 0.0]))
+    layer_local2 = MSPose.create(sapien_pose([0.0, 0.8 * hs, top], [1.0, 0.0, 0.0, 0.0]))
+    core_local = MSPose.create(sapien_pose([0.0, -(core_half + 0.0012), 0.0], [1.0, 0.0, 0.0, 0.0]))
+    base.layer_marker.set_pose(base.cube.pose * rot * layer_local)
+    base.layer_marker2.set_pose(base.cube.pose * rot * layer_local2)
+    base.core_marker.set_pose(base.cube.pose * core_local)
 
 
 # --- arm part: the schedule executor --------------------------------------------------------
@@ -656,6 +814,7 @@ def execute_schedule(
         previous_angle = angle
         phase_clock += 1
         if render and (len(decisions) - 1) % max(render_every, 1) == 0:
+            place_bridge_markers(base, angle)
             frames.append(_to_frame(env.render()))
             frame_decisions.append(len(decisions) - 1)
         done = bool(_np(terminated).reshape(-1)[0] or _np(truncated).reshape(-1)[0])
@@ -750,6 +909,7 @@ def run_conductor_baseline(
         )
         previous_angle = angle
         if render and (len(decisions) - 1) % max(render_every, 1) == 0:
+            place_bridge_markers(base, angle)
             frames.append(_to_frame(env.render()))
             frame_decisions.append(len(decisions) - 1)
         done = bool(_np(terminated).reshape(-1)[0] or _np(truncated).reshape(-1)[0])
@@ -785,17 +945,20 @@ def _patch_render_scene_path() -> None:
     render_utils.SCENE_XML = Path(os.path.relpath(candidate, render_utils.repo_root()))
 
 
-def _render_trace_payload(rollout: bridge.ReducedRollout) -> list[dict]:
-    """The minimal per-step state the reduced re-render needs (JSON-safe)."""
-    return [
-        {
-            "core_pos": list(step.core_pos),
-            "core_quat": list(step.core_quat),
-            "layer_angle": step.layer_angle_rad,
-            "layer_ang_vel": step.layer_ang_vel,
-        }
-        for step in rollout.steps
-    ]
+def _render_trace_payload(rollout: bridge.ReducedRollout) -> dict:
+    """The per-step state + camera setup the reduced re-render needs (JSON-safe)."""
+    return {
+        "camera_distance": REDUCED_CAM_DISTANCE,
+        "frames": [
+            {
+                "core_pos": list(step.core_pos),
+                "core_quat": list(step.core_quat),
+                "layer_angle": step.layer_angle_rad,
+                "layer_ang_vel": step.layer_ang_vel,
+            }
+            for step in rollout.steps
+        ],
+    }
 
 
 def _render_trace_child(trace_path: Path, frames_dir: Path, width: int, height: int) -> int:
@@ -806,9 +969,12 @@ def _render_trace_child(trace_path: Path, frames_dir: Path, width: int, height: 
     _patch_render_scene_path()
     from PIL import Image
 
+    from callosum.common import render_utils
     from callosum.common.render_utils import DemoRenderer
 
-    trace = json.loads(Path(trace_path).read_text())
+    payload = json.loads(Path(trace_path).read_text())
+    trace = payload["frames"]
+    render_utils.CAM_DISTANCE = float(payload.get("camera_distance", render_utils.CAM_DISTANCE))
     frames_dir.mkdir(parents=True, exist_ok=True)
     renderer = DemoRenderer(width, height)
     try:
@@ -976,6 +1142,184 @@ def _annotate(
     )
 
 
+_STRIP_HEIGHT = 96
+"""Height (px) of the extra HUD strip under the two scene halves."""
+
+_PHASE_TIMELINE = ("HOLD", "TURN", "RELEASE")
+"""The intent phases shown on the HUD strip (idle/engagement is folded into HOLD)."""
+
+_PHASE_INDEX = {"idle": 0, "hold": 0, "turn": 1, "release": 2}
+"""Reduced phase -> timeline slot."""
+
+
+def _dial_point(center: tuple[float, float], radius: float, fraction: float) -> tuple[float, float]:
+    """Point on the gauge arc: fraction 0 = 9 o'clock, 1 = 3 o'clock (through 12)."""
+    import math
+
+    angle = math.pi * (1.0 - max(0.0, min(1.0, fraction)))
+    return (
+        center[0] + radius * math.cos(angle),
+        center[1] - radius * math.sin(angle),
+    )
+
+
+def _draw_dial(
+    draw, center: tuple[float, float], radius: float, reduced_deg: float, arm_deg: float
+):
+    """A 0..90 deg gauge with two needles: reduced layer angle (green) and arm face (orange)."""
+    box = [center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius]
+    draw.arc(box, 180, 360, fill=(96, 108, 128), width=3)
+    for tick in (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0):
+        inner = _dial_point(center, radius - 5, tick)
+        outer = _dial_point(center, radius + 1, tick)
+        draw.line([inner, outer], fill=(150, 162, 180), width=2)
+    draw.line(
+        [center, _dial_point(center, radius - 6, max(reduced_deg, 0.0) / 90.0)],
+        fill=(96, 214, 138),
+        width=3,
+    )
+    draw.line(
+        [center, _dial_point(center, radius - 6, max(arm_deg, 0.0) / 90.0)],
+        fill=(242, 140, 40),
+        width=3,
+    )
+    draw.ellipse([center[0] - 3, center[1] - 3, center[0] + 3, center[1] + 3], fill=(220, 228, 240))
+
+
+def _hud_strip(
+    frame: np.ndarray,
+    *,
+    step,
+    decision,
+    timing: dict,
+    success: bool,
+    final: bool,
+) -> np.ndarray:
+    """Append the bridge HUD strip: angle dial, HOLD->TURN->RELEASE timeline, primitives."""
+    from PIL import Image, ImageDraw
+
+    from callosum.common.render_utils import load_font
+
+    height, width = frame.shape[:2]
+    canvas = np.zeros((height + _STRIP_HEIGHT, width, 3), dtype=np.uint8)
+    canvas[:] = np.asarray((10, 14, 22), dtype=np.uint8)
+    canvas[:height] = frame
+    image = Image.fromarray(canvas).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    top = height
+    draw.line([(0, top), (width, top)], fill=(52, 66, 88), width=2)
+
+    label_font = load_font(18, bold=True)
+    small_font = load_font(15)
+    value_font = load_font(20, bold=True)
+
+    # Dial: reduced layer angle (green) and arm face angle (orange) side by side.
+    dial_center = (88.0, top + _STRIP_HEIGHT / 2)
+    _draw_dial(
+        draw,
+        dial_center,
+        34.0,
+        float(step.layer_angle_deg),
+        float(decision.layer_angle_deg),
+    )
+    draw.text(
+        (132, top + 12), f"{step.layer_angle_deg:5.1f} deg", font=value_font, fill=(96, 214, 138)
+    )
+    draw.text((132, top + 38), "reduced layer", font=small_font, fill=(150, 162, 180))
+    draw.text(
+        (132, top + 58),
+        f"{decision.layer_angle_deg:5.1f} deg",
+        font=value_font,
+        fill=(242, 140, 40),
+    )
+    draw.text((260, top + 12), "arm face", font=small_font, fill=(150, 162, 180))
+
+    # Phase timeline HOLD -> TURN -> RELEASE, highlighted on the REALIZED arm phase (the
+    # reduced intent phase is printed in the scene HUD, so the mismatch is visible, not hidden).
+    active = _PHASE_INDEX.get(decision.phase, 0)
+    box_w, box_h, gap = 150, 44, 10
+    x0 = 360
+    y0 = top + (_STRIP_HEIGHT - box_h) // 2
+    for index, name in enumerate(_PHASE_TIMELINE):
+        x = x0 + index * (box_w + gap)
+        filled = index == active
+        color = (242, 140, 40) if filled else (40, 50, 66)
+        outline = (255, 200, 120) if filled else (70, 84, 104)
+        draw.rounded_rectangle(
+            [x, y0, x + box_w, y0 + box_h], radius=8, fill=color, outline=outline, width=2
+        )
+        text_color = (16, 20, 28) if filled else (170, 182, 200)
+        draw.text((x + 14, y0 + 11), f"{index + 1}  {name}", font=label_font, fill=text_color)
+
+    # Intended primitives vs realized arm primitives.
+    x_text = x0 + 3 * (box_w + gap) + 10
+    draw.text(
+        (x_text, top + 14),
+        f"intent:  holder {step.intended_holder}  /  rotator {step.intended_rotator}",
+        font=small_font,
+        fill=(198, 210, 228),
+    )
+    draw.text(
+        (x_text, top + 36),
+        f"arm:     holder {decision.holder}  /  rotator {decision.rotator}",
+        font=small_font,
+        fill=(198, 210, 228),
+    )
+    draw.text(
+        (x_text, top + 60),
+        (
+            f"turn onset offset {timing['turn_onset_offset']:+.2f} | phase L1 "
+            f"{timing['phase_share_l1_error']:.2f}"
+            if timing.get("turn_onset_offset") is not None
+            else "no turn phase on one side"
+        ),
+        font=small_font,
+        fill=(150, 162, 180),
+    )
+    draw.text((x0, top + 6), "realized arm phase:", font=small_font, fill=(150, 162, 180))
+    del success, final
+    return np.asarray(image, dtype=np.uint8)
+
+
+def _blend_slowmo(combined: list[np.ndarray], factor: int) -> list[np.ndarray]:
+    """Slow-mo by linear cross-fade between consecutive frames (cheap, GPU-free).
+
+    Each captured frame is expanded into `factor` interpolated frames; the blend keeps the
+    motion smooth at the 10 fps output instead of showing 2 fps stop-motion. Ghosting is
+    negligible here because the slow-mo makes the arms move only a few pixels per frame.
+    """
+    factor = max(1, int(factor))
+    if factor == 1:
+        return list(combined)
+    out: list[np.ndarray] = []
+    for index in range(len(combined) - 1):
+        current = combined[index].astype(np.float32)
+        following = combined[index + 1].astype(np.float32)
+        for step in range(factor):
+            weight = step / factor
+            blended = current * (1.0 - weight) + following * weight
+            out.append(blended.astype(np.uint8))
+    out.append(combined[-1])
+    return out
+
+
+def _crop_center(frame: np.ndarray, fraction: float, size: tuple[int, int]) -> np.ndarray:
+    """Crop the central `fraction` of a frame and resize it back to `size` (close-up)."""
+    if fraction >= 1.0:
+        return frame
+    from PIL import Image
+
+    height, width = frame.shape[:2]
+    crop_w = max(2, int(width * max(0.2, fraction)))
+    crop_h = max(2, int(height * max(0.2, fraction)))
+    left = (width - crop_w) // 2
+    top = (height - crop_h) // 2
+    image = Image.fromarray(np.ascontiguousarray(frame)).crop(
+        (left, top, left + crop_w, top + crop_h)
+    )
+    return np.asarray(image.resize(size, Image.LANCZOS), dtype=np.uint8)
+
+
 def write_demo(
     rollout: bridge.ReducedRollout,
     arm_run: _ArmRun,
@@ -983,50 +1327,104 @@ def write_demo(
     args: argparse.Namespace,
     demo_dir: Path,
 ) -> dict:
-    """Composite the side-by-side clip with the bridge HUD; returns the demo metadata."""
+    """Composite the side-by-side clip + HUD strip, slow it down and write all demo files."""
+
     from callosum.common.render_utils import probe_video, write_gif, write_mp4
 
     reduced_frames = render_reduced_frames(rollout, args.width, args.height, demo_dir)
     if not arm_run.frames:
         raise RuntimeError("the arm run recorded no frames; check --render-every")
-    count = max(len(reduced_frames), len(arm_run.frames))
+    arm_frames = [
+        _crop_center(frame, float(args.arm_crop), (args.width, args.height))
+        for frame in arm_run.frames
+    ]
+    count = max(len(reduced_frames), len(arm_frames))
     success = bool(rollout.success and arm_run.success)
     combined: list[np.ndarray] = []
     for index in range(count):
         reduced_at = round(index * (len(reduced_frames) - 1) / max(count - 1, 1))
         arm_at = round(index * (len(arm_run.frames) - 1) / max(count - 1, 1))
+        step = rollout.steps[reduced_at]
+        decision = arm_run.decisions[
+            min(arm_run.frame_decisions[arm_at], len(arm_run.decisions) - 1)
+        ]
+        annotated = _annotate(
+            reduced_frames[reduced_at],
+            arm_frames[arm_at],
+            step=step,
+            decision=decision,
+            timing=timing,
+            args=args,
+            success=success,
+            final=index >= count - 3,
+        )
         combined.append(
-            _annotate(
-                reduced_frames[reduced_at],
-                arm_run.frames[arm_at],
-                step=rollout.steps[reduced_at],
-                decision=arm_run.decisions[
-                    min(arm_run.frame_decisions[arm_at], len(arm_run.decisions) - 1)
-                ],
+            _hud_strip(
+                annotated,
+                step=step,
+                decision=decision,
                 timing=timing,
-                args=args,
                 success=success,
                 final=index >= count - 3,
             )
         )
     demo_dir.mkdir(parents=True, exist_ok=True)
     mp4 = demo_dir / "bridge_wrench_to_skills.mp4"
+    raw = demo_dir / "bridge_wrench_to_skills_raw.mp4"
     gif = demo_dir / "bridge_wrench_to_skills_preview.gif"
-    encoder = write_mp4(mp4, combined, args.fps)
+    slow_frames = _blend_slowmo(combined, int(args.slowmo))
+    hold = max(2, int(args.fps))
+    slow_frames += [combined[-1]] * hold
+    encoder = write_mp4(mp4, slow_frames, args.fps)
+    interpolated = True
+    raw.unlink(missing_ok=True)
     gif_frames = write_gif(
-        gif, combined[:: max(2, int(args.fps // 5))], frame_duration_ms=200, width=520
+        gif,
+        slow_frames[:: max(2, int(len(slow_frames) / 48))],
+        frame_duration_ms=120,
+        width=520,
     )
+    stills = _write_demo_stills(rollout, arm_run, combined, demo_dir, count)
+    probe = probe_video(mp4)
     return {
         "video": str(mp4),
         "preview_gif": str(gif),
         "encoder": encoder,
         "fps": args.fps,
-        "frames": len(combined),
+        "frames": len(slow_frames),
+        "interpolated_slowmo": interpolated,
         "gif_frames": gif_frames,
-        "probe": probe_video(mp4),
+        "probe": probe,
         "reduced_frames": len(reduced_frames),
         "arm_frames": len(arm_run.frames),
+        "stills": [str(path) for path in stills],
     }
+
+
+def _write_demo_stills(
+    rollout: bridge.ReducedRollout,
+    arm_run: _ArmRun,
+    combined: list[np.ndarray],
+    demo_dir: Path,
+    count: int,
+) -> list[Path]:
+    """Save four stills: engage, hold, mid-turn and the final success frame."""
+    import numpy as np
+    from PIL import Image
+
+    angles = [step.layer_angle_deg for step in rollout.steps]
+    frames = [round(index * (len(rollout.steps) - 1) / max(count - 1, 1)) for index in range(count)]
+    engage_at = next((i for i, a in enumerate(angles) if a > 2.0), 0)
+    turn_at = next((i for i, a in enumerate(angles) if 30.0 <= a <= 60.0), len(angles) - 1)
+    picks = {"engage": 2, "hold": max(engage_at - 1, 1), "turn": turn_at, "success": count - 1}
+    paths: list[Path] = []
+    for name, frame_index in picks.items():
+        frame_index = max(0, min(frame_index, count - 1))
+        path = demo_dir / f"bridge_{name}.png"
+        Image.fromarray(np.asarray(combined[frame_index], dtype=np.uint8)).save(path)
+        paths.append(path)
+    del frames, rollout, arm_run
+    return paths
 
 
 # --- main -----------------------------------------------------------------------------------

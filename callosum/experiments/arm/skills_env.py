@@ -408,11 +408,11 @@ class FaceTurnSkills(TwoSO101Base):
         rationale (scripted motorics by the thesis's assumption; the coordination
         policy is the subject, the physical rim-pinch torque transfer was measured
         as unreliable: the grip slips and the cube drifts ~9 cm without the face
-        ever turning). ACTIVE ONLY ON A REAL GRASP: per env, the rotator's
-        selected primitive must be turn90/turn180 AND `is_grasping` must hold on
-        the active layer link (the same contact check the useless-action facts
-        use) -- otherwise nothing happens and a turn on an unheld cube fails as
-        before. The layer joint then follows the authoritative move target at the
+        ever turning). ACTIVE ONLY ON A GRASP: per env, the rotator's selected
+        primitive must be turn90/turn180 AND the active layer link must be grasped
+        under the CONFIGURED criterion (`_grasp_any` contact, plus the proximity
+        pinch in `turn_grasp_mode="proximity"`, exactly like `rotator_grasp_fact`)
+        -- otherwise nothing happens and a turn on an unheld cube fails as before. The layer joint then follows the authoritative move target at the
         arm delta-limit speed, one commanded step per substep, in synchrony with
         the rotator's wrist roll command (the wrist and the layer rotate
         together, so the jaws do not scrape the rim).
@@ -426,18 +426,30 @@ class FaceTurnSkills(TwoSO101Base):
         turning = np.isin(selections, tuple(self._TURN_IDS))
         if not turning.any():
             return
-        # A real grasp of the ACTIVE layer only (like the useless-action facts).
+        # A grasp of the ACTIVE layer only, with the SAME criterion as the env's exported
+        # `rotator_grasp_fact`: in `turn_grasp_mode="proximity"` (the documented
+        # scripted-motorics simplification) a navigated proximity pinch counts exactly as
+        # it does for the conductor, otherwise the assist was gated on a physical pinch
+        # that the design itself calls unreliable (side layers after a flip cannot be
+        # pinched: both arms cramp over the 5.7 cm cube) -- so the fact said "grasping"
+        # while the assist refused to turn, and every post-flip move deadlocked.
+        proximity = self.skills_config.turn_grasp_mode == "proximity"
+        pinching = torch.as_tensor(
+            np.isin(selections, tuple(self._ROTATOR_GRASPISH_IDS)), device=self.device
+        )
         turning_t = torch.as_tensor(turning, device=self.device)
         face = self._face_tensor()
         grasping = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         for face_idx in torch.unique(face[turning_t]):
             mask = turning_t & (face == face_idx)
+            link = self._active_layer_link(int(face_idx))
             # Per-jaw test as well: the rim pinch presses the same layer link with both
             # jaws, but the pairwise `is_grasping` call also fails if their contact
             # forces land on different sub-links of the slab.
-            grasping |= mask & self._grasp_any(
-                self.agent_b, [self._active_layer_link(int(face_idx))]
-            )
+            grasping |= mask & self._grasp_any(self.agent_b, [link])
+            if proximity:
+                near = torch.linalg.norm(self.agent_b.tcp_pos - link.pose.p, dim=1) < _NEAR_TOL
+                grasping |= mask & near & pinching
         active = turning_t & grasping & (self._plan_index < self.skills_config.plan_length)
         if not bool(active.any()):
             return
@@ -698,7 +710,10 @@ class FaceTurnSkills(TwoSO101Base):
                     # `turn_grasp_mode`): navigating near the layer with a
                     # grasp/turn selected establishes the grasp fact; contact
                     # above still qualifies on its own.
-                    pinching = np.isin(selections_rot, _GRASPISH)
+                    # NOTE: np.isin(array, frozenset) is all-False on numpy >= 2 (the set is
+                    # read as a 0-d object, not an iterable of values), which silently killed
+                    # the whole proximity pinch. Always pass a tuple/list here.
+                    pinching = np.isin(selections_rot, tuple(_GRASPISH))
                     rotator_grasp |= (
                         mask & rotator_near & torch.as_tensor(pinching, device=self.device)
                     )

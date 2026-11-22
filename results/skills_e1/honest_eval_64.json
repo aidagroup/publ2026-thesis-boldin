@@ -1,0 +1,232 @@
+{
+  "config": {
+    "env_id": "FaceTurnSkills-v0",
+    "policy": "checkpoints",
+    "checkpoints": [
+      "/workspace/callosum-runs/skills_bc_U/bc.pt"
+    ],
+    "partner_modes": [
+      "oracle"
+    ],
+    "seeds": [
+      0
+    ],
+    "episodes": 64,
+    "num_envs": 1,
+    "plan_notation": "U",
+    "max_episode_decisions": 80,
+    "sim_backend": "cpu",
+    "probe": true,
+    "probe_horizons": [
+      1,
+      2,
+      4
+    ],
+    "out": "/workspace/callosum-runs/skills_bc_U/honest_eval_64.json"
+  },
+  "runs": {
+    "checkpoints_oracle_s0": {
+      "behaviour": {
+        "episodes": 64,
+        "success_rate": 0.71875,
+        "timeout_rate": 0.28125,
+        "decisions_mean": 68.65625,
+        "decisions_to_success_mean": 36.82608695652174,
+        "flips_mean": 0.0,
+        "useless_holder_per_decision": 0.035275375512061904,
+        "useless_rotator_per_decision": 0.15088757396449703
+      },
+      "phase_counts": {
+        "holder/approach_body": 2567,
+        "rotator/wait": 2641,
+        "holder/grasp": 246,
+        "rotator/approach_face": 693,
+        "holder/wait": 1541,
+        "rotator/grasp": 707,
+        "rotator/turn90": 114,
+        "holder/release": 40,
+        "rotator/release": 53,
+        "rotator/retreat": 186
+      },
+      "probe": {
+        "events": {
+          "h1/turn": {
+            "holder": {
+              "own": {
+                "auc": 0.9762135922330097,
+                "ece": 0.4886080889172889,
+                "base_rate": 0.027690371302706105
+              },
+              "oracle": {
+                "auc": 0.9933068549573404,
+                "ece": 0.48689296517642466,
+                "base_rate": 0.027690371302706105
+              }
+            }
+          },
+          "h1/release": {
+            "holder": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            },
+            "rotator": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            }
+          },
+          "h2/turn": {
+            "holder": {
+              "own": {
+                "auc": 0.9762104255191812,
+                "ece": 0.48030403095108226,
+                "base_rate": 0.02815099168266155
+              },
+              "oracle": {
+                "auc": 0.9924441917529475,
+                "ece": 0.4824703857219306,
+                "base_rate": 0.02815099168266155
+              }
+            }
+          },
+          "h2/release": {
+            "holder": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            },
+            "rotator": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            }
+          },
+          "h4/turn": {
+            "holder": {
+              "own": {
+                "auc": 0.9694026151081366,
+                "ece": 0.48371510789069466,
+                "base_rate": 0.02911978821972204
+              },
+              "oracle": {
+                "auc": 0.9812077833550226,
+                "ece": 0.484220183710572,
+                "base_rate": 0.02911978821972204
+              }
+            }
+          },
+          "h4/release": {
+            "holder": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            },
+            "rotator": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            }
+          },
+          "h1/flip": {
+            "rotator": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            }
+          },
+          "h2/flip": {
+            "rotator": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            }
+          },
+          "h4/flip": {
+            "rotator": {
+              "own": {
+                "auc": NaN,
+                "ece": NaN
+              },
+              "oracle": {
+                "auc": NaN,
+                "ece": NaN
+              }
+            }
+          }
+        },
+        "next_primitive": {
+          "holder": {
+            "own": {
+              "accuracy": 0.9011957205789805,
+              "chance": 0.775330396475771
+            },
+            "oracle": {
+              "accuracy": 0.9609817495280051,
+              "chance": 0.775330396475771
+            }
+          },
+          "rotator": {
+            "own": {
+              "accuracy": 0.8722466960352423,
+              "chance": 0.658904971680302
+            },
+            "oracle": {
+              "accuracy": 0.9691629955947136,
+              "chance": 0.658904971680302
+            }
+          }
+        }
+      },
+      "config": {
+        "policy": "checkpoints",
+        "partner_mode": "oracle",
+        "seed": 0,
+        "plan_notation": "U",
+        "plan_length": 1,
+        "max_episode_decisions": 80,
+        "episodes": 64
+      }
+    }
+  }
+}

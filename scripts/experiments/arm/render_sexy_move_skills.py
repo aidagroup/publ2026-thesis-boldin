@@ -84,11 +84,11 @@ SUBTITLE = (
     "scripted conductor = skill-level upper bound"
 )
 
-DEFAULT_EYE = (0.46, -0.46, 0.36)
-DEFAULT_TARGET = (0.0, 0.0, 0.0)
+DEFAULT_EYE = (0.15, -0.16, 0.11)
+DEFAULT_TARGET = (0.0, 0.0, 0.03)
 """Camera pose (m): the three-quarter view of `render_face_turn_arms.py` (both arm bases and
 the cube at 640x480, 0.85 rad fov)."""
-DEFAULT_FOV = 0.85
+DEFAULT_FOV = 0.70
 
 MP4_NAME = "demo_sexy_move.mp4"
 LEARNED_MP4_NAME = "demo_arms_learned_turn.mp4"
@@ -190,6 +190,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gif-every", type=int, default=2)
     parser.add_argument("--gif-width", type=int, default=320)
     parser.add_argument("--stills-only", action="store_true", help="Only write the stills.")
+    parser.add_argument(
+        "--no-markers",
+        action="store_true",
+        help="Do not add the render-only cyan (active layer) / black (core) markers.",
+    )
+    parser.add_argument(
+        "--show-all-slabs",
+        action="store_true",
+        help=(
+            "Keep all six layer slabs visible. By default the five inactive slabs are "
+            "hidden in the CPU renderer (they overlap at the edges and read as a broken "
+            "cube), leaving only the core + the active layer."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.every < 1:
         parser.error("--every must be >= 1")
@@ -198,6 +212,31 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.gif_every < 1:
         parser.error("--gif-every must be >= 1")
     return args
+
+
+def _draw_dial(frame: np.ndarray, fraction: float, label: str = "0 -> 90 deg") -> np.ndarray:
+    """Render-only gauge: a 180 deg dial from 0 to the move target plus a needle."""
+    from PIL import ImageDraw
+
+    image = Image.fromarray(frame).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    radius = max(28, height // 9)
+    cx, cy = width - radius - 24, height - radius - 22
+    box = [cx - radius, cy - radius, cx + radius, cy + radius]
+    draw.arc(box, start=180, end=360, fill=(90, 110, 140), width=4)
+    fraction = min(max(float(fraction), 0.0), 1.0)
+    end = 180 + 180 * fraction
+    draw.arc(box, start=180, end=end, fill=(110, 230, 140), width=5)
+    angle = math.radians(end)
+    draw.line(
+        [cx, cy, cx + radius * math.cos(angle), cy + radius * math.sin(angle)],
+        fill=(255, 255, 255),
+        width=3,
+    )
+    draw.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=(255, 255, 255))
+    draw.text((cx - radius, cy + 8), label, fill=(210, 222, 240))
+    return np.asarray(image)
 
 
 def _to_frame(image) -> np.ndarray:
@@ -325,7 +364,11 @@ def _decorate(
         ),
         policy_label,
     ]
-    goal_lines = [f"PLAN: {plan_notation}  ->  {n_executable} executable move(s)"]
+    goal_lines = [
+        f"PLAN {plan_notation} -> {n_executable} move"
+        if n_executable == 1
+        else f"PLAN {plan_notation} -> {n_executable} moves"
+    ]
     if goal:
         goal_lines.append(f"GOAL: {goal}")
     return annotate_frame(
@@ -398,12 +441,88 @@ def _run_demo(args: argparse.Namespace) -> dict:
         shader_pack="minimal",
     )
 
+    created_markers: list = []
+
     class FaceTurnSkillsDemo(FaceTurnSkills):
-        """`FaceTurnSkills-v0` with one offscreen demo camera; nothing else changes."""
+        """`FaceTurnSkills-v0` + a close-up demo camera, render-only markers and the
+        inactive slabs hidden (in the CPU renderer they overlap at the edges and read
+        as a broken cube, which is exactly the complaint the close-up demo addresses)."""
 
         @property
         def _default_human_render_camera_configs(self):
             return [camera_config]
+
+        def _load_scene(self, options: dict):
+            super()._load_scene(options)
+            active = fixed_plan[0].face
+            if not args.show_all_slabs:
+                # DIM the inactive slabs instead of hiding them: hiding leaves the core as
+                # a floating box, dimming keeps the cube readable while the bright active
+                # layer plus the cyan marker make the 90 deg turn unambiguous.
+                dim_material = sapien.render.RenderMaterial(
+                    base_color=[0.11, 0.12, 0.15, 1.0], roughness=0.9
+                )
+                for face, link in self.layer_links.items():
+                    if face == active:
+                        continue
+                    for obj in link._objs:
+                        component = obj.entity.find_component_by_type(
+                            sapien.render.RenderBodyComponent
+                        )
+                        if component is None:
+                            continue
+                        try:
+                            for shape in component.render_shapes:
+                                shape.material = dim_material
+                        except Exception:  # noqa: BLE001 - fall back to hiding this slab
+                            component.visibility = 0
+            if args.no_markers:
+                return
+            half_size = self.cube_config.cube_half_size
+            layer_off = (
+                half_size - self.cube_config.layer_thickness / 2 + self.cube_config.layer_gap / 2
+            )
+            marker_local_z = layer_off + self.cube_config.layer_thickness / 2 + 0.004
+
+            def add_marker(name, half, color):
+                builder = self.scene.create_actor_builder()
+                builder.initial_pose = sapien.Pose([0.0, 0.0, 0.30])
+                builder.add_box_visual(
+                    half_size=half,
+                    material=sapien.render.RenderMaterial(base_color=list(color)),
+                )
+                return builder.build_kinematic(name=name)
+
+            # The cyan bar lies flat on the active slab's top face and is posed in the
+            # CORE frame rotated by the layer joint angle each frame: attaching it to the
+            # layer link put it inside the slab (its local frame's +z sign is not the
+            # outward normal for every face), while this version shows the 90 deg turn
+            # unambiguously for the U move.
+            created_markers.append(
+                (
+                    add_marker(
+                        "active_layer_marker",
+                        (0.013, 0.0028, 0.0016),
+                        (0.05, 0.85, 0.95, 1.0),
+                    ),
+                    "layer_bar",
+                    marker_local_z,
+                )
+            )
+            created_markers.append(
+                (
+                    add_marker(
+                        "core_marker",
+                        (0.0018, 0.0022, 0.011),
+                        (0.02, 0.02, 0.02, 1.0),
+                    ),
+                    self.core_link,
+                    sapien.Pose(
+                        [half_size + 0.001, 0.010, 0.0],
+                        sapien.Pose(q=[0.0, 0.7071068, 0.0, 0.7071068]).q,
+                    ),
+                )
+            )
 
     # The base env counts sim SUBSTEPS, and one decision is `decision_period` substeps:
     # registering `max_episode_decisions` directly would truncate after a tenth of the
@@ -485,6 +604,14 @@ def _run_demo(args: argparse.Namespace) -> dict:
     def capture(decision: int, sim_step: int) -> None:
         """Render the current state and store the frame plus the numbers shown in its HUD."""
         nonlocal render_seconds
+        for marker, link, local in created_markers:
+            if link == "layer_bar":
+                angle = float(base.cube.get_qpos()[0][base.layer_col[fixed_plan[0].face]])
+                half = 0.5 * angle
+                spin = sapien.Pose(q=[0.0, 0.0, math.sin(half), math.cos(half)])
+                marker.set_pose(base.cube.pose * sapien.Pose([0.010, 0.0, local]) * spin)
+            else:
+                marker.set_pose(link.pose * sapien.Pose(local.p, local.q))
         started = time.time()
         frame = _to_frame(env.render())
         render_seconds += time.time() - started
@@ -567,6 +694,11 @@ def _run_demo(args: argparse.Namespace) -> dict:
                 f"decisions {decisions_used}, flips {meta['flips']}, "
                 f"final layer {final['angle_deg']:.0f} deg, drift {final['drift_cm']:.2f} cm"
             )
+        dial_fraction = (
+            min(meta["angle_deg"] / meta["target_deg"], 1.0)
+            if meta["target_deg"] > 1e-6
+            else min(meta["plan_index"] / n_executable, 1.0)
+        )
         if meta["success"]:
             decorated.append(
                 _decorate(
@@ -584,6 +716,7 @@ def _run_demo(args: argparse.Namespace) -> dict:
                     status_detail=detail,
                 )
             )
+            decorated[-1] = _draw_dial(decorated[-1], 1.0)
         else:
             decorated.append(
                 _decorate(
@@ -598,6 +731,7 @@ def _run_demo(args: argparse.Namespace) -> dict:
                     goal=goal,
                 )
             )
+            decorated[-1] = _draw_dial(decorated[-1], dial_fraction)
     if success:
         final_frame = decorated[-1]
     else:

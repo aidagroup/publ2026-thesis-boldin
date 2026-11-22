@@ -259,9 +259,9 @@ def test_runtime_actions_shape_and_grip_passthrough() -> None:
 
 def test_flip_macro_holds_the_cube_through_the_flip() -> None:
     """The flip keeps the grip through lift/roll/lower (the loaded wrist cannot
-    press the cube onto the table), re-centres it, then RELEASES it onto the
-    lower jaw: the tine ride keeps the layer lock open through contact and
-    gives the rotator the low rim where its vertical-finger grasp is feasible."""
+    press the cube onto the table) and then drags the hanging cube back over its
+    home XY: the roll arc leaves it 2-3 cm off centre, which otherwise eats the
+    3 cm success drift tolerance before the rotator even starts its approach."""
     from callosum.experiments.arm.skills_runtime import Sequence
 
     runtime = SkillsRuntime(1)
@@ -272,6 +272,7 @@ def test_flip_macro_holds_the_cube_through_the_flip() -> None:
             "flip lift",
             "flip roll",
             "flip lower",
+            "flip home",
         ]
 
 
