@@ -245,3 +245,7 @@ demos/
 # Local code-indexing tools (two separate tools) — never commit either.
 .codegraph/
 .codegraphy/
+
+# OS / editor noise and a personal folder that must never be committed
+.DS_Store
+harbour-space-letter/

@@ -1,53 +1,54 @@
 # PLAN.md
 
-Working plan, pinned 2026-10-08. The full step-by-step spec is [docs/implementation-plan.md](docs/implementation-plan.md); this file is the short "what next" list. Update it when a block is done.
+Рабочий план. Закреплён: 2026-11-14. Рамка заморожена до предзащиты 2026-12-14.
+Актуальная дорожная карта: `openspec/project.md`. История: `docs/implementation-plan.md` (архив).
+
+## Тема и рамка (заморожено 2026-11-14, раунды гриллинга 1–4)
+
+- Официальная тема: «Децентрализованная координация двух роботов через Bi-JEPA».
+- Научный вопрос: улучшает ли латентное предсказание состояния партнёра (Bi-JEPA) децентрализованную координацию двух роботов-манипуляторов в задаче совместной сборки.
+- Координация формализована тремя условиями: (1) неаддитивная общая награда — успех только при согласованности; (2) приватная случайность партнёра — тайминг фаз, исходы захватов, стохастичность политики; (3) неполная наблюдаемость состояния партнёра.
+- Метрики координации: occlusion-ablation (Δ успеха oracle − none); cross-play (успех пар политик из разных сидов — zero-shot координация, главный тезис диплома); recovery (восстановление после инъекций сбоев).
+- Допущения (проговариваются в тексте явно): моторика примитивов скриптовая — обучается выбор и координация; план сборки дан (случайная последовательность / Kociemba), планирование не обучается; плейбек (проигрывание плана дирижёром без обучения) запрещён в демо — дирижёр только oracle-режим и эксперт для сравнения.
+- Архитектура A к предзащите (RL на уровне выбора примитивов); архитектура B (выученная моторика примитивов → координация) — глава весной; joint-level end-to-end — нет (только мотивация).
+- Лестница экспериментов: E1 (must) одиночный поворот грани 90/180 → E2 (цель предзащиты) многослойный кубик, план 2–3 хода, флипы кубика холдером → E2+ роль-симметрия после reachability-проверки → E3 (stretch) случайный план 5+ ходов → E4 скрэмбл → решение (Kociemba, генерация плана поверх E3).
+- «Момент помощи» в демо: ablation-видео (ротатор без холдера ≈ 0%) + инъекция проскальзываний с восстановлением.
+- Режимы партнёра: none / oracle / predicted (Bi-JEPA) / predicted-direct (классификатор примитива партнёра, baseline).
+- Весной: Bi-JEPA 3.2/3.3 (главный вклад), VLA-глава (SmolVLA/OpenVLA-LoRA vs skill-level RL), второй пример (общее рабочее пространство без общего плана).
+- Линия 2.1 закрыта: инфраструктура + мотивация (BC-ротатор не видел челюсть холдера). ft_full_s1 и friction probe отменены.
+
+## Compute и ветки
+
+- Ветка работы: `step/2.3-skill-level-marl` (от `step/2.1-ippo-so101`). Storage-скрипты **верифицированы на сервере 2026-11-15** (RunPod A40: fresh setup + update + GPU smokes + probe 15/16) — блокировка `main` снята, влив 2.1 возможен. Push в step-ветки регулярно.
+- Compute (обновлено 2026-11-14): **RunPod** (Nebius отменён). GPU Pod **RTX 4090 24 ГБ**, On-Demand по умолчанию (Spot — для дешёвых длинных прогонов); container disk ~30–50 ГБ; network volume ~100 ГБ в `/workspace`, симлинк `~/callosum-runs → /workspace/callosum-runs` (чекпоинты переживают удаление пода); официальный PyTorch/CUDA-12 шаблон. 24 ГБ достаточно (state-based симуляция + MLP); L40S/A100 — опция на будущее (VLA). Прерывания безопасны: точный `--resume` тренера + `scripts/cloud_resume_loop.sh`. Ранбук: `docs/cloud-gpu.md`.
+- Мак локально: ruff, юнит-pytest, чтение кода; изредка 1–2-средовые CPU-пробы в одноразовом окружении; никаких тренировок, GPU, 256-сред.
+- Первый cloud-прогон верифицирует storage-скрипты (`scripts/update_server.sh`).
+
+## Now: ПАУЗА (2026-11-15 ~19:35, по решению пользователя)
+
+Сохранено: весь код запушен (HEAD `c4f5c80` = origin, деревья чистые на маке и поде); дебаг-инструменты и probe-логи — в `/workspace/debug-archive` на volume (40 файлов, переживают удаление пода); под останавливается (Stop). Дебаг-агент дирижёра (task ses_e20cbc851ffepPp4m7Rmqd9FWs, контекст сохранён) — остановлен в середине итерации, все его фиксы закоммичены.
+
+### Resume-цепочка (следующая сессия)
+
+1. Пользователь запускает под → новый SSH host/port из карточки Connect → обновить `~/.ssh/config` (хост `runpod-gpu`); на поде `cd ~/callosum && git pull`.
+2. Форс-приказ дебаг-агенту (resume task): кинематический ассист поворота при захваченной ротатором грани (эскалация шаг 4, борд-заметки board_29ff51e4 / board_63cb34aa), 20–30 минут на реализацию + smoke `--decisions 160`: цель conductor success ≥0.9 (plan 1) / ≥0.75 (plan 3). Референс трасс: `/workspace/debug-archive/probe3*.log` (ротатор проходит полный цикл; поворот не вращает грань, ang≈1.7°; куб дрейфует ~9 см — вот что закрывает ассист).
+3. Smoke тренера: короткий IPPO `none` на E1 (16 сред) — награда/логи/энтропия живы.
+4. Профилирование решения на 256 средах; запуск E1-обучения в tmux + `cloud_resume_loop.sh`.
+
+### Состояние среды навыков (для контекста)
+
+- Закрыто main-потоком: obs-префиксы, action_space property+setter, двойной декоратор, лимит эпизода в подшагах (бюджет 150 решений), Sequence-дети один раз + parking + пустые переходы, 45°-ориентация (жадное назначение), захват холдера = контакт с любым линком (ядро закрыто плитами). Коммиты f969fa7..fe75b10.
+- Закрыто дебаг-агентом (физика флипа/ротатора, ~20 коммитов 40103e2..c4f5c80): постановка куба на стол, перезахват, home-нога, multi-start IK, свейп→ховер→спуск ротатора, дрейф-фиксы. Дирижёр проходит всю цепочку (флип вращает куб, ротатор approach→grasp→turn→release→retreat), кроме передачи вращения грани.
+- Осталось одно звено: физический (или кинематический) поворот активного слоя.
 
 ## Standing rules
 
-- Model roles: Haiku subagents write the code, Sonnet reviews (diff, tests, lint) and commits/pushes, Opus plans and does the global review after a whole stage. Docs-only edits can be done directly.
-- Never run simulation, probes, demo collection, BC or IPPO training on the Mac. Locally only `ruff`, small `pytest` and code reading; give the user server commands.
-- Commit subject `type: msg` (the hook adds the branch prefix), no attribution lines. Push to the step branch routinely; merge into `main` only server-verified, stable work.
-- Simulation only. Reply to the user in English; docs stay in Russian, code and comments in English.
+- Доки на русском; код, комментарии и коммиты на английском; коммит `type: msg` без атрибуции.
+- В `main` — только server-verified работа. Push в step-ветки регулярно.
+- Никаких симуляций и тренировок на маке (исключение: лёгкие 1–2-средовые CPU-пробы в одноразовом окружении).
+- Отчёты экспериментов: метрики + артефакты (видео/логи) на cloud-диске.
 
-## Thesis direction
+## Ждём от пользователя (не блокирует)
 
-Main line: skill-level MARL (step 2.3, `FaceTurnSkills-v0`). Each arm picks a discrete scripted primitive; both agents know the goal and the cube-solving algorithm. Partner modes: `none` (control), `oracle`, `predicted` (Bi-JEPA). Secondary line: joint-level IPPO + BC (step 2.1), kept as motivation (the BC rotator cannot see the holder's jaw close) and as reusable infrastructure.
-
-## Now: finish persistent storage (branch `step/2.1-ippo-so101`)
-
-Goal: everything permanent lives in `$HOME` (100 GB); only temporary files use `/tmp`.
-
-1. [ ] Finish the storage change (uncommitted: `scripts/setup_server.sh`, `update_server.sh`, `diagnose_vulkan.sh`, `docs/setup.md`, `docs/server-runbook.md`, `CLAUDE.md`, `README.md`). The storage subagent (id a9861cae649f8e696, ran on Sonnet) died on a rate limit before the runbook was finished; resume it after the limit resets (2:30pm Moscow) or re-delegate.
-   - Layout: checkout `~/callosum`, data root `~/.callosum` (venv, uv cache, python, HF, ManiSkill, SAPIEN, mesa, XDG cache), `~/callosum-runs` behind the `runs/` symlink.
-   - Scratch layout only via explicit `CALLOSUM_SCRATCH` / `CALLOSUM_LAYOUT=scratch` or when `$HOME` is low on space; drop the `JUPYTERHUB_USER` trigger.
-   - Clean up old leftovers: the `/tmp` exports in `~/.callosum-env.sh`, the bashrc hook, the dangling `~/.sapien` symlink.
-   - Docs: every `/tmp/callosum` becomes `~/callosum` / `$CALLOSUM_REPO`.
-2. [ ] Review the diff: `bash -n` on all scripts, fresh-install and leftover-cleanup paths, no remaining `/tmp/callosum`. Then `ruff`, `pytest -q`, commit, push.
-3. [ ] Give the user the server commands:
-   - fresh install: clone `https://github.com/aidagroup/publ2026-thesis-boldin.git` (branch `step/2.1-ippo-so101`) into `~/callosum`, then `bash scripts/update_server.sh`;
-   - check `ls ~/callosum-runs/ft_full_s1/`; if `latest.pt` exists, resume with `python -m callosum.training.ippo --resume runs/ft_full_s1` (detached, log appended with `>>`); otherwise relaunch the fine-tune: `--checkpoint runs/bc_full/bc.pt --demos runs/demos/faceturn_a.pt --critic-warmup-iters 10 --bc-coef 1.0 --bc-decay-iters 100 --learning-rate 1e-4 --partner-obs full --total-timesteps 10000000 --seed 1 --exp-name ft_full_s1`.
-
-## Pending reports from the user
-
-- Fine-tune progress: `ever hold`, `ever rot`, `eval_succ` for `ft_full_s1`.
-- Friction probe (`--face-friction 20/10/5`) to see whether the remaining ~29% demo failures come from body rotation.
-
-## Next: step 2.3 skill-level env (branch `step/2.3-skill-level-marl`)
-
-Branch from `main` once 2.1 is stable, or from 2.1. Scope is v1 only (cube on the table).
-
-- Primitives. Holder: wait / approach / grasp / release / lift / lower / retreat. Rotator: wait / approach / grasp / turn90 / turn180 / release / retreat. Face joint range extended to 180°; the goal (90° or 180°) is drawn at reset and observed by both agents.
-- Synchronous decisions every ~10 sim steps (`decision_period`); a chosen primitive continues until the choice changes, and a change interrupts it.
-- Coordination must be non-trivial (all in config): random primitive speeds per episode and arm, grasp failure probability, random partner start delay. Otherwise `none` equals `oracle` and the ablation measures nothing.
-- Engineering: batched GPU IK (or per-reset precompute). The current per-env Python IK takes ~290 s per 256-env reset.
-- Trainer: existing IPPO with a categorical head; one trainer step per decision.
-- Work order: (1) pure logic `callosum/envs/_skills.py` plus Mac unit tests; (2) env plus a scripted conductor that must reach ~100% success; (3) categorical head and IPPO runs in `none` and `oracle`.
-- Done when (server): env builds and resets in acceptable time, conductor ~100%, `oracle` above ~90%, `none` clearly worse, metrics logged (success, time to success, useless actions, partner-primitive prediction accuracy).
-
-## Then
-
-1. Merge `step/3.1-bijepa-module` (expect doc conflicts in `docs/implementation-plan.md` and `docs/thesis/03-method-bijepa.md`).
-2. Step 3.2: integrate Bi-JEPA into the skill-level policy (`predicted` mode with the same execution-time inputs as `none`).
-3. Step 3.3: ablation `none / oracle / predicted`, at least 3 seeds; headline metric is the fraction of the oracle-none gap closed.
-4. v2 primitives (holder flips 90/180, rotator side approach).
-5. Merge to `main` only after server verification; the branch 1.6 video re-render is still unverified.
+- путь к прошлогодней презентации;
+- дата основной защиты (рабочая гипотеза: июнь 2027).
