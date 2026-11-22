@@ -4,7 +4,7 @@
 dev:
 	uv sync --extra train --extra dev
 
-# Full training env (Linux + CUDA). For first-time server setup prefer: bash scripts/setup_server.sh
+# Full training env (Linux + CUDA). For first-time server setup prefer: bash scripts/ops/setup_server.sh
 server:
 	uv sync --extra sim --extra train --extra dev
 

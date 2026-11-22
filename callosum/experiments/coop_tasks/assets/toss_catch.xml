@@ -1,0 +1,108 @@
+<!-- TossCatch-v0: the catch/toss reduced model of the two-agent coop suite
+     (see callosum/experiments/coop_tasks/toss_catch.py and config.TossConfig).
+
+Model layout (PLAN.md "Two-robot task suite", "physical paddles"):
+
+  * `ball` -- a free 0.10 kg sphere (radius 0.06 m) with one free joint; gravity acts on
+             it, so between paddle contacts its trajectory is a parabola in the x-z plane;
+  * `pad_left` / `pad_right` -- two PLASTIC 0.60 x 0.60 x 0.06 m plates (half extents 0.30,
+             0.30, 0.03 m, mass 0.8 kg) mounted on the world through THREE actuated joints:
+             a prismatic x joint and a prismatic z joint (the court plane, the plate centre
+             moving in it) and a hinge about world +y (the tilt). The plate's local +z axis
+             is its face normal. The three position servos per plate (`<position>` actuators
+             with bounded force) turn the agents' normalized `(dx, dz, dtheta)` commands
+             into a position/angle target that the plate physically tracks: it has mass and
+             inertia, it is pulled down by gravity, and it can only accelerate as fast as its
+             force limits allow -- nothing teleports.
+
+COLLISIONS. The ball collides with the plates (ball contact bit 1 vs the plates' affinity
+bit 1) and the two plates collide with each other (plates: `contype=2`, `conaffinity=3`; the
+ball is `contype=1`, `conaffinity=3`). So a commanded plate can never pass through (or
+overlap) the partner plate or through the ball: the MuJoCo contact solver stops it. The
+env's joint ranges alone would already keep the plate CENTRES on their own halves, but the
+plates are 0.6 m wide, so the centres are not enough -- the physical contacts are what keep
+the plates apart near the centre line. The `solref`/`friction` values below are defaults
+only: each reset replaces the contact damping ratio and the friction with the episode's
+sampled randomisation (the ball/plate contact is the task's hidden physical parameter).
+
+SERVO CALIBRATION (XML-owned, like the masses): at the default timestep a critically damped
+position servo settles within one control step (`control_every * dt`), so the plate follows
+its target closely, while the limited force keeps the maximum acceleration finite; the z
+servo's static sag under the plate's weight is below 2 mm, so a plate holds its pose with a
+zero command (no falling). The joint ranges below are placeholders: `TossCatchEnv` writes
+the config-as-truth ranges on construction (`jnt_range` and the actuators' `ctrlrange`).
+-->
+<mujoco model="toss_catch_coop">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.005" integrator="implicitfast" gravity="0 0 -9.81"/>
+
+  <default>
+    <geom friction="0 0 0" solref="0.1 0.14" contype="1" conaffinity="1"/>
+  </default>
+
+  <worldbody>
+    <!-- Ball: a free sphere in the x-z plane; gravity is the only force between contacts. -->
+    <body name="ball" pos="0 0 1.0">
+      <freejoint name="ball_free"/>
+      <geom name="ball_geom" type="sphere" size="0.06" mass="0.1" contype="1" conaffinity="2"/>
+    </body>
+
+    <!-- Left plate: x/z translation in the court plane + tilt about +y, all actuated.
+         The body frame is the plate centre (the geoms are centred on it); the joints are
+         absolute (the body's load-time pose is the zero of every joint). -->
+    <body name="pad_left" pos="0 0 0">
+      <joint name="pad_left_x" type="slide" axis="1 0 0" range="-1.05 -0.05" limited="true"/>
+      <joint name="pad_left_z" type="slide" axis="0 0 1" range="0.10 1.35" limited="true"/>
+      <joint name="pad_left_tilt" type="hinge" axis="0 1 0"
+             range="-1.0471975512 1.0471975512" limited="true"/>
+      <geom name="pad_left_geom" type="box" size="0.30 0.30 0.03" mass="0.8"
+            contype="2" conaffinity="1"/>
+      <!-- Stiff pad-pad collision shell: the actuator-driven plates must not interpenetrate,
+           so their mutual contact is much stiffer than the (deliberately soft, bouncy)
+           ball-plate contact. The shell is in the same body and has the same shape; it only
+           collides with the other plate's shell (contact bit 4), never with the ball. -->
+      <geom name="pad_left_shell" type="box" size="0.30 0.30 0.03" density="0"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001" solref="0.001 1"
+            solimp="0.98 0.999 0.0005" condim="3"/>
+    </body>
+
+    <!-- Right plate (mirror of the left one: its x joint range is on the +x half). -->
+    <body name="pad_right" pos="0 0 0">
+      <joint name="pad_right_x" type="slide" axis="1 0 0" range="0.05 1.05" limited="true"/>
+      <joint name="pad_right_z" type="slide" axis="0 0 1" range="0.10 1.35" limited="true"/>
+      <joint name="pad_right_tilt" type="hinge" axis="0 1 0"
+             range="-1.0471975512 1.0471975512" limited="true"/>
+      <geom name="pad_right_geom" type="box" size="0.30 0.30 0.03" mass="0.8"
+            contype="2" conaffinity="1"/>
+      <geom name="pad_right_shell" type="box" size="0.30 0.30 0.03" density="0"
+            contype="4" conaffinity="4" friction="0.4 0.005 0.0001" solref="0.001 1"
+            solimp="0.98 0.999 0.0005" condim="3"/>
+    </body>
+  </worldbody>
+
+  <!-- One bounded-force position servo per plate DOF. `kp`/`kv` put the closed-loop natural
+       frequency at ~100 rad/s (settles in ~40 ms = one control step at the default timing);
+       `forcerange` bounds the maximum acceleration (~1000 m/s^2 translation for the 0.8 kg
+       plate, ~3000 rad/s^2 tilt), so the plates move physically instead of teleporting. -->
+  <actuator>
+    <position name="pad_left_x_servo" joint="pad_left_x" kp="8000" kv="160"
+              ctrlrange="-1.05 -0.05" ctrllimited="true" forcerange="-800 800"
+              forcelimited="true"/>
+    <position name="pad_left_z_servo" joint="pad_left_z" kp="8000" kv="160"
+              ctrlrange="0.10 1.35" ctrllimited="true" forcerange="-800 800"
+              forcelimited="true"/>
+    <position name="pad_left_tilt_servo" joint="pad_left_tilt" kp="1500" kv="17"
+              ctrlrange="-1.0471975512 1.0471975512" ctrllimited="true"
+              forcerange="-150 150" forcelimited="true"/>
+    <position name="pad_right_x_servo" joint="pad_right_x" kp="8000" kv="160"
+              ctrlrange="0.05 1.05" ctrllimited="true" forcerange="-800 800"
+              forcelimited="true"/>
+    <position name="pad_right_z_servo" joint="pad_right_z" kp="8000" kv="160"
+              ctrlrange="0.10 1.35" ctrllimited="true" forcerange="-800 800"
+              forcelimited="true"/>
+    <position name="pad_right_tilt_servo" joint="pad_right_tilt" kp="1500" kv="17"
+              ctrlrange="-1.0471975512 1.0471975512" ctrllimited="true"
+              forcerange="-150 150" forcelimited="true"/>
+  </actuator>
+</mujoco>
+</content>

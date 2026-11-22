@@ -1,11 +1,9 @@
 """Smoke test: the callosum package and its subpackages must import cleanly."""
 
 import callosum
-import callosum.agents
-import callosum.configs
-import callosum.envs
+import callosum.common
+import callosum.experiments
 import callosum.robots
-import callosum.training
 
 
 def test_import_callosum() -> None:
@@ -13,8 +11,6 @@ def test_import_callosum() -> None:
 
 
 def test_import_subpackages() -> None:
-    assert callosum.envs
+    assert callosum.experiments
     assert callosum.robots
-    assert callosum.agents
-    assert callosum.training
-    assert callosum.configs
+    assert callosum.common

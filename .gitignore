@@ -249,3 +249,28 @@ demos/
 # OS / editor noise and a personal folder that must never be committed
 .DS_Store
 harbour-space-letter/
+
+# Local demo artifacts (videos/stills, not source)
+demo/
+
+# Local experiment result JSONs (grid/evals; artifacts live on the pod volume)
+results_gpu/
+
+# Local presentation scratch (PDFs/PNGs/scripts), not part of the package
+presentation/
+
+# Coop-suite evaluation JSONs (server artifacts)
+results_coop/
+
+# Coop-suite GPU evaluation JSONs (server artifacts)
+results_coop_gpu/
+
+# Physical-toss evaluation JSONs
+results_toss_phys2/
+results_toss_bc/
+
+# Hidden-partner occlusion eval JSONs
+results_occ2/
+
+# Local gh CLI cache
+.gh-cache/

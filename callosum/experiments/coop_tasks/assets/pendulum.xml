@@ -1,0 +1,36 @@
+<!-- PendulumPump-v0: the pendulum reduced model of the two-agent coop suite
+     (see callosum/envs/coop/pendulum.py and callosum/configs/coop_tasks.PendulumConfig).
+
+Model layout (PLAN.md "Two-robot task suite"):
+  * `bob` -- a 0.5 kg sphere (radius 0.06 m) on ONE hinge about world +y, hanging 0.5 m
+             below the fixed pivot at the world origin (the sphere's body-frame offset is
+             `pos="0 0 -0.5"`, so its centre of mass is the pendulum bob).
+
+The two agents act through `mujoco.mjData.xfrc_applied` TORQUE on the bob's hinge: the
+`left` actuator commands only a positive world-y torque, the `right` actuator only a
+negative one (the env's one-sided actuation). The spec allows either one-sided forces on
+the bob or one-sided hinge torques; the torque variant is used because it is the cleanest
+reduced model of the pumping task (no contact anywhere, no force application point to
+model). There are deliberately NO actuators, NO cameras and NO contacts.
+
+XML-OWNED physics: the bob mass, its radius and the 0.5 m length (the body-frame offset of
+the sphere). MuJoCo derives the body inertia from the geom at compile time and `mj_setConst`
+does not recompute it when `body_mass` is written at runtime, so the mass/length stay
+XML-owned; `PendulumConfig` documents them and is the source of truth for everything else
+(timestep, gravity, hinge limit, damping, armature, torque authority), which `PendulumEnv`
+writes into the model. The damping/armature values below are defaults only; each reset
+replaces the hinge damping with the episode's sampled randomisation.
+-->
+<mujoco model="pendulum_coop">
+  <compiler angle="radian"/>
+  <option timestep="0.005" integrator="implicitfast" gravity="0 0 -9.81"/>
+
+  <worldbody>
+    <body name="bob" pos="0 0 0">
+      <joint name="pivot_hinge" type="hinge" axis="0 1 0" range="-3.0 3.0" limited="true"
+             damping="0.1" armature="0.001"/>
+      <geom name="bob_geom" type="sphere" size="0.06" mass="0.5" pos="0 0 -0.5"
+            contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+</mujoco>
