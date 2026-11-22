@@ -28,7 +28,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 DEFAULT_DIR = Path(os.environ.get("CALLOSUM_JOB_DIR", "/workspace/callosum-jobs"))
@@ -36,7 +36,7 @@ POLL_S = 1.0
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _state_path(dir_: Path, name: str) -> Path:
