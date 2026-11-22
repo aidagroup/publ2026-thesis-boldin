@@ -182,9 +182,7 @@ def _np(x):
     return np.atleast_1d(arr)
 
 
-def _load_pair(
-    holder_path: Path, rotator_path: Path, device, obs_dims: Sequence[int]
-):
+def _load_pair(holder_path: Path, rotator_path: Path, device, obs_dims: Sequence[int]):
     """The `(holder, rotator)` categorical policies with actor weights from checkpoints.
 
     Loads the way `ippo --eval-only` does (per-agent state dicts of the payload,
@@ -243,9 +241,7 @@ def evaluate_pair(
             args.partner_mode,
             (uid_holder, uid_rotator),
         )
-        holder, rotator = _load_pair(
-            holder_ckpt[1], rotator_ckpt[1], device, builder.obs_dims
-        )
+        holder, rotator = _load_pair(holder_ckpt[1], rotator_ckpt[1], device, builder.obs_dims)
         n = env.num_envs
         limit = args.max_decisions
         if limit is None:
@@ -291,9 +287,7 @@ def evaluate_pair(
                             time_to_success=int(decisions[e]) if ok else None,
                             decisions=int(decisions[e]),
                             sim_steps_to_success=(
-                                int(sim_steps_np[e])
-                                if ok and sim_steps_np is not None
-                                else None
+                                int(sim_steps_np[e]) if ok and sim_steps_np is not None else None
                             ),
                             useless_holder=int(useless_holder[e]),
                             useless_rotator=int(useless_rotator[e]),
@@ -395,7 +389,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--episodes", type=int, default=100, help="Episodes per pair. (default: %(default)s)"
     )
     parser.add_argument(
-        "--num-envs", type=int, default=16, help="Vectorised envs per pair run. (default: %(default)s)"
+        "--num-envs",
+        type=int,
+        default=16,
+        help="Vectorised envs per pair run. (default: %(default)s)",
     )
     parser.add_argument(
         "--partner-mode",
@@ -437,11 +434,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Per-hand grasp-failure probability range of the injected run "
         "(--recovery). (default: %(default)s)",
     )
-    parser.add_argument("--seed", type=int, default=0, help="Base eval seed. (default: %(default)s)")
     parser.add_argument(
-        "--sim-backend", default="gpu", help="ManiSkill sim backend ([cloud] gpu). (default: %(default)s)"
+        "--seed", type=int, default=0, help="Base eval seed. (default: %(default)s)"
     )
-    parser.add_argument("--out", default="results.json", help="JSON report path. (default: %(default)s)")
+    parser.add_argument(
+        "--sim-backend",
+        default="gpu",
+        help="ManiSkill sim backend ([cloud] gpu). (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--out", default="results.json", help="JSON report path. (default: %(default)s)"
+    )
     return parser.parse_args(argv)
 
 
@@ -477,7 +480,9 @@ def main(argv: list[str] | None = None) -> None:
         "pairs": {},
     }
     for holder, rotator in pairs:
-        records = evaluate_pair(holder, rotator, args, inject=False, writer=writer, tag=_tag(holder[0], rotator[0]))
+        records = evaluate_pair(
+            holder, rotator, args, inject=False, writer=writer, tag=_tag(holder[0], rotator[0])
+        )
         key = (holder[0], rotator[0])
         clean_records[key] = records
         pair_results[key] = success_rate(records)

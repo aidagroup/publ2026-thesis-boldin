@@ -327,7 +327,9 @@ def _action_info(
     if all(isinstance(space, gym.spaces.Discrete) for space in spaces):
         return uids, [], [int(space.n) for space in spaces], True
     for space in spaces:
-        assert isinstance(space, gym.spaces.Box), "only continuous or discrete actions are supported"
+        assert isinstance(space, gym.spaces.Box), (
+            "only continuous or discrete actions are supported"
+        )
     action_bounds = [
         (torch.as_tensor(space.low, device=device), torch.as_tensor(space.high, device=device))
         for space in spaces
@@ -609,7 +611,13 @@ def _train(
     def run_eval(iteration: int, global_step: int) -> None:
         eval_start = time.time()
         result = evaluate(
-            agents, eval_builder, eval_envs, action_bounds, num_eval_steps, tracker, discrete=discrete
+            agents,
+            eval_builder,
+            eval_envs,
+            action_bounds,
+            num_eval_steps,
+            tracker,
+            discrete=discrete,
         )
         metrics, episodes = result.metrics, result.episodes
         logger.log_many(metrics, global_step, prefix="eval/")

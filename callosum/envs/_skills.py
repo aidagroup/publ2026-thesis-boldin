@@ -209,9 +209,7 @@ class RandomizationConfig:
                 raise ValueError(f"{name} must be 0 < lo <= hi, got {(lo, hi)}")
         lo, hi = self.grasp_failure_prob_range
         if not 0 <= lo <= hi <= 1:
-            raise ValueError(
-                f"grasp_failure_prob_range must be within [0, 1], got {(lo, hi)}"
-            )
+            raise ValueError(f"grasp_failure_prob_range must be within [0, 1], got {(lo, hi)}")
         lo, hi = self.start_delay_range
         if not 0 <= lo <= hi:
             raise ValueError(f"start_delay_range must be lo >= 0 and lo <= hi, got {(lo, hi)}")

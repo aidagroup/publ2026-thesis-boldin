@@ -352,9 +352,7 @@ class Sequence(Primitive):
             if stage + 1 < len(self.children):
                 self.stage[done_envs] = stage + 1
                 if len(done_envs):
-                    ok = np.asarray(
-                        self.children[stage + 1].start(ctx, arm, done_envs), dtype=bool
-                    )
+                    ok = np.asarray(self.children[stage + 1].start(ctx, arm, done_envs), dtype=bool)
                     self.stage[done_envs[~ok]] = len(self.children)
             else:
                 self.stage[done_envs] = len(self.children)
@@ -563,9 +561,7 @@ class SkillsRuntime:
         outs = []
         for arm in range(2):
             error = self.cmd.q[arm] - view.qpos[arm]
-            action, saturated = tracking_action(
-                error, self.cmd.bias[arm], self.control.gain, limit
-            )
+            action, saturated = tracking_action(error, self.cmd.bias[arm], self.control.gain, limit)
             self.cmd.bias[arm] = update_bias(
                 self.cmd.bias[arm], error, self.control.ki, self.control.bias_max, saturated
             )
@@ -628,18 +624,26 @@ class SkillsRuntime:
         if name == "wait":
             return Hold(n, name)
         if name == "approach_body":
-            return TrackPath(n, name, lambda envs: self._plan_approach(0, envs), settle=SETTLE_STEPS)
+            return TrackPath(
+                n, name, lambda envs: self._plan_approach(0, envs), settle=SETTLE_STEPS
+            )
         if name == "grasp":
             return Grip(n, name, GRIPPER_CLOSED, CLOSE_STEPS)
         if name == "release":
             return Grip(n, name, GRIPPER_OPEN, CLOSE_STEPS)
         if name == "lift":
             return TrackPath(
-                n, name, lambda envs: self._plan_vertical(0, envs, +LIFT_HEIGHT), settle=SETTLE_STEPS
+                n,
+                name,
+                lambda envs: self._plan_vertical(0, envs, +LIFT_HEIGHT),
+                settle=SETTLE_STEPS,
             )
         if name == "lower":
             return TrackPath(
-                n, name, lambda envs: self._plan_vertical(0, envs, -LIFT_HEIGHT), settle=SETTLE_STEPS
+                n,
+                name,
+                lambda envs: self._plan_vertical(0, envs, -LIFT_HEIGHT),
+                settle=SETTLE_STEPS,
             )
         if name == "retreat":
             return TrackPath(n, name, lambda envs: self._plan_retreat(0, envs), settle=SETTLE_STEPS)
@@ -689,7 +693,9 @@ class SkillsRuntime:
         if name == "wait":
             return Hold(n, name)
         if name == "approach_face":
-            return TrackPath(n, name, lambda envs: self._plan_approach(1, envs), settle=SETTLE_STEPS)
+            return TrackPath(
+                n, name, lambda envs: self._plan_approach(1, envs), settle=SETTLE_STEPS
+            )
         if name == "grasp":
             return Grip(n, name, GRIPPER_CLOSED, CLOSE_STEPS)
         if name in ("turn90", "turn180"):

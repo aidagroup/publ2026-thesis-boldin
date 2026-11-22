@@ -55,9 +55,7 @@ def _cross(a: tuple[int, int, int], b: tuple[int, int, int]) -> tuple[int, int, 
     )
 
 
-def _quarter_turn(
-    vector: tuple[int, int, int], axis: tuple[int, int, int]
-) -> tuple[int, int, int]:
+def _quarter_turn(vector: tuple[int, int, int], axis: tuple[int, int, int]) -> tuple[int, int, int]:
     """Rotate `vector` by +90 deg about the unit `axis` (right-hand rule).
 
     Rodrigues at 90 deg reduces to `axis x vector + axis * (axis . vector)`, which is

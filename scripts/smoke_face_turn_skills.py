@@ -36,11 +36,18 @@ from callosum.training._skills_agent_obs import SkillsObsBuilder
 
 
 def _extra_flags(parser):
-    parser.add_argument("--plan-length", type=int, default=1, help="Moves of run 3a. (default: %(default)s)")
     parser.add_argument(
-        "--conductor-plan", type=int, default=3, help="Moves of run 3b (2-3 for E2). (default: %(default)s)"
+        "--plan-length", type=int, default=1, help="Moves of run 3a. (default: %(default)s)"
     )
-    parser.add_argument("--decisions", type=int, default=90, help="Decision budget of the conductor runs.")
+    parser.add_argument(
+        "--conductor-plan",
+        type=int,
+        default=3,
+        help="Moves of run 3b (2-3 for E2). (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--decisions", type=int, default=90, help="Decision budget of the conductor runs."
+    )
 
 
 def _np(x):
@@ -66,17 +73,19 @@ def _random_rollout(env, steps: int = 5) -> None:
         action = env.action_space.sample()  # unbatched: one id per agent, broadcast
         _obs, reward, _terminated, _truncated, info = env.step(action)
     print(f"after {steps} random decisions:")
-    print(f"  reward: shape={tuple(reward.shape)}, dtype={reward.dtype}, range "
-          f"[{reward.min().item():.3f}, {reward.max().item():.3f}]")
+    print(
+        f"  reward: shape={tuple(reward.shape)}, dtype={reward.dtype}, range "
+        f"[{reward.min().item():.3f}, {reward.max().item():.3f}]"
+    )
     print(f"  success: {info[INFO_SUCCESS].any().item()} (expected False)")
-    print(f"  useless h/r: {int(_np(info[INFO_USELESS_HOLDER]).sum())} / "
-          f"{int(_np(info[INFO_USELESS_ROTATOR]).sum())}")
+    print(
+        f"  useless h/r: {int(_np(info[INFO_USELESS_HOLDER]).sum())} / "
+        f"{int(_np(info[INFO_USELESS_ROTATOR]).sum())}"
+    )
 
 
 def _conductor_run(args, plan_length: int) -> None:
-    env = make_env(
-        "FaceTurnSkills-v0", args, partner_mode="oracle", plan_length=plan_length
-    )
+    env = make_env("FaceTurnSkills-v0", args, partner_mode="oracle", plan_length=plan_length)
     try:
         base_env = env.unwrapped
         uids = tuple(env.action_space.spaces)
@@ -115,9 +124,15 @@ def _conductor_run(args, plan_length: int) -> None:
                 conductors[int(e)] = SkillsConductor()  # fresh episode: fresh conductor
         wall = time.time() - t0
         rate = float(successes.mean())
-        times = _np(infos[INFO_TIME_TO_SUCCESS]).astype(np.int64) if INFO_TIME_TO_SUCCESS in infos else None
-        print(f"conductor, plan_length={plan_length}: success {rate:.3f} over {n} envs "
-              f"({args.decisions} decisions, {wall:.1f}s)")
+        times = (
+            _np(infos[INFO_TIME_TO_SUCCESS]).astype(np.int64)
+            if INFO_TIME_TO_SUCCESS in infos
+            else None
+        )
+        print(
+            f"conductor, plan_length={plan_length}: success {rate:.3f} over {n} envs "
+            f"({args.decisions} decisions, {wall:.1f}s)"
+        )
         if successes.any():
             print(f"  sim steps to success (final envs): {times[successes].tolist()}")
         print(f"  useless actions h/r: {useless[0].sum()} / {useless[1].sum()}")

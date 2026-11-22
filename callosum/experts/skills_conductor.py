@@ -123,8 +123,10 @@ class SkillsConductor:
         fields = self._fields(obs, role)
         progress = float(fields["own_primitive_progress"][0])
         state.done_settle = state.done_settle + 1 if progress >= 0.999 else 0
-        choice = self._holder_act(fields, info) if role is Role.HOLDER else self._rotator_act(
-            fields, info
+        choice = (
+            self._holder_act(fields, info)
+            if role is Role.HOLDER
+            else self._rotator_act(fields, info)
         )
         self._last[role] = int(choice)
         return int(choice)

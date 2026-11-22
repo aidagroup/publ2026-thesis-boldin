@@ -212,9 +212,7 @@ class FaceTurnSkills(TwoSO101Base):
         # U, D, L, R, F, B); the dict below is the single source of that truth.
         self.layer_faces = tuple(spec.face for spec in self.cube_config.layers)
         self.layer_col = {face: i for i, face in enumerate(self.layer_faces)}
-        self.layer_links = {
-            face: self.cube.links_map[f"layer_{face}"] for face in self.layer_faces
-        }
+        self.layer_links = {face: self.cube.links_map[f"layer_{face}"] for face in self.layer_faces}
 
         self.body_init_pos = torch.zeros((self.num_envs, 3), device=self.device)
         # Layer-lock state, per env and per joint (see FaceTurn.face_locked).
@@ -252,9 +250,7 @@ class FaceTurnSkills(TwoSO101Base):
 
             shifted = self.cube.pose.p[env_idx].clone()
             shifted[:, 0] += self.skills_config.cube_home_x
-            self.cube.set_pose(
-                Pose.create_from_pq(p=shifted, q=self.cube.pose.q[env_idx])
-            )
+            self.cube.set_pose(Pose.create_from_pq(p=shifted, q=self.cube.pose.q[env_idx]))
         cfg = self.skills_config
         b = len(env_idx)
         n = self.num_envs
@@ -321,9 +317,7 @@ class FaceTurnSkills(TwoSO101Base):
             held = held | self.agent_a.is_grasping(link)
         return held
 
-    _TURN_IDS = frozenset(
-        p.index for p in ROTATOR_PRIMITIVES if p.name in ("turn90", "turn180")
-    )
+    _TURN_IDS = frozenset(p.index for p in ROTATOR_PRIMITIVES if p.name in ("turn90", "turn180"))
     _ROTATOR_GRASPISH_IDS = frozenset(
         p.index for p in ROTATOR_PRIMITIVES if p.name in ("grasp", "turn90", "turn180")
     )
@@ -417,8 +411,7 @@ class FaceTurnSkills(TwoSO101Base):
             pull = self.skills_config.lock_pull_step_rad
             correct = self._layer_lock_angle + deviation.clamp(-pull, pull)
             qpos = torch.where(
-                self._layer_locked
-                & (deviation.abs() >= self.skills_config.lock_write_tol_rad),
+                self._layer_locked & (deviation.abs() >= self.skills_config.lock_write_tol_rad),
                 correct,
                 qpos,
             )
@@ -474,9 +467,7 @@ class FaceTurnSkills(TwoSO101Base):
         if self.skills_config.plan_length == 0:
             return torch.zeros(self.num_envs, device=self.device)
         face = self._face_tensor()
-        cols = torch.as_tensor(
-            [self.layer_col[f] for f in FACES], device=self.device
-        )
+        cols = torch.as_tensor([self.layer_col[f] for f in FACES], device=self.device)
         rows = torch.arange(self.num_envs, device=self.device)
         return self.cube.get_qpos()[rows, cols[face]]
 
@@ -534,14 +525,11 @@ class FaceTurnSkills(TwoSO101Base):
         qpos = [self._arm_qpos(arm) for arm in range(2)]
         qvel = [self._arm_qvel(arm) for arm in range(2)]
         bases = [
-            self._agent(arm).robot.pose.to_transformation_matrix().cpu().numpy()
-            for arm in range(2)
+            self._agent(arm).robot.pose.to_transformation_matrix().cpu().numpy() for arm in range(2)
         ]
         angle = self._active_layer_angle()
         target = self._move_target
-        layer_at_target = (
-            (angle - target).abs() < self.skills_config.angle_tol_rad
-        ).cpu().numpy()
+        layer_at_target = ((angle - target).abs() < self.skills_config.angle_tol_rad).cpu().numpy()
         return RuntimeView(
             qpos=[q[:, :NUM_ARM_JOINTS].cpu().numpy() for q in qpos],
             arm_speed=[q[:, :NUM_ARM_JOINTS].abs().max(dim=1).values.cpu().numpy() for q in qvel],
@@ -580,8 +568,9 @@ class FaceTurnSkills(TwoSO101Base):
             try:
                 items = [action[uid] for uid in AGENT_UIDS]
             except KeyError as exc:
-                raise ValueError(f"action dict keys {tuple(action)} do not match {AGENT_UIDS}") \
-                    from exc
+                raise ValueError(
+                    f"action dict keys {tuple(action)} do not match {AGENT_UIDS}"
+                ) from exc
         else:
             items = list(action)
             if len(items) != 2:
@@ -605,17 +594,11 @@ class FaceTurnSkills(TwoSO101Base):
         holder_grasp = self._holder_holds().cpu().numpy()
         rotator_grasp = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         rotator_near = torch.zeros_like(rotator_grasp)
-        holder_near = (
-            torch.linalg.norm(self.agent_a.tcp_pos - self.cube.pose.p, dim=1) < _NEAR_TOL
-        )
+        holder_near = torch.linalg.norm(self.agent_a.tcp_pos - self.cube.pose.p, dim=1) < _NEAR_TOL
         if self.skills_config.plan_length > 0:
             face = self._face_tensor()
             proximity = self.skills_config.turn_grasp_mode == "proximity"
-            selections_rot = (
-                self._runtime.selections()[1]
-                if proximity
-                else None
-            )
+            selections_rot = self._runtime.selections()[1] if proximity else None
             _GRASPISH = self._ROTATOR_GRASPISH_IDS
             for face_idx in torch.unique(face):
                 mask = face == face_idx
@@ -630,8 +613,8 @@ class FaceTurnSkills(TwoSO101Base):
                     # grasp/turn selected establishes the grasp fact; contact
                     # above still qualifies on its own.
                     pinching = np.isin(selections_rot, _GRASPISH)
-                    rotator_grasp |= mask & rotator_near & torch.as_tensor(
-                        pinching, device=self.device
+                    rotator_grasp |= (
+                        mask & rotator_near & torch.as_tensor(pinching, device=self.device)
                     )
         up_is_move = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if self.skills_config.plan_length > 0:
@@ -671,9 +654,7 @@ class FaceTurnSkills(TwoSO101Base):
                 # reward is computed once below from the final state.
                 obs, _sub_reward, _sub_term, _sub_trunc, _sub_info = super().step(
                     {
-                        uid: torch.as_tensor(
-                            joint[arm], dtype=torch.float32, device=self.device
-                        )
+                        uid: torch.as_tensor(joint[arm], dtype=torch.float32, device=self.device)
                         for arm, uid in enumerate(AGENT_UIDS)
                     }
                 )
@@ -752,15 +733,14 @@ class FaceTurnSkills(TwoSO101Base):
                 "time_fraction": time_fraction.unsqueeze(1),
                 "plan_face_onehot": onehot_face if arm == 0 else onehot_face.clone(),
                 "plan_quarter_turns": (quarter if arm == 0 else quarter.clone()).unsqueeze(1),
-                "plan_moves_remaining": (
-                    remaining if arm == 0 else remaining.clone()
-                ).unsqueeze(1),
+                "plan_moves_remaining": (remaining if arm == 0 else remaining.clone()).unsqueeze(1),
                 "cube_position": self.cube.pose.p if arm == 0 else self.cube.pose.p.clone(),
                 "cube_orientation_quat": (
                     self.cube.pose.q if arm == 0 else self.cube.pose.q.clone()
                 ),
-                "active_layer_angle": (angle / math.pi if arm == 0 else angle.clone() / math.pi)
-                .unsqueeze(1),
+                "active_layer_angle": (
+                    angle / math.pi if arm == 0 else angle.clone() / math.pi
+                ).unsqueeze(1),
                 "own_qpos": qpos,
                 "own_qvel": self._arm_qvel(arm),
                 "own_gripper_opening": (qpos[:, NUM_ARM_JOINTS] / GRIPPER_MAX_OPENING)
@@ -814,9 +794,7 @@ class FaceTurnSkills(TwoSO101Base):
             ),
             INFO_ACTIVE_LAYER_ANGLE_DEG: torch.rad2deg(self._active_layer_angle()),
             INFO_PLAN_INDEX: self._plan_index,
-            INFO_ROTATOR_GRASP_FACT: torch.as_tensor(
-                facts_rotator_grasp, device=self.device
-            ),
+            INFO_ROTATOR_GRASP_FACT: torch.as_tensor(facts_rotator_grasp, device=self.device),
         }
 
     def compute_dense_reward(self, obs, action: torch.Tensor, info: dict):

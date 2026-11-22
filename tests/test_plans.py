@@ -182,7 +182,7 @@ def test_parse_expands_modifiers() -> None:
 
 
 def test_parse_rejects_bad_tokens() -> None:
-    for bad in ("X2", "U3", "u", "F\"", "2U"):
+    for bad in ("X2", "U3", "u", 'F"', "2U"):
         with pytest.raises(ValueError, match="token"):
             parse_face_turn_sequence(bad)
     assert len(parse_face_turn_sequence("")) == 0

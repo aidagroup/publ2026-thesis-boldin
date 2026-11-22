@@ -52,7 +52,9 @@ def test_act_matches_evaluate() -> None:
     assert torch.allclose(value, policy.get_value(obs))
     # The log-probs are the log-softmax of the forward logits at the sampled ids.
     logits, _ = policy(obs)
-    assert torch.allclose(log_prob, torch.log_softmax(logits, dim=-1).gather(1, action[:, None])[:, 0])
+    assert torch.allclose(
+        log_prob, torch.log_softmax(logits, dim=-1).gather(1, action[:, None])[:, 0]
+    )
 
 
 def test_evaluate_accepts_rollout_buffer_action_shape() -> None:
@@ -81,7 +83,9 @@ def test_gradients_flow_through_evaluate() -> None:
     action = torch.randint(0, 4, (8,))
     log_prob, entropy, value = policy.evaluate(obs, action)
     (-(log_prob + entropy).mean() + value.mean()).backward()
-    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in policy.actor_logits.parameters())
+    assert any(
+        p.grad is not None and p.grad.abs().sum() > 0 for p in policy.actor_logits.parameters()
+    )
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in policy.critic.parameters())
 
 
