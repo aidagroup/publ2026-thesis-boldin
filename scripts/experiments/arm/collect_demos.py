@@ -18,7 +18,7 @@ the summary (success rate, first-success step distribution) doubles as the self-
 expert fits into the episode under the training controller.
 
     uv run python scripts/experiments/arm/collect_demos.py --num-envs 256 --num-batches 2 --out runs/demos/a.pt
-    # Mac CPU sim, 20 episodes (see CLAUDE.md for the throwaway env):
+    # Mac CPU sim, 20 episodes (see AGENTS.md for the throwaway env):
     python scripts/experiments/arm/collect_demos.py --sim-backend cpu --num-batches 20
 
 The file layout is documented in `callosum.experiments.arm.demos`. Exit status: 1 if no successful
