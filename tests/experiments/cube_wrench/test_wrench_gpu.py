@@ -106,6 +106,7 @@ def test_parse_args_with_explicit_reports_the_given_flags() -> None:
 
 
 def test_resume_keeps_saved_hyperparameters_but_takes_runtime_resources_from_cli() -> None:
+    pytest.importorskip("torch")
     from callosum.experiments.cube_wrench.train import apply_runtime_overrides
 
     saved = WrenchPPOConfig(
