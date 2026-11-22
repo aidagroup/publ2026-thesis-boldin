@@ -60,13 +60,38 @@ case "$cmd" in
         [ "${1:-}" = "--" ] && shift
         remote_jobctl start "$name" -- "$@"
         ;;
-    status|wait|logs)
+    status|logs)
         remote_jobctl "$cmd" "$@"
         ;;
-    wait-file)
-        path="${1:?wait-file needs a path}"
-        shift
-        remote_jobctl wait-file "$path" "$@"
+    wait|wait-file)
+        # Long waits may outlive an SSH session (RunPod NAT/sshd drops). Reconnect and
+        # re-run the blocking remote wait; the job state lives on the volume, so no work
+        # is lost. Only SSH failures (255) are retried; a finished/failed job status is
+        # returned to the caller.
+        if [ "$cmd" = "wait-file" ]; then
+            path="${1:?wait-file needs a path}"
+            shift
+            remote_args=(wait-file "$path" "$@")
+        else
+            remote_args=(wait "$@")
+        fi
+        attempt=0
+        while [ "$attempt" -lt 240 ]; do
+            if output=$(remote_jobctl "${remote_args[@]}" 2>&1); then
+                printf '%s\n' "$output"
+                exit 0
+            else
+                code=$?
+                printf '%s\n' "$output"
+                if [ "$code" -ne 255 ]; then
+                    exit "$code"
+                fi
+                attempt=$((attempt + 1))
+                sleep 5
+            fi
+        done
+        echo "wait: too many SSH reconnects" >&2
+        exit 1
         ;;
     *)
         usage 1
