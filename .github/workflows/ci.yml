@@ -21,11 +21,12 @@ jobs:
         with:
           enable-cache: true
 
-      # Only the dev extra: the `sim`/`train` extras pull ManiSkill + a CUDA torch
-      # build (multi-GB, GPU-only). CI validates code hygiene and pure-Python tests;
-      # anything touching the simulator is verified on the training server.
-      - name: Sync environment (dev extra)
-        run: uv sync --extra dev
+      # dev + sandbox: CI needs `mujoco` (the CPU MuJoCo sandbox) because the
+      # refactored experiment packages import their envs in `__init__`; everything
+      # touching ManiSkill/CUDA/ManiSkill-GPU stays server-verified (the `sim` and
+      # `train` extras are multi-GB and GPU-only).
+      - name: Sync environment (dev + sandbox extras)
+        run: uv sync --extra dev --extra sandbox
 
       - name: Lint (ruff)
         run: uv run ruff check .
