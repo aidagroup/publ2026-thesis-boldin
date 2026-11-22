@@ -42,7 +42,8 @@ Reduced-куб `CubeWrench-v0` — главная линия предзащит�
 - **Тренер**: `python -m callosum.experiments.cube_wrench.train --task {cartpole,pendulum,toss}`
   (`none`/`oracle` + `--use-bijepa` → `predicted`); eval:
   `python -m callosum.experiments.coop_tasks.eval --checkpoint ... --input-mode ...`;
-  демо: `python -m callosum.experiments.coop_tasks.render --task ... --scene ...`.
+  демо: `python -m callosum.experiments.coop_tasks.render --task ... --scene ...`; явные
+  цели/условия успеха каждой задачи и правила FAILED — `docs/task-goals.md`.
 
 ## Протокол обучения и eval (GPU-first)
 

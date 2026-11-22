@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 # --- look of the render-only scene copy --------------------------------------------------
 CORE_RGBA = (0.20, 0.30, 0.47, 1.0)
@@ -58,6 +58,12 @@ TITLE_COLOR = (255, 255, 255, 255)
 SUBTITLE_COLOR = (198, 210, 228, 255)
 HUD_COLOR = (232, 238, 248, 255)
 PANEL_RGBA = (10, 14, 22, 165)
+GOAL_PANEL_RGBA = (8, 12, 20, 205)
+"""Panel of the top goal band (the GOAL / SUCCESS lines shown on every frame)."""
+CARD_SCRIM = 0.30
+"""Brightness factor of the dimmed scene frame behind an intro/outro card."""
+CARD_PANEL_RGBA = (10, 15, 24, 232)
+"""Panel of an intro/outro card."""
 ACCENT_RGBA = (242, 140, 40, 235)
 SUCCESS_COLOR = (110, 230, 140, 255)
 FAILURE_COLOR = (255, 105, 105, 255)
@@ -290,18 +296,18 @@ class DemoRenderer:
 
 
 # --- frame decoration --------------------------------------------------------------------
-def _text_box(draw: ImageDraw.ImageDraw, text: str, font: Any) -> tuple[int, int]:
+def text_size(draw: ImageDraw.ImageDraw, text: str, font: Any) -> tuple[int, int]:
     """Pixel `(width, height)` of `text` in `font`."""
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
     return int(right - left), int(bottom - top)
 
 
-def _fit_font(
+def fit_font(
     draw: ImageDraw.ImageDraw, text: str, max_width: int, size: int, *, bold: bool = False
 ) -> Any:
     """The largest font of at most `size` px that keeps `text` within `max_width` px."""
     size = max(8, int(size))
-    while size > 8 and _text_box(draw, text, load_font(size, bold=bold))[0] > max_width:
+    while size > 8 and text_size(draw, text, load_font(size, bold=bold))[0] > max_width:
         size -= 1
     return load_font(size, bold=bold)
 
@@ -455,8 +461,9 @@ def annotate_frame(
     status: str | None = None,
     status_color: tuple[int, int, int, int] = MUTED_COLOR,
     status_detail: str | None = None,
+    goal_lines: Sequence[str] = (),
 ) -> np.ndarray:
-    """Draw the demo overlay (title, agent action blocks, HUD, legend, status, bar).
+    """Draw the demo overlay (goal band, title, agent action blocks, HUD, legend, status, bar).
 
     Args:
         frame: RGB uint8 frame from `DemoRenderer` (the wrench arrows are already drawn).
@@ -470,6 +477,10 @@ def annotate_frame(
         status: Optional big status word ("SUCCESS", "FAILED") in the bottom-right corner.
         status_color: Colour of the status word.
         status_detail: Optional small line under the status word (the failure reason).
+        goal_lines: Optional top goal band, one line each (the coop demo's GOAL / SUCCESS
+            lines); the first line is drawn in the title colour, the rest in the success
+            colour. The band spans the full frame width, so the title panel below it is
+            pushed down by its height.
     """
     height, width = frame.shape[:2]
     image = Image.fromarray(np.ascontiguousarray(frame)).convert("RGBA")
@@ -480,21 +491,64 @@ def annotate_frame(
     margin = max(8, height // 40)
     pad = max(6, height // 80)
     available = width - 2 * margin - 2 * pad
-    title_font = _fit_font(draw, title, available, max(14, round(height / 22)), bold=True)
-    subtitle_font = _fit_font(draw, subtitle, available, max(11, round(height / 36)))
+    title_font = fit_font(draw, title, available, max(14, round(height / 22)), bold=True)
+    subtitle_font = fit_font(draw, subtitle, available, max(11, round(height / 36)))
     hud_font = load_font(max(10, round(height / 34)))
     status_font = load_font(max(13, round(height / 26)), bold=True)
 
+    # Top goal band: the explicit goal / success condition, on every frame. Drawn first and
+    # full-width, then everything else starts below it.
+    content_top = margin
+    if goal_lines:
+        goal_font = fit_font(
+            draw,
+            max(goal_lines, key=len),
+            available,
+            max(11, round(height / 32)),
+            bold=True,
+        )
+        goal_bar_w = max(4, height // 90)
+        goal_line_h = max(text_size(draw, line, goal_font)[1] for line in goal_lines)
+        goal_h = len(goal_lines) * goal_line_h + (len(goal_lines) + 1) * pad
+        draw.rounded_rectangle(
+            [margin, margin, width - margin, margin + goal_h],
+            radius=radius,
+            fill=GOAL_PANEL_RGBA,
+        )
+        text_x = margin + pad + goal_bar_w + pad // 2
+        draw.rounded_rectangle(
+            [
+                margin + pad // 2,
+                margin + pad,
+                margin + pad // 2 + goal_bar_w,
+                margin + goal_h - pad,
+            ],
+            radius=goal_bar_w // 2,
+            fill=ACCENT_RGBA,
+        )
+        for index, line in enumerate(goal_lines):
+            draw.text(
+                (text_x, margin + pad + index * goal_line_h),
+                line,
+                font=goal_font,
+                fill=TITLE_COLOR if index == 0 else SUCCESS_COLOR,
+                stroke_width=2,
+                stroke_fill=(0, 0, 0, 210),
+            )
+        content_top = margin + goal_h + pad
+
     # Top-left title panel: caption + one-line explanation.
-    title_w, title_h = _text_box(draw, title, title_font)
-    subtitle_w, subtitle_h = _text_box(draw, subtitle, subtitle_font)
+    title_w, title_h = text_size(draw, title, title_font)
+    subtitle_w, subtitle_h = text_size(draw, subtitle, subtitle_font)
     panel_w = max(title_w, subtitle_w) + 2 * pad
     panel_h = title_h + subtitle_h + 3 * pad
     draw.rounded_rectangle(
-        [margin, margin, margin + panel_w, margin + panel_h], radius=radius, fill=PANEL_RGBA
+        [margin, content_top, margin + panel_w, content_top + panel_h],
+        radius=radius,
+        fill=PANEL_RGBA,
     )
     draw.text(
-        (margin + pad, margin + pad),
+        (margin + pad, content_top + pad),
         title,
         font=title_font,
         fill=TITLE_COLOR,
@@ -502,7 +556,7 @@ def annotate_frame(
         stroke_fill=(0, 0, 0, 210),
     )
     draw.text(
-        (margin + pad, margin + 2 * pad + title_h),
+        (margin + pad, content_top + 2 * pad + title_h),
         subtitle,
         font=subtitle_font,
         fill=SUBTITLE_COLOR,
@@ -515,15 +569,15 @@ def annotate_frame(
         block_title_font = load_font(max(9, round(height / 38)), bold=True)
         block_line_font = load_font(max(9, round(height / 44)))
         bar_w = max(3, height // 90)
-        block_top = margin + panel_h + 2 * pad
+        block_top = content_top + panel_h + 2 * pad
         block_x1 = width - margin
         for block_title, block_lines, block_color in agent_blocks:
-            block_title_w, block_title_h = _text_box(draw, block_title, block_title_font)
+            block_title_w, block_title_h = text_size(draw, block_title, block_title_font)
             line_h = max(
-                (_text_box(draw, line, block_line_font)[1] for line in block_lines), default=0
+                (text_size(draw, line, block_line_font)[1] for line in block_lines), default=0
             )
             line_w = max(
-                (_text_box(draw, line, block_line_font)[0] for line in block_lines), default=0
+                (text_size(draw, line, block_line_font)[0] for line in block_lines), default=0
             )
             block_w = max(block_title_w, line_w) + 3 * pad + bar_w
             block_h = block_title_h + len(block_lines) * line_h + 3 * pad
@@ -579,10 +633,10 @@ def annotate_frame(
     legend_h = 0
     if legend:
         legend_font = load_font(max(9, round(height / 46)))
-        text_h = max(_text_box(draw, label, legend_font)[1] for _, label in legend)
+        text_h = max(text_size(draw, label, legend_font)[1] for _, label in legend)
         swatch = max(8, height // 48)
         item_widths = [
-            swatch + pad // 2 + _text_box(draw, label, legend_font)[0] for _, label in legend
+            swatch + pad // 2 + text_size(draw, label, legend_font)[0] for _, label in legend
         ]
         legend_w = sum(item_widths) + (len(legend) + 1) * pad
         legend_h = text_h + 2 * pad
@@ -615,8 +669,8 @@ def annotate_frame(
 
     # Bottom-left HUD panel with the live numbers.
     if hud_lines:
-        line_h = max(_text_box(draw, line, hud_font)[1] for line in hud_lines)
-        hud_w = max(_text_box(draw, line, hud_font)[0] for line in hud_lines)
+        line_h = max(text_size(draw, line, hud_font)[1] for line in hud_lines)
+        hud_w = max(text_size(draw, line, hud_font)[0] for line in hud_lines)
         hud_h = len(hud_lines) * line_h + (len(hud_lines) + 1) * pad
         hud_y1 = bottom_limit
         hud_y0 = hud_y1 - hud_h
@@ -638,9 +692,9 @@ def annotate_frame(
     # Bottom-right status word (only once the episode is over) plus the failure reason.
     if status:
         detail_font = load_font(max(9, round(height / 44)))
-        status_w, status_h = _text_box(draw, status, status_font)
+        status_w, status_h = text_size(draw, status, status_font)
         detail = status_detail or ""
-        detail_w, detail_h = _text_box(draw, detail, detail_font) if detail else (0, 0)
+        detail_w, detail_h = text_size(draw, detail, detail_font) if detail else (0, 0)
         block_w = max(status_w, detail_w) + 2 * pad
         block_h = status_h + (detail_h + pad // 2 if detail else 0) + 2 * pad
         x1 = width - margin
@@ -664,6 +718,190 @@ def annotate_frame(
                 fill=MUTED_COLOR,
             )
 
+    return np.asarray(Image.alpha_composite(image, overlay).convert("RGB"), dtype=np.uint8)
+
+
+# --- intro / outro cards -------------------------------------------------------------------
+def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: Any, max_width: int) -> list[str]:
+    """Greedy word wrap of `text` to at most `max_width` px in `font`.
+
+    Empty text yields one empty line (a vertical spacer); a word wider than the limit stays
+    whole, so the caller can still shrink the font when even one word does not fit.
+    """
+    words = str(text).split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if text_size(draw, candidate, font)[0] <= int(max_width):
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+@dataclass(frozen=True)
+class CardLine:
+    """One text line of an intro/outro card (`card_frame`)."""
+
+    text: str
+    color: tuple[int, int, int, int] = HUD_COLOR
+    bold: bool = False
+
+
+@dataclass(frozen=True)
+class CardText:
+    """The content of one intro or outro card, drawn by `card_frame`."""
+
+    eyebrow: str
+    """Small accent line above the title (`TASK GOAL`, `ATTEMPT 1/3`, `RESULT`)."""
+    title: str
+    """The card's headline (the task name or the final status word)."""
+    lines: tuple[CardLine, ...] = ()
+    """Body lines: goal, success condition, controls, achieved metrics."""
+    footer: str = ""
+    """One muted line at the bottom (checkpoint / physics / duration)."""
+    title_color: tuple[int, int, int, int] = TITLE_COLOR
+    """Colour of the headline (SUCCESS/FAILED colour for a result card)."""
+
+
+def dim_frame(frame: np.ndarray, *, factor: float = CARD_SCRIM, blur: float = 3.0) -> np.ndarray:
+    """Darkened, blurred copy of a rendered frame (the backdrop of an intro/outro card).
+
+    A card is never a black frame: the task scene stays visible behind the panel, just dimmed
+    and out of focus so the card text reads on top of it.
+    """
+    image = Image.fromarray(np.ascontiguousarray(frame)).convert("RGB")
+    if blur > 0:
+        image = image.filter(ImageFilter.GaussianBlur(float(blur)))
+    pixels = np.asarray(image, dtype=np.float32) * float(np.clip(factor, 0.0, 1.0))
+    return np.asarray(np.clip(pixels, 0.0, 255.0), dtype=np.uint8)
+
+
+def card_frame(background: np.ndarray, card: CardText) -> np.ndarray:
+    """Draw an intro/outro card over the dimmed `background` frame.
+
+    The card is a HUD-style centred panel: the eyebrow in the accent colour, a large headline
+    in `card.title_color`, a separator and the body lines, plus the muted footer. The panel is
+    sized from the frame height, so a 640x480 clip and a 1280x480 side-by-side clip get
+    readable cards of the same text size.
+
+    Args:
+        background: RGB uint8 scene frame (the episode's first or last frame); it is dimmed
+            and blurred to become the card backdrop.
+        card: The card text (`CardText`).
+
+    Returns:
+        The decorated RGB uint8 frame.
+    """
+    height, width = background.shape[:2]
+    image = Image.fromarray(dim_frame(background)).convert("RGBA")
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    radius = max(5, height // 70)
+    margin = max(10, height // 26)
+    pad = max(8, height // 40)
+    bar_w = max(4, height // 90)
+    panel_w = min(width - 2 * margin, max(360, round(width * 0.80)))
+    inner_w = panel_w - 2 * pad - bar_w - pad // 2
+    eyebrow_font = fit_font(draw, card.eyebrow, inner_w, max(11, round(height / 34)), bold=True)
+    title_font = fit_font(draw, card.title, inner_w, max(20, round(height / 13)), bold=True)
+    _, eyebrow_h = text_size(draw, card.eyebrow, eyebrow_font)
+    _, title_h = text_size(draw, card.title, title_font)
+
+    # Body lines: one readable font size for all lines; long lines wrap over several rows.
+    line_size = max(10, round(height / 30))
+    line_fonts = [load_font(line_size, bold=line.bold) for line in card.lines]
+    while line_size > 9 and any(
+        line.text and max(text_size(draw, word, font)[0] for word in line.text.split()) > inner_w
+        for line, font in zip(card.lines, line_fonts)
+    ):
+        line_size -= 1
+        line_fonts = [load_font(line_size, bold=line.bold) for line in card.lines]
+    wrapped: list[tuple[str, tuple[int, int, int, int], Any]] = []
+    for line, font in zip(card.lines, line_fonts):
+        for chunk in wrap_text(draw, line.text, font, inner_w):
+            wrapped.append((chunk, line.color, font))
+    line_heights = [text_size(draw, text, font)[1] if text else 0 for text, _color, font in wrapped]
+    line_h = max(line_heights, default=0)
+    footer_font = load_font(max(9, round(height / 46)))
+    footer_lines: list[str] = []
+    if card.footer:
+        footer_font = fit_font(draw, card.footer, inner_w, max(9, round(height / 46)))
+        footer_lines = wrap_text(draw, card.footer, footer_font, inner_w)
+    footer_line_h = max((text_size(draw, line, footer_font)[1] for line in footer_lines), default=0)
+    footer_h = footer_line_h * len(footer_lines)
+
+    separator_h = max(1, height // 320)
+    panel_h = (
+        3 * pad
+        + eyebrow_h
+        + pad // 2
+        + title_h
+        + pad
+        + separator_h
+        + pad // 2
+        + len(wrapped) * line_h
+        + (pad + footer_h if card.footer else 0)
+    )
+    panel_h = min(panel_h, height - 2 * margin)
+    x0 = (width - panel_w) // 2
+    y0 = max(margin, (height - panel_h) // 2)
+    x1, y1 = x0 + panel_w, y0 + panel_h
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=CARD_PANEL_RGBA)
+    draw.rounded_rectangle(
+        [x0 + pad // 2, y0 + pad, x0 + pad // 2 + bar_w, y1 - pad],
+        radius=bar_w // 2,
+        fill=ACCENT_RGBA,
+    )
+    text_x = x0 + pad + bar_w + pad // 2
+    cursor = y0 + pad
+    draw.text(
+        (text_x, cursor),
+        card.eyebrow,
+        font=eyebrow_font,
+        fill=ACCENT_RGBA if card.title_color == TITLE_COLOR else card.title_color,
+        stroke_width=1,
+        stroke_fill=(0, 0, 0, 180),
+    )
+    cursor += eyebrow_h + pad // 2
+    draw.text(
+        (text_x, cursor),
+        card.title,
+        font=title_font,
+        fill=card.title_color,
+        stroke_width=2,
+        stroke_fill=(0, 0, 0, 210),
+    )
+    cursor += title_h + pad
+    draw.line(
+        [(text_x, cursor), (x1 - pad, cursor)],
+        fill=(255, 255, 255, 45),
+        width=separator_h,
+    )
+    cursor += separator_h + pad // 2
+    for text, color, font in wrapped:
+        if text:
+            draw.text(
+                (text_x, cursor),
+                text,
+                font=font,
+                fill=color,
+                stroke_width=1,
+                stroke_fill=(0, 0, 0, 170),
+            )
+        cursor += line_h
+    for index, line in enumerate(footer_lines):
+        draw.text(
+            (text_x, y1 - pad - footer_h + index * footer_line_h),
+            line,
+            font=footer_font,
+            fill=MUTED_COLOR,
+        )
     return np.asarray(Image.alpha_composite(image, overlay).convert("RGB"), dtype=np.uint8)
 
 

@@ -271,3 +271,6 @@ results_toss_bc/
 
 # Hidden-partner occlusion eval JSONs
 results_occ2/
+
+# Local gh CLI cache
+.gh-cache/

@@ -21,15 +21,32 @@ Scenes (``--scene``):
    with success/steps), so a demo can show successes and failures side by side. Uses the
    scripted oracle, or the checkpoint policies when ``--checkpoint`` is given.
 
-Every frame carries a Pillow HUD: the task name, step/time, the task's score/progress (the
-cart-pole's |pole angle| and cart->target distance, the pendulum's peak amplitude->target and
-hold cycles, the toss-catch's passes->target with the ball height/velocity), the agents'
-``left``/``right`` commanded quantities (force/torque magnitudes for the cart-pole and
-pendulum, paddle pose plus commanded velocity for the toss-catch), a bottom progress bar and
-a SUCCESS / FAILED / TIMEOUT status on the last frame. The task-specific metrics, goal
-markers, state copy and camera poses live in one dispatch point per concern
-(``_decorate_scene``, ``_write_render_state``, ``_task_hud``, ``_task_metrics`` and
-``TASK_VIEWS``), which is how the three tasks share one renderer.
+Every frame carries a Pillow HUD. Its **top band** is the task's explicit goal: one ``GOAL:``
+line (what the two agents are trying to do) and one ``SUCCESS:`` line (the exact success
+condition with numbers taken from the task config, e.g. the cart-pole tolerances or the
+toss-catch pass/floor/court bounds) -- so a viewer never has to guess what "done" means. Below
+the band: the task name, step/time, the task's score/progress (the cart-pole's |pole angle|
+and cart->target distance, the pendulum's peak amplitude->target and hold cycles, the
+toss-catch's ``passes k/3`` with the ball height/velocity), the agents' ``left``/``right``
+commanded quantities (force/torque magnitudes for the cart-pole and pendulum, paddle pose plus
+commanded velocity for the toss-catch), a bottom progress bar and a SUCCESS / FAILED / TIMEOUT
+status on the last frame. The task-specific metrics, goal markers, state copy and camera poses
+live in one dispatch point per concern (``_decorate_scene``, ``_write_render_state``,
+``_task_hud``, ``_task_metrics``, ``_task_goal`` and ``TASK_VIEWS``), which is how the three
+tasks share one renderer.
+
+Every clip is framed by cards, never by black frames: a 2.5 s **intro card** at the start (task
+name, who the left/right agents are and what they command, the goal, the success condition, the
+failure rule and the episode budget) and a 2 s **outro card** at the end (SUCCESS / FAILED /
+TIMEOUT, the reason, the achieved metrics and the goal recap). The cards are drawn over the
+dimmed, blurred first/last rendered frame in the HUD style (``render_utils.card_frame``).
+``--target-seconds`` (default 12) stretches the episode part by **frame holding** (slow motion:
+every rendered frame is repeated an integer number of times, rounded up so the episode part
+reaches the target); the intro and outro add on top, so a final clip is at least ~16.5 s at the
+default flags. Duration,
+goal and physics metadata are written into the scene JSON (``intro_seconds``,
+``outro_seconds``, ``episode_sim_seconds``, ``video_duration_s``, ``goal``,
+``success_condition``, ``frame_physics``).
 
 The learned-policy path reuses `callosum/experiments/coop_tasks/eval.py` (checkpoint loading,
 input-mode resolution, greedy inference and the Bi-JEPA `predicted` input builder) instead of
@@ -56,17 +73,19 @@ GPU physics path needs ``uv pip install --python /root/.callosum/venv/bin/python
 mujoco-warp==4.0.1``):
 
     MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
-        --task cartpole --scene oracle --seed 0 --attempts 3 --backend warp \\
-        --width 640 --height 480 --fps 15 --out /workspace/callosum-runs/render_gpu_physics
+        --task cartpole --scene oracle --seed 0 --backend warp \\
+        --width 640 --height 480 --fps 15 --target-seconds 12 \\
+        --out /workspace/callosum-runs/render_goal
 
     MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
         --task pendulum --scene policy-vs-oracle --backend warp \\
         --checkpoint /root/callosum/runs/coop_pendulum_none_s0/latest.pt \\
-        --input-mode none --out /workspace/callosum-runs/render_gpu_physics
+        --input-mode none --out /workspace/callosum-runs/render_goal
 
     MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
-        --task cartpole --scene attempts --attempts 5 --seed 0 --backend warp \\
-        --checkpoint .../latest.pt --input-mode none --out /workspace/callosum-runs/render_gpu_physics
+        --task toss --scene attempts --attempts 3 --seed 0 --backend warp \\
+        --checkpoint /root/callosum/runs/coop_toss_phys2_none_s0/latest.pt \\
+        --input-mode none --out /workspace/callosum-runs/render_goal
 
 Metric-only checks without OpenGL (the CPU path is also fine on the macOS dev laptop once the
 ``sandbox`` extra is installed; the ``warp`` path needs the GPU stack):
@@ -97,9 +116,13 @@ from PIL import Image
 
 from callosum.common.render_utils import (
     FAILURE_COLOR,
+    HUD_COLOR,
     MUTED_COLOR,
     SUCCESS_COLOR,
+    CardLine,
+    CardText,
     annotate_frame,
+    card_frame,
     hstack_side_by_side,
     mean_luma,
     mujoco_module,
@@ -134,6 +157,15 @@ GPU_FRAME_PHYSICS = "gpu (mujoco_warp)"
 
 CPU_FRAME_PHYSICS = "cpu (mujoco)"
 """The JSON `frame_physics` value of a clip whose rollout physics ran in the CPU env."""
+
+DEFAULT_TARGET_SECONDS = 12.0
+"""Default length (s) of the EPISODE part of a clip, reached by frame holding (slow motion)."""
+
+DEFAULT_INTRO_SECONDS = 2.5
+"""Default duration (s) of the opening title card (drawn, never a black frame)."""
+
+DEFAULT_OUTRO_SECONDS = 2.0
+"""Default duration (s) of the closing result card (status + reason + achieved metrics)."""
 
 AGENT_KEYS = ("left", "right")
 """The suite's two agent keys (mirrors `coop_tasks.logic.AGENT_KEYS`).
@@ -277,6 +309,125 @@ def _task_view(task: str) -> TaskView:
     return TASK_VIEWS[task]
 
 
+# --- the explicit task goal (HUD band + intro/outro cards) ---------------------------------
+
+TASK_TITLES: dict[str, str] = {
+    "cartpole": "two one-sided pushers balance one pole",
+    "pendulum": "two one-sided torques pump one pendulum",
+    "toss": "two paddles keep a rally alive",
+}
+"""Human one-line title of each task (the intro card headline)."""
+
+
+@dataclass(frozen=True)
+class TaskGoal:
+    """The task's explicit goal, with every number read from the task config.
+
+    The same strings drive the always-visible top HUD band (``GOAL:`` / ``SUCCESS:``), the
+    intro card (agents, controls, budget, failure rule) and the scene JSON (``goal`` /
+    ``success_condition`` / ``failure_condition``), so the video and the report cannot drift
+    from `callosum/experiments/coop_tasks/config.py`.
+    """
+
+    goal: str
+    """Short goal line ("what the team must achieve")."""
+    success: str
+    """The exact success condition, with the config's tolerances/numbers."""
+    failure: str
+    """The failure rule ("when the episode is FAILED"), with the config's bounds."""
+    controls: tuple[str, str]
+    """What the `left` / `right` agent commands (one line each)."""
+    budget: str
+    """The episode budget: control steps, control dt and simulated seconds."""
+
+
+def _budget_text(config: TaskConfig) -> str:
+    """The episode budget line of a task (`control_dt`/`max_control_steps` from the config)."""
+    return (
+        f"{int(config.max_control_steps)} control steps x {float(config.control_dt):.2f} s = "
+        f"{float(config.max_episode_time):.1f} s sim"
+    )
+
+
+def task_goal(task: str, config: TaskConfig) -> TaskGoal:
+    """The task's explicit goal and exact success condition, derived from its config.
+
+    Args:
+        task: The coop task (`cartpole`, `pendulum` or `toss`).
+        config: The task config the rollout uses; every displayed number comes from it.
+
+    Returns:
+        The `TaskGoal` (goal, success, failure, per-agent controls, budget).
+
+    Raises:
+        ValueError: for an unsupported task.
+    """
+    if task == "cartpole":
+        target = float(config.target_x)
+        angle_deg = math.degrees(float(config.success_angle_tol))
+        return TaskGoal(
+            goal=f"keep the pole up and park the cart at x = {target:+.2f} m",
+            success=(
+                f"|x - {target:.2f}| ≤ {float(config.success_pos_tol) * 100.0:.0f} cm · "
+                f"|angle| ≤ {angle_deg:.1f}° · "
+                f"|v| ≤ {float(config.success_lin_speed_tol):.2f} m/s · "
+                f"|ω| ≤ {float(config.success_ang_speed_tol):.2f} rad/s"
+            ),
+            failure=f"|pole angle| > {math.degrees(float(config.failure_angle)):.1f}° (the pole fell)",
+            controls=(
+                f"left agent: pushes the cart +x, force ≤ {float(config.max_force):.0f} N",
+                f"right agent: pushes the cart -x, force ≤ {float(config.max_force):.0f} N",
+            ),
+            budget=_budget_text(config),
+        )
+    if task == "pendulum":
+        target_deg = math.degrees(float(config.target_amplitude))
+        hold = int(config.hold_cycles)
+        return TaskGoal(
+            goal=f"pump to ≥ {target_deg:.1f}° amplitude and hold {hold} half-cycles",
+            success=f"peak |angle| ≥ {target_deg:.1f}° on {hold} completed half-cycles",
+            failure=f"|angle| > {math.degrees(float(config.failure_angle)):.0f}° (about to flip over)",
+            controls=(
+                f"left agent: positive torque ≤ {float(config.max_torque):.2f} Nm",
+                f"right agent: negative torque ≤ {float(config.max_torque):.2f} Nm",
+            ),
+            budget=_budget_text(config),
+        )
+    if task == "toss":
+        passes = int(config.n_passes)
+        floor = float(config.floor_z) + float(config.success_floor_margin)
+        return TaskGoal(
+            goal=f"keep the rally alive — {passes} alternating passes",
+            success=(
+                f"{passes}/{passes} passes · ball above floor (z > {floor:.2f} m) · "
+                f"inside court (|x| ≤ {float(config.court_x):.2f} m)"
+            ),
+            failure=(
+                f"ball z < {float(config.floor_z):.2f} m (dropped) or "
+                f"|ball x| > {float(config.court_x):.2f} m (out of court)"
+            ),
+            controls=(
+                "left agent: paddle x / z / tilt (throws the ball)",
+                "right agent: paddle x / z / tilt (returns the ball)",
+            ),
+            budget=_budget_text(config),
+        )
+    raise ValueError(f"task must be one of {RENDER_TASKS}, got {task!r}")
+
+
+def _goal_hud_lines(goal: TaskGoal) -> tuple[str, str]:
+    """The two top-band HUD lines of the goal (`GOAL:` and `SUCCESS:`, shown on every frame)."""
+    return (f"GOAL: {goal.goal}", f"SUCCESS: {goal.success}")
+
+
+def _goal_card_lines(goal: TaskGoal) -> tuple[CardLine, ...]:
+    """The goal block of an intro/outro card (the same two lines as the HUD band)."""
+    return (
+        CardLine(f"GOAL: {goal.goal}", HUD_COLOR, bold=True),
+        CardLine(f"SUCCESS: {goal.success}", SUCCESS_COLOR, bold=True),
+    )
+
+
 def _configure_gl() -> None:
     """Select an offscreen OpenGL backend before `mujoco` is imported."""
     if os.environ.get("MUJOCO_GL"):
@@ -289,11 +440,13 @@ def _configure_gl() -> None:
 
 @dataclass(frozen=True)
 class TaskHud:
-    """The HUD of one frame: bottom-left numbers, agent blocks and the progress bar."""
+    """The HUD of one frame: goal band, bottom-left numbers, agent blocks and the progress bar."""
 
     lines: tuple[str, ...]
     agent_blocks: tuple[tuple[str, tuple[str, ...], tuple[int, int, int, int]], ...]
     progress: float | None
+    goal_lines: tuple[str, ...] = ()
+    """The top goal band (`GOAL:` / `SUCCESS:`), drawn on every frame."""
 
 
 def _task_metrics(task: str, state: dict[str, float], config: TaskConfig) -> dict[str, float]:
@@ -309,6 +462,8 @@ def _task_metrics(task: str, state: dict[str, float], config: TaskConfig) -> dic
         return {
             "angle_deg": angle_deg,
             "cart_x": float(state["cart_x"]),
+            "cart_vx": float(state["cart_vx"]),
+            "pole_angvel": float(state["pole_angvel"]),
             "distance_to_goal": distance,
             "progress": float(np.clip(1.0 - distance / span, 0.0, 1.0)),
         }
@@ -424,6 +579,7 @@ def _task_hud(
     """
     view = _task_view(task)
     metrics = _task_metrics(task, state, config)
+    goal = task_goal(task, config)
     elapsed = step * config.control_dt
     header = f"{view.env_title} · step {step}/{max_steps} · t = {elapsed:.2f} s"
     if task == "cartpole":
@@ -467,6 +623,7 @@ def _task_hud(
         lines=lines,
         agent_blocks=_agent_blocks(task, config, state, action),
         progress=progress,
+        goal_lines=_goal_hud_lines(goal),
     )
 
 
@@ -1565,6 +1722,7 @@ class DemoEpisode:
     truncated: bool
     status: str
     status_detail: str
+    status_color: tuple[int, int, int, int]
     metrics: dict[str, float]
     control_dt: float
 
@@ -1640,6 +1798,7 @@ def run_episode(
                 status=status,
                 status_color=status_color,
                 status_detail=detail or None,
+                goal_lines=hud.goal_lines,
             )
         frames.append(
             DemoFrame(
@@ -1694,6 +1853,7 @@ def run_episode(
         truncated=truncated,
         status=status,
         status_detail=detail,
+        status_color=status_color,
         metrics=metrics,
         control_dt=config.control_dt,
     )
@@ -1703,10 +1863,15 @@ def run_episode(
 
 
 def _duplicate_for_target(frame_count: int, fps: int, target_seconds: float) -> int:
-    """How many times each rendered frame is held to reach `target_seconds` (slow motion)."""
+    """How many times each rendered frame is held to reach at least `target_seconds`.
+
+    The hold factor is rounded UP: the episode part must not fall short of the requested
+    length, and a clip is only allowed to be longer (e.g. a 122-frame episode at 15 fps is
+    8.1 s of frames, so a 12 s target needs 2 holds = 16.3 s rather than 1 hold = 8.1 s).
+    """
     if frame_count <= 0:
         return 1
-    return max(1, round(float(target_seconds) * float(fps) / float(frame_count)))
+    return max(1, math.ceil(float(target_seconds) * float(fps) / float(frame_count)))
 
 
 def _repeat_frames(frames: Sequence[DemoFrame], duplicate: int) -> Iterator[np.ndarray]:
@@ -1779,6 +1944,149 @@ def _sbs_duplicates(
     return duplicate_shorter, duplicate_longer
 
 
+def _achieved_card_lines(
+    task: str, config: TaskConfig, episode: DemoEpisode, *, prefix: str = ""
+) -> tuple[CardLine, ...]:
+    """The achieved-metrics lines of a result card (numbers from the episode's final state)."""
+    metrics = episode.metrics
+    lead = f"{prefix}: " if prefix else ""
+    if task == "cartpole":
+        return (
+            CardLine(
+                f"{lead}cart x {metrics['cart_x']:+.2f} m (goal {float(config.target_x):+.2f}) · "
+                f"dist {metrics['distance_to_goal'] * 100.0:.1f} cm",
+                HUD_COLOR,
+            ),
+            CardLine(
+                f"     |angle| {metrics['angle_deg']:.2f}° · "
+                f"|v| {metrics['cart_vx']:+.3f} m/s · |ω| {metrics['pole_angvel']:+.3f} rad/s",
+                MUTED_COLOR,
+            ),
+        )
+    if task == "pendulum":
+        target_deg = math.degrees(float(config.target_amplitude))
+        return (
+            CardLine(
+                f"{lead}peak {metrics['peak_amplitude_deg']:.1f}° / {target_deg:.1f}° · "
+                f"holds {metrics['completed_cycles']:.0f}/{metrics['hold_cycles']:.0f} · "
+                f"|angle| {metrics['angle_deg']:.1f}°",
+                HUD_COLOR,
+            ),
+        )
+    return (
+        CardLine(
+            f"{lead}{metrics['passes']:.0f}/{metrics['target_passes']:.0f} passes · "
+            f"ball x {metrics['ball_x']:+.2f} m · z {metrics['ball_z']:.2f} m · "
+            f"vz {metrics['ball_vz']:+.2f} m/s",
+            HUD_COLOR,
+        ),
+    )
+
+
+def _intro_card(
+    *,
+    eyebrow: str,
+    headline: str,
+    agent_lines: Sequence[tuple[str, tuple[int, int, int, int]]],
+    goal: TaskGoal,
+    footer: str = "",
+) -> CardText:
+    """The opening card: who the agents are, what they command, goal, success and failure rule."""
+    lines = [CardLine(text, color) for text, color in agent_lines]
+    lines.append(CardLine(""))
+    lines.extend(_goal_card_lines(goal))
+    lines.append(CardLine(f"FAILED when {goal.failure}", FAILURE_COLOR))
+    lines.append(CardLine(f"budget: {goal.budget}", MUTED_COLOR))
+    return CardText(eyebrow=eyebrow, title=headline, lines=tuple(lines), footer=footer)
+
+
+def _result_card(
+    *,
+    eyebrow: str,
+    task: str,
+    config: TaskConfig,
+    episode: DemoEpisode,
+    goal: TaskGoal,
+    extra_lines: Sequence[CardLine] = (),
+    footer: str = "",
+) -> CardText:
+    """The closing card: status word, reason, achieved metrics and the goal recap."""
+    lines = [
+        CardLine(episode.status_detail, episode.status_color, bold=True),
+        *_achieved_card_lines(task, config, episode),
+        *extra_lines,
+        CardLine(""),
+        *_goal_card_lines(goal),
+    ]
+    return CardText(
+        eyebrow=eyebrow,
+        title=episode.status,
+        lines=tuple(lines),
+        footer=footer,
+        title_color=episode.status_color,
+    )
+
+
+def _sbs_result_card(
+    *,
+    eyebrow: str,
+    task: str,
+    config: TaskConfig,
+    goal: TaskGoal,
+    left_label: str,
+    left: DemoEpisode,
+    right_label: str,
+    right: DemoEpisode,
+    footer: str = "",
+) -> CardText:
+    """The closing card of a policy-vs-oracle clip: both halves' status and metrics."""
+    if left.success and right.success:
+        headline, title_color = "SUCCESS", SUCCESS_COLOR
+    elif not left.success and not right.success:
+        headline, title_color = "FAILED", FAILURE_COLOR
+    else:
+        headline, title_color = "MIXED", MUTED_COLOR
+    lines = [
+        CardLine(
+            f"left · {left_label}: {left.status} - {left.status_detail}",
+            left.status_color,
+            bold=True,
+        ),
+        CardLine(
+            f"right · {right_label}: {right.status} - {right.status_detail}",
+            right.status_color,
+            bold=True,
+        ),
+        CardLine(""),
+        *_achieved_card_lines(task, config, left, prefix="left"),
+        *_achieved_card_lines(task, config, right, prefix="right"),
+        CardLine(""),
+        *_goal_card_lines(goal),
+    ]
+    return CardText(
+        eyebrow=eyebrow,
+        title=headline,
+        lines=tuple(lines),
+        footer=footer,
+        title_color=title_color,
+    )
+
+
+def _clip_footer(args: argparse.Namespace, episode_sim_seconds: float, *, extra: str = "") -> str:
+    """The muted bottom line of a card: episode sim time, clip timeline and physics backend."""
+    parts = [
+        f"{episode_sim_seconds:.2f} s sim",
+        (
+            f"clip ~{args.target_seconds:.0f} s episode + {args.intro_seconds:.1f} s intro + "
+            f"{args.outro_seconds:.1f} s outro @ {args.fps} fps"
+        ),
+        f"physics: {frame_physics_label(args.backend)}",
+    ]
+    if extra:
+        parts.append(extra)
+    return " · ".join(parts)
+
+
 def _md5_image(image: np.ndarray) -> str:
     """Short md5 of an RGB frame (proof that the saved stills really differ)."""
     return hashlib.md5(np.ascontiguousarray(image, dtype=np.uint8).tobytes()).hexdigest()[:12]
@@ -1831,7 +2139,12 @@ def _write_gif_from_images(
     gif_width: int,
     gif_stride: int,
 ) -> dict[str, Any]:
-    """Write a looping GIF preview from a strided iterator of RGB frames."""
+    """Write a looping GIF preview from a strided iterator of RGB frames.
+
+    The GIF writer merges runs of identical frames (the held intro card, the slow-motion
+    repeats of one rendered frame), so the real duration is the SUM of the per-frame delays,
+    not `n_frames * first_frame_delay`; the latter would over-report a slow-motion clip.
+    """
     written = write_gif(
         path,
         images,
@@ -1840,17 +2153,107 @@ def _write_gif_from_images(
     )
     with Image.open(path) as gif_image:
         gif_frames = int(getattr(gif_image, "n_frames", 1))
-        gif_frame_ms = int(gif_image.info.get("duration", 0) or 0)
+        duration_ms = 0
+        for index in range(gif_frames):
+            gif_image.seek(index)
+            duration_ms += int(gif_image.info.get("duration", 0) or 0)
         gif_size = gif_image.size
     return {
         "path": str(path.resolve()),
         "bytes": int(path.stat().st_size),
         "frames": gif_frames,
         "written_frames": int(written),
-        "duration_s": round(gif_frames * max(gif_frame_ms, 1) / 1000.0, 2),
+        "duration_s": round(duration_ms / 1000.0, 2),
         "width": gif_size[0],
         "height": gif_size[1],
         "gif_stride": gif_stride,
+    }
+
+
+def _seconds_to_frames(seconds: float, fps: float) -> int:
+    """Video frames a still card of `seconds` lasts at `fps` (0 disables the card)."""
+    return max(0, round(float(seconds) * float(fps)))
+
+
+def _card_image(background: np.ndarray, card: CardText | None) -> np.ndarray | None:
+    """The rendered card over a dimmed copy of `background`, or None when the card is off."""
+    return None if card is None else card_frame(background, card)
+
+
+def _carded_frames(
+    episode: DemoEpisode,
+    duplicate: int,
+    *,
+    intro_image: np.ndarray | None,
+    intro_frames: int,
+    outro_image: np.ndarray | None,
+    outro_frames: int,
+) -> Iterator[np.ndarray]:
+    """The clip's video stream: held intro card, slow-motion episode, held outro card."""
+    if intro_image is not None:
+        for _ in range(intro_frames):
+            yield intro_image
+    yield from _repeat_frames(episode.frames, duplicate)
+    if outro_image is not None:
+        for _ in range(outro_frames):
+            yield outro_image
+
+
+def _carded_sbs_frames(
+    left: DemoEpisode,
+    right: DemoEpisode,
+    *,
+    duplicate_left: int,
+    duplicate_right: int,
+    intro_image: np.ndarray | None,
+    intro_frames: int,
+    outro_image: np.ndarray | None,
+    outro_frames: int,
+) -> Iterator[np.ndarray]:
+    """The side-by-side clip's stream: held intro card, slow-motion episodes, held outro card."""
+    if intro_image is not None:
+        for _ in range(intro_frames):
+            yield intro_image
+    yield from _side_by_side_frames(
+        left, right, duplicate_left=duplicate_left, duplicate_right=duplicate_right
+    )
+    if outro_image is not None:
+        for _ in range(outro_frames):
+            yield outro_image
+
+
+def _video_duration(clip: dict[str, Any], expected_frames: int, fps: float) -> float:
+    """The clip's measured duration in seconds (the probed value, or frames / fps)."""
+    probe = clip.get("probe") or {}
+    duration = probe.get("duration_s")
+    if duration:
+        return round(float(duration), 3)
+    return round(int(expected_frames) / float(fps), 3)
+
+
+def _timeline_metadata(
+    *,
+    total_frames: int,
+    fps: float,
+    duplicate: int,
+    episode_sim_seconds: float,
+    intro_seconds: float,
+    intro_frames: int,
+    outro_seconds: float,
+    outro_frames: int,
+    episode_video_frames: int,
+) -> dict[str, Any]:
+    """The duration/`episode_sim_seconds` block every clip and every scene JSON carries."""
+    return {
+        "duplicate": duplicate,
+        "intro_seconds": round(float(intro_seconds), 3) if intro_frames else 0.0,
+        "outro_seconds": round(float(outro_seconds), 3) if outro_frames else 0.0,
+        "intro_frames": int(intro_frames),
+        "outro_frames": int(outro_frames),
+        "episode_video_frames": int(episode_video_frames),
+        "video_frames": int(total_frames),
+        "episode_sim_seconds": round(float(episode_sim_seconds), 3),
+        "video_duration_s": round(float(total_frames) / float(fps), 3),
     }
 
 
@@ -1860,28 +2263,62 @@ def _write_single_clip(
     stem: str,
     episode: DemoEpisode,
     *,
-    fps: int,
+    fps: float,
     target_seconds: float,
+    intro_seconds: float,
+    outro_seconds: float,
+    intro_card: CardText | None,
+    outro_card: CardText | None,
     gif_width: int | None,
     gif_stride: int,
     encoders: list[str],
     stills: bool = True,
 ) -> dict[str, Any]:
-    """Encode a single-scene clip plus its stills (frame0-2, mid, final) and GIF preview."""
+    """Encode a single-scene clip: intro card, slow-motion episode, outro card, stills, GIF.
+
+    The episode is stretched to `target_seconds` by frame holding; the cards add
+    `intro_seconds` and `outro_seconds` on top, so the clip is longer than `target_seconds`.
+    The stills (`frame0-2`, `mid`, `final`) are episode frames; the intro/outro cards are saved
+    as their own PNGs for evidence.
+    """
     duplicate = _duplicate_for_target(len(episode.frames), fps, target_seconds)
-    total = _repeat_count(episode.frames, duplicate)
+    episode_frames = _repeat_count(episode.frames, duplicate)
+    intro_frames = _seconds_to_frames(intro_seconds, fps) if intro_card is not None else 0
+    outro_frames = _seconds_to_frames(outro_seconds, fps) if outro_card is not None else 0
+    intro_image = _card_image(episode.frames[0].image, intro_card) if intro_frames else None
+    outro_image = _card_image(episode.frames[-1].image, outro_card) if outro_frames else None
+    total = intro_frames + episode_frames + outro_frames
     first = [_expanded_index(episode.frames, index, duplicate) for index in range(PNG_STILLS)]
-    middle = _expanded_index(episode.frames, round(total * 0.5), duplicate)
+    middle = _expanded_index(episode.frames, round(episode_frames * 0.5), duplicate)
     final = episode.frames[-1].image
+    timeline = _timeline_metadata(
+        total_frames=total,
+        fps=fps,
+        duplicate=duplicate,
+        episode_sim_seconds=episode.steps * episode.control_dt,
+        intro_seconds=intro_seconds,
+        intro_frames=intro_frames,
+        outro_seconds=outro_seconds,
+        outro_frames=outro_frames,
+        episode_video_frames=episode_frames,
+    )
     clip = _encode_clip(
         out_dir / filename,
-        _repeat_frames(episode.frames, duplicate),
+        _carded_frames(
+            episode,
+            duplicate,
+            intro_image=intro_image,
+            intro_frames=intro_frames,
+            outro_image=outro_image,
+            outro_frames=outro_frames,
+        ),
         total,
         [first[0], middle, final],
         fps,
         encoders,
     )
-    clip.update({"duplicate": duplicate, "episode": episode.summary()})
+    clip.update({"episode": episode.summary(), **timeline})
+    clip["video_duration_s"] = _video_duration(clip, total, fps)
     if stills:
         save_png_stills(out_dir, stem, first, count=len(first))
         _save_image(out_dir / f"{stem}_mid.png", middle)
@@ -1900,15 +2337,32 @@ def _write_single_clip(
         still = out_dir / f"{stem}_final.png"
         _save_image(still, final)
         clip["final_still"] = {"path": str(still.resolve()), "md5": _md5_image(final)}
+    if intro_image is not None:
+        path = out_dir / f"{stem}_intro.png"
+        _save_image(path, intro_image)
+        clip["intro_still"] = {"path": str(path.resolve()), "md5": _md5_image(intro_image)}
+    if outro_image is not None:
+        path = out_dir / f"{stem}_outro.png"
+        _save_image(path, outro_image)
+        clip["outro_still"] = {"path": str(path.resolve()), "md5": _md5_image(outro_image)}
     if gif_width is not None:
         clip["gif"] = _write_gif_from_images(
             out_dir / f"{stem}_preview.gif",
             (
                 frame
-                for index, frame in enumerate(_repeat_frames(episode.frames, duplicate))
+                for index, frame in enumerate(
+                    _carded_frames(
+                        episode,
+                        duplicate,
+                        intro_image=intro_image,
+                        intro_frames=intro_frames,
+                        outro_image=outro_image,
+                        outro_frames=outro_frames,
+                    )
+                )
                 if index % gif_stride == 0
             ),
-            fps=fps,
+            fps=round(fps),
             gif_width=gif_width,
             gif_stride=gif_stride,
         )
@@ -1922,33 +2376,63 @@ def _write_sbs_clip(
     left: DemoEpisode,
     right: DemoEpisode,
     *,
-    fps: int,
+    fps: float,
     target_seconds: float,
+    intro_seconds: float,
+    outro_seconds: float,
+    intro_card: CardText | None,
+    outro_card: CardText | None,
     gif_width: int | None,
     gif_stride: int,
     encoders: list[str],
 ) -> dict[str, Any]:
-    """Encode a side-by-side clip (policy left, oracle right) plus stills and GIF preview."""
+    """Encode a side-by-side clip (policy left, oracle right) with intro/outro cards + GIF."""
     duplicate_left, duplicate_right = _sbs_duplicates(left, right, fps, target_seconds)
-    total = max(
+    episode_frames = max(
         _repeat_count(left.frames, duplicate_left),
         _repeat_count(right.frames, duplicate_right),
     )
+    intro_frames = _seconds_to_frames(intro_seconds, fps) if intro_card is not None else 0
+    outro_frames = _seconds_to_frames(outro_seconds, fps) if outro_card is not None else 0
     first = [
         _sbs_frame_at(left, right, index, duplicate_left, duplicate_right)
         for index in range(PNG_STILLS)
     ]
-    middle = _sbs_frame_at(left, right, round(total * 0.5), duplicate_left, duplicate_right)
-    final = _sbs_frame_at(left, right, total - 1, duplicate_left, duplicate_right)
-    if np.array_equal(final, first[0]):
+    first_frame = _sbs_frame_at(left, right, 0, duplicate_left, duplicate_right)
+    final_frame = _sbs_frame_at(left, right, episode_frames - 1, duplicate_left, duplicate_right)
+    intro_image = _card_image(first_frame, intro_card) if intro_frames else None
+    outro_image = _card_image(final_frame, outro_card) if outro_frames else None
+    total = intro_frames + episode_frames + outro_frames
+    middle = _sbs_frame_at(
+        left, right, round(episode_frames * 0.5), duplicate_left, duplicate_right
+    )
+    if np.array_equal(final_frame, first[0]):
         raise RuntimeError(f"{stem}: the final still equals frame 0 -- the clip has no time axis")
+    timeline = _timeline_metadata(
+        total_frames=total,
+        fps=fps,
+        duplicate=max(duplicate_left, duplicate_right),
+        episode_sim_seconds=max(left.steps * left.control_dt, right.steps * right.control_dt),
+        intro_seconds=intro_seconds,
+        intro_frames=intro_frames,
+        outro_seconds=outro_seconds,
+        outro_frames=outro_frames,
+        episode_video_frames=episode_frames,
+    )
     clip = _encode_clip(
         out_dir / filename,
-        _side_by_side_frames(
-            left, right, duplicate_left=duplicate_left, duplicate_right=duplicate_right
+        _carded_sbs_frames(
+            left,
+            right,
+            duplicate_left=duplicate_left,
+            duplicate_right=duplicate_right,
+            intro_image=intro_image,
+            intro_frames=intro_frames,
+            outro_image=outro_image,
+            outro_frames=outro_frames,
         ),
         total,
-        [first[0], middle, final],
+        [first[0], middle, final_frame],
         fps,
         encoders,
     )
@@ -1958,34 +2442,51 @@ def _write_sbs_clip(
             "duplicate_right": duplicate_right,
             "left_episode": left.summary(),
             "right_episode": right.summary(),
+            **timeline,
         }
     )
+    clip["video_duration_s"] = _video_duration(clip, total, fps)
     save_png_stills(out_dir, stem, first, count=len(first))
     _save_image(out_dir / f"{stem}_mid.png", middle)
-    _save_image(out_dir / f"{stem}_final.png", final)
+    _save_image(out_dir / f"{stem}_final.png", final_frame)
     hashes = {
         "frame0": _md5_image(first[0]),
         "mid": _md5_image(middle),
-        "final": _md5_image(final),
+        "final": _md5_image(final_frame),
     }
     clip["still_md5"] = hashes
     print(
         f"{stem} stills: frame0={hashes['frame0']} mid={hashes['mid']} "
         f"final={hashes['final']} distinct={len(set(hashes.values())) == len(hashes)}"
     )
+    if intro_image is not None:
+        path = out_dir / f"{stem}_intro.png"
+        _save_image(path, intro_image)
+        clip["intro_still"] = {"path": str(path.resolve()), "md5": _md5_image(intro_image)}
+    if outro_image is not None:
+        path = out_dir / f"{stem}_outro.png"
+        _save_image(path, outro_image)
+        clip["outro_still"] = {"path": str(path.resolve()), "md5": _md5_image(outro_image)}
     if gif_width is not None:
         clip["gif"] = _write_gif_from_images(
             out_dir / f"{stem}_preview.gif",
             (
                 frame
                 for index, frame in enumerate(
-                    _side_by_side_frames(
-                        left, right, duplicate_left=duplicate_left, duplicate_right=duplicate_right
+                    _carded_sbs_frames(
+                        left,
+                        right,
+                        duplicate_left=duplicate_left,
+                        duplicate_right=duplicate_right,
+                        intro_image=intro_image,
+                        intro_frames=intro_frames,
+                        outro_image=outro_image,
+                        outro_frames=outro_frames,
                     )
                 )
                 if index % gif_stride == 0
             ),
-            fps=fps,
+            fps=round(fps),
             gif_width=gif_width,
             gif_stride=gif_stride,
         )
@@ -2087,8 +2588,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--target-seconds",
         type=float,
-        default=6.0,
-        help="approximate clip length: frames are held (slow motion) until it is reached",
+        default=DEFAULT_TARGET_SECONDS,
+        help=(
+            "minimum length (s) of the EPISODE part: frames are held (slow motion) until it "
+            "is reached (frame holding rounds up); the intro/outro cards add on top of it"
+        ),
+    )
+    parser.add_argument(
+        "--intro-seconds",
+        type=float,
+        default=DEFAULT_INTRO_SECONDS,
+        help="duration (s) of the opening title card (0 disables it); never a black frame",
+    )
+    parser.add_argument(
+        "--outro-seconds",
+        type=float,
+        default=DEFAULT_OUTRO_SECONDS,
+        help="duration (s) of the closing result card (0 disables it)",
     )
     parser.add_argument(
         "--gif-width",
@@ -2131,6 +2647,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(f"--attempts must be >= 1, got {args.attempts}")
     if args.target_seconds <= 0:
         raise SystemExit(f"--target-seconds must be > 0, got {args.target_seconds}")
+    if args.intro_seconds < 0:
+        raise SystemExit(f"--intro-seconds must be >= 0, got {args.intro_seconds}")
+    if args.outro_seconds < 0:
+        raise SystemExit(f"--outro-seconds must be >= 0, got {args.outro_seconds}")
     if args.policy_max_steps is not None and args.policy_max_steps < 1:
         raise SystemExit(f"--policy-max-steps must be >= 1, got {args.policy_max_steps}")
     if args.max_steps is not None and args.max_steps < 1:
@@ -2213,6 +2733,34 @@ def _backend_metadata(args: argparse.Namespace, env: CoopTaskEnv | GpuDemoEnv) -
     return metadata
 
 
+def _scene_goal_metadata(
+    args: argparse.Namespace,
+    goal: TaskGoal,
+    episode_sim_seconds: float,
+    clips: dict[str, Any],
+) -> dict[str, Any]:
+    """The goal/duration block every scene JSON carries (goal text + measured clip lengths).
+
+    Args:
+        args: The parsed CLI (intro/outro seconds, target seconds, seed, task).
+        goal: The task's explicit goal (its numbers come from the task config).
+        episode_sim_seconds: Simulated duration (s) of the scene's episodes: the episode
+            itself, the longer of the two policy/oracle episodes, or the sum over the
+            attempts.
+        clips: The written clips (`_write_single_clip` / `_write_sbs_clip` results).
+    """
+    return {
+        "goal": goal.goal,
+        "success_condition": goal.success,
+        "failure_condition": goal.failure,
+        "target_seconds": args.target_seconds,
+        "intro_seconds": args.intro_seconds,
+        "outro_seconds": args.outro_seconds,
+        "episode_sim_seconds": round(float(episode_sim_seconds), 3),
+        "video_duration_s": _total_video_duration(clips),
+    }
+
+
 def _render_oracle_scene(
     args: argparse.Namespace,
     config: TaskConfig,
@@ -2222,6 +2770,7 @@ def _render_oracle_scene(
 ) -> dict[str, Any]:
     """Render the scripted-oracle success clip; returns its summary block."""
     view = _task_view(args.task)
+    goal = task_goal(args.task, config)
     env = _make_env(args.task, config, "none", args)
     metadata = _backend_metadata(args, env)
     try:
@@ -2244,7 +2793,33 @@ def _render_oracle_scene(
     print(f"oracle scene: {episode.status} after {episode.steps} steps -> {episode.summary()}")
     stem = f"coop_{args.task}_oracle"
     clips: dict[str, Any] = {}
+    episode_sim_seconds = episode.steps * episode.control_dt
     if renderer is not None:
+        intro = _intro_card(
+            eyebrow=f"TASK GOAL · {view.env_title} · scripted oracle",
+            headline=TASK_TITLES[args.task],
+            agent_lines=(
+                (goal.controls[0], LEFT_COLOR),
+                (goal.controls[1], RIGHT_COLOR),
+                (
+                    (
+                        "controller: ONE centralised scripted oracle drives both agents "
+                        "(privileged upper bound, not a learned policy)"
+                    ),
+                    MUTED_COLOR,
+                ),
+            ),
+            goal=goal,
+            footer=_clip_footer(args, episode_sim_seconds),
+        )
+        outro = _result_card(
+            eyebrow=f"RESULT · seed {args.seed} · scripted oracle",
+            task=args.task,
+            config=config,
+            episode=episode,
+            goal=goal,
+            footer=_clip_footer(args, episode_sim_seconds),
+        )
         clips["oracle"] = _write_single_clip(
             args.out,
             f"{stem}.mp4",
@@ -2252,12 +2827,17 @@ def _render_oracle_scene(
             episode,
             fps=args.fps,
             target_seconds=args.target_seconds,
+            intro_seconds=args.intro_seconds,
+            outro_seconds=args.outro_seconds,
+            intro_card=intro,
+            outro_card=outro,
             gif_width=args.gif_width or None,
             gif_stride=GIF_STRIDE,
             encoders=encoders,
         )
     return {
         **metadata,
+        **_scene_goal_metadata(args, goal, episode_sim_seconds, clips),
         "task": args.task,
         "scene": "oracle",
         "seed": args.seed,
@@ -2265,7 +2845,6 @@ def _render_oracle_scene(
         "height": args.height,
         "fps": args.fps,
         "step_stride": args.step_stride,
-        "target_seconds": args.target_seconds,
         "encoder": sorted(set(encoders)),
         "episode": episode.summary(),
         "clips": clips,
@@ -2282,6 +2861,7 @@ def _render_policy_vs_oracle_scene(
 ) -> dict[str, Any]:
     """Render the learned-policy-vs-oracle clip; returns its summary block."""
     view = _task_view(args.task)
+    goal = task_goal(args.task, config)
     policy_env = _make_env(args.task, policy_controller.config, policy_controller.env_mode, args)
     oracle_env = _make_env(args.task, config, "none", args)
     metadata = _backend_metadata(args, oracle_env)
@@ -2323,7 +2903,48 @@ def _render_policy_vs_oracle_scene(
     )
     stem = f"coop_{args.task}_policy_vs_oracle"
     clips: dict[str, Any] = {}
+    episode_sim_seconds = max(
+        oracle_episode.steps * oracle_episode.control_dt,
+        policy_episode.steps * policy_episode.control_dt,
+    )
     if renderer is not None:
+        intro = _intro_card(
+            eyebrow=f"POLICY vs ORACLE · {view.env_title}",
+            headline="learned policy (left) vs scripted oracle (right)",
+            agent_lines=(
+                (
+                    f"left: {policy_controller.title} · {policy_controller.subtitle}",
+                    LEFT_COLOR,
+                ),
+                ("right: scripted oracle (privileged upper bound)", RIGHT_COLOR),
+                (
+                    (
+                        "same episode seed; each half is held in slow motion so both end "
+                        "together (greedy policies, private action latency)"
+                    ),
+                    MUTED_COLOR,
+                ),
+            ),
+            goal=goal,
+            footer=_clip_footer(
+                args,
+                episode_sim_seconds,
+                extra=f"policy input mode: {policy_controller.input_mode}",
+            ),
+        )
+        outro = _sbs_result_card(
+            eyebrow=f"RESULT · policy (left) vs oracle (right) · seed {args.seed}",
+            task=args.task,
+            config=config,
+            goal=goal,
+            left_label=policy_controller.title,
+            left=policy_episode,
+            right_label="scripted oracle",
+            right=oracle_episode,
+            footer=_clip_footer(
+                args, episode_sim_seconds, extra=f"checkpoint update {policy_controller.update}"
+            ),
+        )
         clip = _write_sbs_clip(
             args.out,
             f"{stem}.mp4",
@@ -2332,6 +2953,10 @@ def _render_policy_vs_oracle_scene(
             oracle_episode,
             fps=args.fps,
             target_seconds=args.target_seconds,
+            intro_seconds=args.intro_seconds,
+            outro_seconds=args.outro_seconds,
+            intro_card=intro,
+            outro_card=outro,
             gif_width=args.gif_width or None,
             gif_stride=GIF_STRIDE,
             encoders=encoders,
@@ -2341,6 +2966,7 @@ def _render_policy_vs_oracle_scene(
         clips["policy-vs-oracle"] = clip
     return {
         **metadata,
+        **_scene_goal_metadata(args, goal, episode_sim_seconds, clips),
         "task": args.task,
         "scene": "policy-vs-oracle",
         "seed": args.seed,
@@ -2348,7 +2974,6 @@ def _render_policy_vs_oracle_scene(
         "height": args.height,
         "fps": args.fps,
         "step_stride": args.step_stride,
-        "target_seconds": args.target_seconds,
         "encoder": sorted(set(encoders)),
         "policy": policy_controller.metadata(),
         "policy_max_steps": policy_max_steps,
@@ -2364,18 +2989,25 @@ def _render_attempts_scene(
     renderer: CoopDemoRenderer | None,
     encoders: list[str],
 ) -> dict[str, Any]:
-    """Render N episodes on consecutive seeds (successes and failures); returns the summary."""
+    """Render N episodes on consecutive seeds (successes and failures); returns the summary.
+
+    Each attempt is its own clip with an `ATTEMPT i/N` intro card and a SUCCESS / FAILED /
+    TIMEOUT outro card, so the outcome of every attempt is explicit on screen.
+    """
     view = _task_view(args.task)
     is_policy = isinstance(controller, PolicyDemoController)
     # A learned policy must see the env mode its checkpoint was trained for (`oracle` gets
     # the privileged partner block; `predicted` stays on `none`).
     env_config = controller.config if is_policy else config
+    # The goal text shows the numbers of the config the episodes actually run with.
+    goal = task_goal(args.task, env_config)
     partner_mode = controller.env_mode if is_policy else "none"
     env = _make_env(args.task, env_config, partner_mode, args)
     metadata = _backend_metadata(args, env)
     attempts: list[dict[str, Any]] = []
     clips: dict[str, Any] = {}
     stem = f"coop_{args.task}_{controller.label}"
+    sim_seconds_total = 0.0
     try:
         for index in range(args.attempts):
             seed = args.seed + index
@@ -2396,15 +3028,40 @@ def _render_attempts_scene(
                 subtitle=controller.subtitle,
                 name=f"attempt-{index}-seed-{seed}",
             )
+            episode_sim_seconds = episode.steps * episode.control_dt
+            sim_seconds_total += episode_sim_seconds
             attempt_stem = f"{stem}_attempt{index}_seed{seed}"
             entry: dict[str, Any] = {
                 "attempt": index,
                 "seed": seed,
                 "stem": attempt_stem,
+                "episode_sim_seconds": round(episode_sim_seconds, 3),
                 **episode.summary(),
             }
             print(f"attempt {index + 1}/{args.attempts} (seed {seed}): {episode.status} -> {entry}")
             if renderer is not None:
+                intro = _intro_card(
+                    eyebrow=f"ATTEMPT {index + 1}/{args.attempts} · seed {seed}",
+                    headline=f"{TASK_TITLES[args.task]} · {controller.title}",
+                    agent_lines=(
+                        (goal.controls[0], LEFT_COLOR),
+                        (goal.controls[1], RIGHT_COLOR),
+                        (
+                            f"source: {controller.title} · {controller.subtitle}",
+                            MUTED_COLOR,
+                        ),
+                    ),
+                    goal=goal,
+                    footer=_clip_footer(args, episode_sim_seconds),
+                )
+                outro = _result_card(
+                    eyebrow=f"ATTEMPT {index + 1}/{args.attempts} RESULT · seed {seed}",
+                    task=args.task,
+                    config=env_config,
+                    episode=episode,
+                    goal=goal,
+                    footer=_clip_footer(args, episode_sim_seconds),
+                )
                 clip = _write_single_clip(
                     args.out,
                     f"{attempt_stem}.mp4",
@@ -2412,7 +3069,11 @@ def _render_attempts_scene(
                     episode,
                     fps=args.fps,
                     target_seconds=args.target_seconds,
-                    gif_width=None,
+                    intro_seconds=args.intro_seconds,
+                    outro_seconds=args.outro_seconds,
+                    intro_card=intro,
+                    outro_card=outro,
+                    gif_width=args.gif_width or None,
                     gif_stride=GIF_STRIDE,
                     encoders=encoders,
                     stills=False,
@@ -2423,6 +3084,7 @@ def _render_attempts_scene(
                     "bytes": clip["bytes"],
                     "probe": clip.get("probe", {}),
                     "final_still": clip.get("final_still", {}),
+                    "video_duration_s": clip["video_duration_s"],
                 }
             attempts.append(entry)
     finally:
@@ -2430,6 +3092,7 @@ def _render_attempts_scene(
     successes = sum(1 for attempt in attempts if attempt["success"])
     return {
         **metadata,
+        **_scene_goal_metadata(args, goal, sim_seconds_total, clips),
         "task": args.task,
         "scene": "attempts",
         "source": controller.label,
@@ -2440,7 +3103,6 @@ def _render_attempts_scene(
         "height": args.height,
         "fps": args.fps,
         "step_stride": args.step_stride,
-        "target_seconds": args.target_seconds,
         "encoder": sorted(set(encoders)),
         "successes": successes,
         "failures": len(attempts) - successes,
@@ -2451,6 +3113,11 @@ def _render_attempts_scene(
 
 
 # --- main -----------------------------------------------------------------------------------
+
+
+def _total_video_duration(clips: dict[str, Any]) -> float:
+    """The measured duration (s) of all clips of a scene, summed (0.0 for a dry run)."""
+    return round(sum(float(clip.get("video_duration_s") or 0.0) for clip in clips.values()), 3)
 
 
 def _print_table(rows: Sequence[Sequence[str]], header: Sequence[str]) -> None:
@@ -2505,13 +3172,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "note: --scene attempts renders scripted-oracle attempts (pass --checkpoint for policies)"
         )
+    goal = task_goal(args.task, config)
     print(
         f"coop demo render: scene={args.scene} task={args.task} seed={args.seed} "
         f"size={args.width}x{args.height} fps={args.fps} step_stride={args.step_stride} "
-        f"target_seconds={args.target_seconds} dry_run={args.dry_run} "
+        f"target_seconds={args.target_seconds} intro_seconds={args.intro_seconds} "
+        f"outro_seconds={args.outro_seconds} dry_run={args.dry_run} "
         f"frame_physics={frame_physics_label(args.backend)} backend={args.backend} "
         f"device={args.device} MUJOCO_GL={os.environ.get('MUJOCO_GL')}"
     )
+    print(f"GOAL: {goal.goal}")
+    print(f"SUCCESS: {goal.success}")
     if policy_controller is not None:
         print(
             f"checkpoint {policy_controller.checkpoint}: input_mode="
@@ -2555,6 +3226,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"\nartifacts in: {args.out.resolve()}")
         print(f"summary json: {summary_path.resolve()}")
         print(f"encoder(s): {sorted(set(encoders))}")
+        print(
+            f"goal: {report.get('goal')} | success: {report.get('success_condition')} | "
+            f"episode sim {report.get('episode_sim_seconds')} s | "
+            f"video {report.get('video_duration_s')} s (intro {report.get('intro_seconds')} s, "
+            f"outro {report.get('outro_seconds')} s) | "
+            f"frame physics: {report.get('frame_physics')}"
+        )
     return 0
 
 
