@@ -12,7 +12,7 @@ Bi-JEPA `predicted` **0.860** vs `none` 0.945 vs `oracle` 0.895 (3×3×128) — 
 **🦾 Toss на реальной физике (2026-11-22):** MOCAP-ракетки заменены динамическими серво-телами
 с коллизиями ракетка–ракетка/мяч; найден и исправлен баг GPU-контактов, из-за которого success был
 недостижим. Итог GPU-абляции (3 сида × 3 базы × 128 эп.): none **0.955**, oracle 0.950,
-predicted 0.950. Демо: `demo/demo_toss_gpuphys_*`; отчёт — `docs/results-coop-suite.md`,
+predicted 0.950. Демо: `demo/coop/toss/demo_toss_*`; отчёт — `docs/results-coop-suite.md`,
 BC-негатив — `docs/toss-bc-baseline.md`.
 
 **⚡ GPU-first:** все прогоны экспериментов (обучение, eval, демо) — только на GPU (`mujoco_warp`/CUDA); CPU — лишь unit/parity/CI. Правило зафиксировано в CLAUDE.md и PLAN.md.
@@ -26,7 +26,7 @@ BC-негатив — `docs/toss-bc-baseline.md`.
 - Среда валидна: скриптовый oracle 0.99 на 256 эпизодах, `rotator-only` 0.0 (неаддитивность).
 - GPU-бэкенд (`mujoco_warp`, CUDA graph): 10.8×/26×/53× env-throughput, parity и determinism проверены.
 - Честная абляция (held-out, 128 эп. × 3 сида): **none 1.000 / oracle 0.901 / predicted 0.932** на default; на harsh — **oracle 0.969 / none 0.839** (gap +0.13). Асимптотического разрыва нет; привилегированная информация даёт скорость обучения и устойчивость, Bi-JEPA в текущей реализации пока не обгоняет none — отрицательный промежуточный результат, план улучшения в отчёте.
-- Демо: [`demo/demo_policy_vs_oracle.mp4`](demo/demo_policy_vs_oracle.mp4), [`demo/demo_preview.gif`](demo/demo_preview.gif), [`demo/demo_wrench_arrows.mp4`](demo/demo_wrench_arrows.mp4) (видно, кто держит/крутит), [`demo/demo_arms_face_turn.mp4`](demo/demo_arms_face_turn.mp4) (реальные две SO-ARM101 в ManiSkill: 90° и SUCCESS), [`demo/learning_curves_honest_seed0.png`](demo/learning_curves_honest_seed0.png), [`demo/learning_curves_harsh.png`](demo/learning_curves_harsh.png).
+- Демо: [`demo/cube_wrench/demo_policy_vs_oracle.mp4`](demo/cube_wrench/demo_policy_vs_oracle.mp4), [`demo/cube_wrench/demo_preview.gif`](demo/cube_wrench/demo_preview.gif), [`demo/cube_wrench/demo_wrench_arrows.mp4`](demo/cube_wrench/demo_wrench_arrows.mp4) (видно, кто держит/крутит), [`demo/arms_face_turn/demo_arms_face_turn.mp4`](demo/arms_face_turn/demo_arms_face_turn.mp4) (реальные две SO-ARM101 в ManiSkill: 90° и SUCCESS), [`demo/cube_wrench/learning_curves_honest_seed0.png`](demo/cube_wrench/learning_curves_honest_seed0.png), [`demo/cube_wrench/learning_curves_harsh.png`](demo/cube_wrench/learning_curves_harsh.png).
 
 ## Two-robot suite на GPU (2026-11-21)
 
@@ -106,8 +106,8 @@ IPPO, `none`/`oracle`/`predicted` (Bi-JEPA), 3 сида × 3 held-out базы �
 cart-pole none **0.957** / oracle 0.909 / pred 0.459; pendulum **0.974** / 0.975 / 0.976;
 toss (после фикса правила передач) **0.966** / 0.923 / 0.939. На простых задачах Bi-JEPA не даёт
 выигрыша (реактивная достаточность), но задача/инфраструктура готовы для стресс-тестов.
-Демо: `demo/demo_cartpole_gpu_policy_vs_oracle.mp4`, `demo/demo_pendulum_gpu_policy_vs_oracle.mp4`,
-`demo/demo_toss_gpu_fixed_policy_vs_oracle.mp4` (+ attempts и GIF). Полный отчёт:
+Демо: `demo/coop/cartpole/demo_cartpole_policy_vs_oracle.mp4`, `demo/coop/pendulum/demo_pendulum_policy_vs_oracle.mp4`,
+`demo/coop/toss/demo_toss_policy_vs_oracle.mp4` (+ attempts и GIF). Полный отчёт:
 [`docs/results-coop-suite.md`](docs/results-coop-suite.md).
 
 ## Содержание

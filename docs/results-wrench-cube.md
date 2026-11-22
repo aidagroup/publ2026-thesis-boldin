@@ -60,8 +60,8 @@
   - **Bi-JEPA `predicted`:** в текущей реализации **не обгоняет `none`** (default mean 0.932 vs 1.000;
     sweep `aux_coef {0.03,0.1} × history_len {1,2}` — лучший 0.716 на 200 апдейтах, u150 0.19 vs
     none 0.30). Это **отрицательный промежуточный результат**; утверждение «Bi-JEPA закрывает разрыв»
-    в текст диплома пока не идёт. Кривые: `demo/learning_curves_honest_seed0.png`,
-    `demo/learning_curves_harsh.png`.
+    в текст диплома пока не идёт. Кривые: `demo/cube_wrench/learning_curves_honest_seed0.png`,
+    `demo/cube_wrench/learning_curves_harsh.png`.
 
 ## Как запускать
 

@@ -237,7 +237,7 @@ DAgger 0.031–0.062. Причина: oracle компенсирует скрыт
 среднее ≈0. Для BC нужно добавить собственные in-flight команды в obs.
 
 Демо (GPU-физика, `frame_physics: gpu (mujoco_warp)`):
-`demo/demo_toss_gpuphys_{oracle,policy_vs_oracle,policy_vs_oracle_predicted,policy_vs_oracle_oracle}.mp4`
+`demo/coop/toss/demo_toss_{oracle,policy_vs_oracle,policy_vs_oracle_predicted,policy_vs_oracle_oracle}.mp4`
 и `demo_toss_gpuphys_attempts_seed{0,1,2}.mp4` (SUCCESS 42/48/59), плюс GIF/PNG/JSON.
 
 ### Hidden-partner OccludedToss (2026-11-22)
