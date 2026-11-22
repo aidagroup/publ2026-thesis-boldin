@@ -25,7 +25,7 @@ TASKS = ("cartpole", "pendulum", "toss")
 def _parse_name(path: Path) -> tuple[str, str, int, int] | None:
     """`coop_<task>_<mode>_s<seed>_base<base>.json` -> (task, mode, seed, base)."""
     match = re.fullmatch(
-        r"(?:gpu_)?coop_(?P<task>[a-z]+)_(?P<mode>none|oracle|pred)_s(?P<seed>\d+)_base(?P<base>\d+)",
+        r"(?:gpu_)?coop_(?P<task>[a-z]+?)(?:_[a-z0-9]+)?_(?P<mode>none|oracle|pred)_s(?P<seed>\d+)_base(?P<base>\d+)",
         path.stem,
     )
     if match is None:

@@ -5,6 +5,12 @@
 **📂 Рабочие материалы для диплома:** [`docs/thesis/`](docs/thesis/README.md) — заметки-исходники (идея, обзор литературы, метод, эксперименты, стек).
 **⚙️ Сетап и деплой:** [`docs/setup.md`](docs/setup.md).
 
+**🦾 Toss на реальной физике (2026-11-22):** MOCAP-ракетки заменены динамическими серво-телами
+с коллизиями ракетка–ракетка/мяч; найден и исправлен баг GPU-контактов, из-за которого success был
+недостижим. Итог GPU-абляции (3 сида × 3 базы × 128 эп.): none **0.955**, oracle 0.950,
+predicted 0.950. Демо: `demo/demo_toss_gpuphys_*`; отчёт — `docs/results-coop-suite.md`,
+BC-негатив — `docs/toss-bc-baseline.md`.
+
 **⚡ GPU-first:** все прогоны экспериментов (обучение, eval, демо) — только на GPU (`mujoco_warp`/CUDA); CPU — лишь unit/parity/CI. Правило зафиксировано в CLAUDE.md и PLAN.md.
 
 **🧭 Текущий статус (2026-11-21):** главная линия к предзащите 2026-12-14 — **reduced-модель `CubeWrench-v0`** (MuJoCo): изолированный куб «ядро + активный слой», два децентрализованных агента прикладывают непрерывные 6D-моменты; ablation `none/oracle/predicted` (Bi-JEPA). Руки SO-ARM101 (ветка `step/2.3-skill-level-marl`, skill-level MARL) заморожены как весенний мост. Подробности — [`PLAN.md`](PLAN.md), дорожная карта — [`openspec/project.md`](openspec/project.md); бенчмарк-анализ — [`docs/thesis/02-related-work.md`](docs/thesis/02-related-work.md). Данные и окружение на сервере хранятся в постоянном `$HOME` (`~/callosum`), см. [`docs/setup.md`](docs/setup.md) и [`docs/server-runbook.md`](docs/server-runbook.md). Правила работы для ассистента – в [`CLAUDE.md`](CLAUDE.md).

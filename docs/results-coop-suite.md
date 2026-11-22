@@ -201,6 +201,44 @@ JSON содержит `gpu_provenance`: политика обучена на GPU
 1e-6 obs / 1e-3 rollout; рендер EGL на A40. Старые `demo_toss_gpu_*` — пример exploit'а, не
 использовать в отчёте. CPU-пилотные клипы `demo_*_final_*` — fallback.
 
+## Реальная динамика ракеток и исправление критического GPU-бага (2026-11-22)
+
+По требованию «ракетки не должны пересекаться, физика максимально реальная» MOCAP-планки
+заменены на **динамические тела**: плиты 0.6×0.6×0.06 м, 0.8 кг, 2 призматических сустава (x,z)
++ hinge (tilt), bounded-force сервоприводы; включены контакты **ракетка↔ракетка** (жёсткие
+collision shells) и ракетка↔мяч. CPU и GPU (`mujoco_warp`) пути дают parity; oracle на CPU
+0.891 (256 эп.), `max_pad_penetration=0`, форс-ram тест без проскока.
+
+**Критический баг GPU-физики (исправлен, коммит `9c80ec6`):** в `env_gpu.py` сырые флаги
+контакта мяч↔ракетка (`_flags_warp`) не обнулялись между control steps → `contact_side` залипал,
+rising-edge в pass-гейте срабатывал максимум 2 раза за эпизод → **success был физически
+недостижим во всех warp-прогонах** (именно поэтому «RL не обучается», 0.0 на 250 апдейтах).
+Фикс: `_flags.zero_()` раз в control step (+ `GpuDemoEnv.state()` теперь отдаёт servo
+targets/contact). После фикса: parity zero/oracle PASS (qpos 1.9e-4/1.4e-3, 0 флаговых
+расхождений), scripted oracle на GPU 0.86, RL учится сразу.
+
+### Итог по toss на реальной физике (GPU, 3 сида × 3 held-out базы × 128 эп.)
+
+| режим | success (mean) | по сидам | min–max |
+|---|---|---|---|
+| none | **0.955** | 0.938 / 0.964 / 0.964 | 0.938–0.964 |
+| oracle | **0.950** | 0.969 / 0.971 / 0.909 | 0.909–0.971 |
+| predicted (Bi-JEPA) | **0.950** | 0.961 / 0.909 / 0.979 | 0.909–0.979 |
+
+Gaps: oracle−none ≈ −0.005, predicted−none ≈ −0.005. Все успехи ≥ ~28 control steps, мяч на
+success выше пола; `max_pad_penetration=0`, ракетки не пересекаются. Вывод прежний: на этой
+задаче Bi-JEPA не нужна (партнёр виден через мяч/траекторию) — hidden-partner тест делается
+отдельно (OccludedToss: партнёрская ракетка исключена из наблюдений).
+
+**BC/DAgger — честный отрицательный результат** (`docs/toss-bc-baseline.md`): plain BC 0.000–0.031,
+DAgger 0.031–0.062. Причина: oracle компенсирует скрытую latency-очередь (1–4 in-flight команды),
+которой нет в 26-мерном наблюдении; одинаковые obs соответствуют разным командам, MSE клонирует
+среднее ≈0. Для BC нужно добавить собственные in-flight команды в obs.
+
+Демо (GPU-физика, `frame_physics: gpu (mujoco_warp)`):
+`demo/demo_toss_gpuphys_{oracle,policy_vs_oracle,policy_vs_oracle_predicted,policy_vs_oracle_oracle}.mp4`
+и `demo_toss_gpuphys_attempts_seed{0,1,2}.mp4` (SUCCESS 42/48/59), плюс GIF/PNG/JSON.
+
 ## Ограничения / честные оговорки
 
 - Cart-pole: чистый PD-oracle неустойчив при латентности 0.1–0.3 с → LQR+Smith; чистый RL без

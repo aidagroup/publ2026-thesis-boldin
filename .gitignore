@@ -264,3 +264,7 @@ results_coop/
 
 # Coop-suite GPU evaluation JSONs (server artifacts)
 results_coop_gpu/
+
+# Physical-toss evaluation JSONs
+results_toss_phys2/
+results_toss_bc/
