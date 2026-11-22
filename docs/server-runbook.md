@@ -25,8 +25,8 @@ for things that genuinely need a GPU.
 | Driver | 570.172.08 (CUDA ≤ 12.8 → torch `cu128`) |
 | Access | JupyterHub web UI + its terminal only; **no SSH**; user `jovyan`, no root |
 | Internet | allowlist only (GitHub, PyPI, PyTorch, Hugging Face, lab LLM proxy, …) |
-| `$HOME` | 4.0 GB total, 888 MB free (2026-10-04); persistent (assumed) |
-| `/` overlay (`/tmp`) | 291 GB, 76 GB free (2026-10-04); assumed wiped on restart |
+| `$HOME` | 100 GB, persistent (2026-10-07; was 4.0 GB with 888 MB free); survives a container restart |
+| `/` overlay (`/tmp`) | 291 GB, 76 GB free (2026-10-04); **wiped on restart** (observed 2026-10-08): temporary files only |
 | Missing tools | `uv` (setup installs it), `tmux`, `screen` |
 
 ## Access (JupyterHub, no SSH)
@@ -37,37 +37,39 @@ browser tab closes, and so does anything it started. Files move only through the
 JupyterHub file browser (upload / right-click → Download); code moves through
 `git` from GitHub. There is no SSH alias, `scp` or `rsync` to the server.
 
-Layout (details in [setup.md](setup.md#disk-layout-on-the-server-scratch-mode)):
-checkout, venv and caches in scratch `/tmp/<user>-callosum` (big, assumed wiped on
-restart), results in `~/callosum-runs` (small, persistent) reached through the
-`runs/` symlink in the checkout.
+Layout (details in [setup.md](setup.md#disk-layout-on-the-server)): everything is
+persistent in `$HOME`. Checkout `~/callosum`, venv, uv cache, Python, HF/ManiSkill caches and
+the conda Vulkan loader under `~/.callosum`, `~/.sapien`, results in `~/callosum-runs`
+(reached through the `runs/` symlink in the checkout), archives in `~/callosum-archive`.
+A container restart loses none of it. Only `/tmp` is wiped.
 
 ## Session order
 
 ### 1. Environment: clone or update, then setup
 
-Open a terminal and look at what survived:
+Open a terminal and look at what is there:
 
 ```bash
-ls ~/.callosum-env.sh ~/callosum-runs      # these persist across restarts
-ls -d /tmp/$(id -un)-callosum/callosum    # scratch checkout: gone after a restart
+ls -d ~/callosum ~/.callosum ~/callosum-runs     # all persistent across restarts
 ```
 
-**Scratch is gone (first session, or after a restart)** — start from a fresh clone:
+**First time (no `~/callosum`)** — fresh install, once:
 
 ```bash
-S=/tmp/$(id -un)-callosum                  # or export CALLOSUM_SCRATCH=<dir> first
-mkdir -p "$S" && cd "$S"
-git clone https://github.com/aidagroup/callosum.git && cd callosum
-# git checkout <branch>                    # if the session is not on main
-bash scripts/setup_server.sh
+git clone -b step/2.1-ippo-so101 https://github.com/aidagroup/publ2026-thesis-boldin.git ~/callosum
+cd ~/callosum                                    # the branch of the session (or main)
+bash scripts/setup_server.sh --smoke             # drop --smoke to skip the GPU smoke tests
 ```
 
-**Scratch is still there** — update in place:
+(See [Migration from the /tmp layout](#migration-from-the-tmp-layout) if this account still
+has the old env file, `~/.sapien` link and so on: the same commands handle it.) Open a **new**
+terminal afterwards (or `source ~/.callosum-env.sh`) so the variables are set.
+
+**Every later session, also after a restart** — the checkout and venv are still there:
 
 ```bash
-source ~/.callosum-env.sh
-cd "$CALLOSUM_REPO"
+source ~/.callosum-env.sh                  # automatic in new terminals via ~/.bashrc
+cd "$CALLOSUM_REPO"                        # = ~/callosum
 bash scripts/update_server.sh              # fetch + hard-sync, then setup_server.sh
 ```
 
@@ -108,17 +110,46 @@ CUDA build, ManiSkill + our `so101_pg` agent, and that both envs register. Stop 
 fix if anything here fails — everything below depends on it. The very first
 `uv sync` is also the confirmation that the `cu128` torch wheels download from
 `download.pytorch.org` (see the network notes in [setup.md](setup.md#network-access-on-the-server)).
-After a restart the uv cache is gone, so setup re-downloads torch and the CUDA
-libraries (several GB); expect it to take minutes, not seconds.
+Only the very first setup downloads torch and the CUDA libraries (several GB, minutes);
+the uv cache, venv and Vulkan loader are persistent, so later runs and runs after a restart
+take seconds (unless `uv.lock` changed).
 
 If the repository turns out to be private, `git clone` over HTTPS asks for a
 username and a read-only token (verify on the server).
 
 In every **new** terminal, `~/.callosum-env.sh` is sourced automatically via
 `~/.bashrc` (verify that terminals read it; otherwise `source` it by hand). It
-sets `UV_PROJECT_ENVIRONMENT`, the caches, `MS_ASSET_DIR` and the Vulkan/libcuda
-variables. A notebook kernel that was started before setup does not have them;
+sets `CALLOSUM_REPO`, `UV_PROJECT_ENVIRONMENT`, the caches, `MS_ASSET_DIR` and the
+Vulkan/libcuda variables. It is rewritten by every setup run. A notebook kernel that was started before setup does not have them;
 restart it or work in the terminal.
+
+#### Migration from the /tmp layout
+
+Until 2026-10-07 `$HOME` was too small, so checkout, venv and caches lived in `/tmp`
+(`/tmp/callosum`, `/tmp/<user>-callosum`), and `~/.callosum-env.sh`, a `~/.bashrc` hook and a
+`~/.sapien` symlink pointed there. `/tmp` is wiped on a restart, which leaves exactly these
+leftovers in `$HOME`: an env file with dead `/tmp` exports, the `.bashrc` hook (harmless, it
+is reused), a dangling `~/.sapien` link, and the results in `~/callosum-runs` and
+`~/callosum-archive` (**keep these**: demos, `bc_full`, interrupted runs with `latest.pt`).
+
+No manual cleanup is needed; the first-time commands above do it:
+
+- an inherited `CALLOSUM_SCRATCH=/tmp/...` from the old env file is recognised (the old file
+  has no `# callosum-layout:` marker) and ignored, with a warning; the home layout is chosen;
+- stale `/tmp/...` entries in `LD_LIBRARY_PATH` and a stale `VK_ICD_FILENAMES` are dropped
+  before the libcuda and Vulkan probes, so those probes judge the real system;
+- the dangling `~/.sapien` link is replaced by a real directory (if the old target still
+  exists its contents are copied, never deleted), then PhysX is fetched into it;
+- `~/.callosum-env.sh` is rewritten, `~/.bashrc` is not duplicated, `runs/` in the new
+  checkout becomes the symlink to `~/callosum-runs`, so existing results are visible at once.
+
+Then continue the interrupted fine-tune from the new checkout with the usual resume
+command (section 3). If `/tmp/callosum` or `/tmp/<user>-callosum` happen to still exist
+(no restart yet), setup prints them at the end and removes nothing; once no run uses them:
+`rm -rf /tmp/callosum /tmp/<user>-callosum` (no trailing slash: the `runs` symlink inside is
+deleted, not its target). Do not run `scripts/setup_server.sh` from the old `/tmp` checkout
+while a run there is active; it would only add a warning, but the GPU smoke tests would
+compete with the run.
 
 ### 2. Phase-1 debt: the GPU-backend checks
 
@@ -213,7 +244,8 @@ One line per iteration: `iter 12/390 | step 307200 | sps 3700 | ret 31.2 | succ 
 ent a/b 5.1/5.2 | kl a/b 0.01/0.02 | lr 2.9e-04 | eval_succ 0.00 | eval_ret 28.1`. `lr` is
 the learning rate of that iteration: it decays linearly to 0 over the run (`anneal_lr`, on by
 default, `--no-anneal-lr` for a constant rate; with `--checkpoint` the schedule restarts from
-`--learning-rate` for the new run's iterations). `ret`/`succ` are the
+`--learning-rate` for the new run's iterations, with `--resume` it continues at the saved
+iteration). `ret`/`succ` are the
 training episodes that finished during the iteration (`n` = how many; `ret -` / `n=0` until the
 first one ends, and `ret`/`succ` then keep their last value). On `FaceTurn-v0` `ret` and
 `eval_ret` include the one-step success bonus (`success_bonus`, 100 in normalised units, see
@@ -226,10 +258,24 @@ evaluation (an `eval @ iter ...` line is printed each time, also once before tra
 as the untrained baseline). TensorBoard tags (section 4): `train/{return,success_once,...}`,
 `eval/{return,success_once,success_at_end,...}`, `losses/agent_{a,b}/{policy_loss,value_loss,
 entropy,approx_kl,clipfrac,explained_variance}`, `policy/agent_{a,b}/action_std`, `charts/{SPS,learning_rate}`.
+FaceTurn diagnostics: the iteration line has `hold a/b 0.12/0.05` (holder / rotator grasp rate
+over the rollout) and each `eval @ iter K:` line ends with `grasp hold .. rot .. both ..` (rates
+over all env-steps), `ever hold .. rot .. both ..` (share of episodes with that grasp at least
+once) and `face X deg mean, Y max`. TensorBoard: `diag/<name>` (rollout) and `eval_diag/<name>`
+(evaluation) for every `diag_*` key of the env's `info` (grasps, `body_pos_drift` m,
+`body_rot_drift` rad, `holder_to_body` / `rotator_to_face` m, `face_angle` rad, `ever_*`, and the
+signed reward-term contributions `r_*` in normalised units, which sum to the step reward minus
+the success bonus), plus `diag_max/<name>`. Non-finite envs (a GPU PhysX state that exploded):
+the trainer resets just those envs, zeroes their reward and cuts GAE there; the iteration line
+then ends with `NONFINITE n (total T)`, the first occurrence prints the env indices, the
+non-finite observation fields and the face/cube state, and TensorBoard has
+`train/nonfinite_envs`, `train/nonfinite_envs_total`, `eval/nonfinite_envs`.
 Files in `runs/$NAME/`: `config.json`, `events.out.tfevents.*`, `latest.pt` (every 20
-iterations and at the end), `best.pt` (best evaluation success, then return): about 2.3 MB each,
-both agents' weights plus the config, no optimizer state (`--checkpoint <file>` warm-starts from
-the weights).
+iterations and at the end), `best.pt` (best evaluation success, then return): about 7 MB each,
+the full training state (both agents' weights, Adam state, RNG states, counters, best eval,
+config), so `--resume runs/$NAME` continues an interrupted run exactly from the last `latest.pt`
+(see "Long runs"). `--checkpoint <file>` takes only the weights (warm start of a new run; also
+accepts older weights-only files).
 
 ##### FaceTurn v2: three seeds from scratch (success bonus, LR annealing)
 
@@ -237,7 +283,10 @@ the weights).
 seeds one after another** (the envs share the GPU, three at once would slow each). After each
 run its directory is archived into `~/callosum-archive/<name>.tar.gz` (`runs/` is a symlink to
 `~/callosum-runs`; the archive holds the event files, `config.json`, `stdout.log` and both
-checkpoints, a few MB):
+checkpoints, ~15 MB). **The same command is also the restart command**: after a container
+restart or a crash, run it again unchanged. A seed with `runs/$NAME/latest.pt` is continued with
+`--resume` (stdout is appended), otherwise it starts fresh; a finished seed returns immediately
+(and is archived again), so finished seeds are skipped cheaply:
 
 ```bash
 source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
@@ -245,9 +294,15 @@ mkdir -p "$HOME/callosum-archive"
 setsid nohup bash -c '
 for SEED in 1 2 3; do
   NAME=faceturn_v2_s$SEED; mkdir -p runs/$NAME
-  uv run python -m callosum.training.ippo --env-id FaceTurn-v0 \
-      --total-timesteps 30000000 --seed $SEED --exp-name $NAME \
-      > runs/$NAME/stdout.log 2>&1 < /dev/null
+  if [ -f runs/$NAME/latest.pt ]; then
+    uv run python -m callosum.training.ippo --resume runs/$NAME \
+        >> runs/$NAME/stdout.log 2>&1 < /dev/null
+  else
+    rm -rf runs/$NAME; mkdir -p runs/$NAME   # a run killed before its first latest.pt
+    uv run python -m callosum.training.ippo --env-id FaceTurn-v0 \
+        --total-timesteps 30000000 --seed $SEED --exp-name $NAME \
+        > runs/$NAME/stdout.log 2>&1 < /dev/null
+  fi
   tar czf "$HOME/callosum-archive/$NAME.tar.gz" -C runs $NAME
 done' > runs/faceturn_v2_driver.log 2>&1 < /dev/null &
 echo $! > runs/faceturn_v2_driver.pid
@@ -325,27 +380,238 @@ kill <pid>                                    # same, if the pid file is right
 ```
 
 SIGTERM makes the trainer finish the current iteration, run an evaluation and write
-`latest.pt` before exiting (`kill -9` loses everything since the last periodic save).
+`latest.pt` before exiting (`kill -9` or a container restart loses only what happened since the
+last periodic save, `checkpoint_freq` iterations at most).
+
+**Resume after a kill or a container restart:** `uv run python -m callosum.training.ippo
+--resume runs/$NAME` (detached with `setsid nohup`, appending to the log with `>>`, like above).
+The run continues in the same directory from the iteration of `latest.pt`: same learning-rate
+schedule position, Adam moments, RNG states, step counters and best-eval tracking; the
+hyperparameters, seed and `total_timesteps` come from `runs/$NAME/config.json`, so no other flag
+is needed (a flag that is given must equal the saved value, otherwise the trainer refuses;
+`--resume` with `--checkpoint` is an error; a `latest.pt` from before this feature, which holds
+only weights, cannot be resumed, use `--checkpoint` for a warm start instead). Prints
+`resumed <dir> from iter X/N, step S`; a finished run prints that it is complete and exits.
+Not restored exactly: the simulator state (the envs are reset with seeds derived from the
+resumed iteration, so the episodes in flight at the kill start over) and TensorBoard events
+after the checkpoint (the killed process's events are discarded, the curves continue cleanly).
+The code must be the same as when the run started (do not `update_server.sh` in between,
+unless the change does not affect training).
 
 `stdout.log` lives in `$HOME` via the `runs/` symlink, so it survives a restart
-(the run itself does not). Do not run `update_server.sh` / `git pull` / switch branches mid-run: `callosum`
+(the process itself does not; continue it with `--resume`). Do not run `update_server.sh` / `git pull` / switch branches mid-run: `callosum`
 is installed editable, so later imports would see the new code.
 
 **Verify on the server first** that detaching really works: `setsid nohup sleep 600 &`,
 close the browser tab, reopen a terminal, `pgrep sleep`. It must still be there. Also
-unknown: whether the lab kills long-running processes or idle containers; make
-trainers save a checkpoint periodically rather than only at the end.
+unknown: whether the lab kills long-running processes or idle containers; the trainer
+saves a full-state checkpoint periodically (`--checkpoint-freq`, default 20 iterations) so that
+`--resume` loses little.
 
 If a notebook is more convenient than a terminal for reading, `!tail -40
 runs/<name>/stdout.log` in a cell is fine (reading only; never start the run there).
+
+#### FaceTurn: demos → BC → IPPO fine-tune
+
+Why: IPPO from scratch on `FaceTurn-v0` never grasps anything (10M-step run: `ever hold 0.00
+rot 0.00`; the policies only learn to hover near the cube). A grasp needs a sustained wide
+gripper opening during a precise approach and then a close, which Gaussian exploration does not
+find. So both policies are pretrained by behaviour cloning on demonstrations of the scripted
+expert (`callosum/experts/face_turn_expert.py`, the strategy of `scripts/probe_face_turn.py`),
+then fine-tuned with PPO. Use the same pipeline for every `--partner-obs` mode (run BC and the
+fine-tune with the same `--partner-obs`).
+
+The expert runs under the training controller: `pd_joint_delta_pos` (the delta is added to the
+*current* joint position, so a joint moves at most about 0.02 rad per step), the registered
+400-step episode, `obs_mode="state"`, `reward_mode="normalized_dense"`. Under the old
+lockstep tracking it succeeded on the Mac CPU sim in 40/40 seeds, first success at step 294 to
+361 (mean about 310), but on the GPU (16 envs) the first success came at step 365 and with 256
+envs nothing succeeded within 400 steps: every waypoint waited for the slowest env, and the turn
+waited for a wrist target the face's joint limit makes unreachable. The tracking was reworked
+(per-env waypoint progress, integral bias, stall detection, turn ends when the face is at 90
+degrees) and then restructured into **per-env asynchronous phase state machines**
+(`callosum/experts/_phases.py`, the FaceTurn program in `_program.py`): every env has its own
+phase per arm and moves on as soon as its own criterion is met (waypoint tolerance or stall,
+jaws at rest, face turned, its own timeout), nobody waits for another env, and an env whose IK
+fails is marked failed at once and holds. Ordering between the arms is per env (the rotator
+descends after this env's holder started closing; the turn needs both grasps). Reach and stall
+are judged on the error to the clean target with tolerances widened by the DART noise jitter,
+stall on a windowed mean. The first success of an env should therefore come at about 300 steps
+regardless of the number of envs; the CPU numbers above predate all this and have to be
+re-measured. The lower bound is set by the controller's speed (about 0.02 rad per step): the
+holder's wrist flex travels about 3.2 rad from the rest pose to the pre-grasp (about 165
+steps), the face turn needs a 1.57 rad wrist roll (about 80 steps), so a first success below
+about 280 steps is not possible with this expert; a learned policy has little slack.
+
+```bash
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+bash scripts/update_server.sh                  # code and venv up to date (not while a job runs)
+
+# 0. The expert under the training controller on the GPU (exit 0 = success in every env).
+#    Prints a status snapshot per phase (when half of the envs completed it) and at the end the
+#    per-phase table: how many envs completed the phase, min / median / max env step at which
+#    they did, how it ended (tol / stall / timeout / extra = face turned / still = jaws at
+#    rest), the failed (IK) envs, the IK planning time and the per-env first-success steps.
+uv run python scripts/probe_face_turn.py --control delta --overlap
+
+# 1. Collect demonstrations: 256 envs per reset, 2 resets (seeds 0 and 1); successful episodes
+#    only, cut at the first success. --action-noise 0.1 perturbs the executed arm actions
+#    (DART) and records the clean expert action as the label, so the policy sees recovery
+#    states. The per-env IK plan (once per reset, for all phases) runs in a Python loop: expect minutes per batch (printed as `expert planning (IK) took ...`).
+mkdir -p runs/demos
+uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --action-noise 0.1 \
+    --out runs/demos/faceturn_a.pt
+```
+
+Read the summary: `attempted N episodes, successful M (..%)` and the first-success step
+distribution. Each batch also prints the IK planning time, the number of IK-failed envs and a
+per-phase table (envs that completed the phase; min / median / max env step at which they did;
+how it ended); a phase with few completed envs is where the others got stuck. A batch without a
+single success prints how far its episodes got (holder / rotator grasp, both at once, max face
+angle, body drift against the tolerances). To see how
+long the expert needs at all, collect with a longer episode, e.g. `--max-episode-steps 700
+--num-envs 16 --num-batches 1` (diagnosis only: the demos record the limit in their metadata, and
+`callosum.training.ippo --demos` refuses to run in an env with another episode length; BC
+checkpoints remember it and the IPPO warm start warns). Reference values from the Mac CPU sim (one env per reset): clean expert 120/120
+successful, first success at step 290 to 364 (median 310); with `--action-noise 0.1` 385/400
+(96%; one of the failures is an unreachable cube placement, reported as "IK failure" and
+skipped), median 325, max 393; with 0.2 only 8/10 (up to 376 steps), so do not go above 0.1.
+If many envs fail on the GPU, look at `scripts/probe_face_turn.py --control delta --overlap`
+first (contact behaviour on the GPU backend is unverified). Several hundred successful
+episodes are a sensible target (400 episodes are about 125 000 transitions). For the check
+of the async expert, run the clean collection too (`--action-noise 0`, the default): with no
+noise the per-env first success should be about 300 steps for every env, and the table's
+completion steps should not depend on `--num-envs`.
+
+```bash
+uv run python scripts/collect_demos.py --num-envs 256 --num-batches 2 --out runs/demos/clean.pt
+```
+
+```bash
+# 2. Behaviour cloning (needs no simulator; the demo file carries the observation layout).
+#    300 epochs on 120 demos took 2.5 min on a Mac CPU; with CUDA it is faster.
+NAME=bc_full; mkdir -p runs/$NAME
+setsid nohup uv run python -m callosum.training.bc --demos runs/demos/faceturn_a.pt \
+    --partner-obs full --exp-name $NAME --epochs 100 > runs/$NAME/stdout.log 2>&1 < /dev/null &
+
+# 3. Judge the BC policy alone (deterministic, no training): 16 envs x 4 rounds = 64 episodes.
+uv run python -m callosum.training.ippo --eval-only --checkpoint runs/$NAME/bc.pt \
+    --partner-obs full --eval-repeats 4 --exp-name ${NAME}_eval
+```
+
+BC prints train and validation numbers every 10 epochs: per agent `act` (actor MSE, expert
+actions are in [-1, 1]; about 0.001 holder and 0.006 rotator is good), `grip` (share of correct
+gripper signs, about 1.0) and `crit` (critic RMSE in return units; the returns have std about
+25, so about 1 is good). Train and validation should stay close (held-out whole episodes). It
+writes `runs/$NAME/bc.pt` (a weights-only checkpoint that also stores `partner_obs` and the
+input fields; `ippo` refuses a mismatching `--partner-obs`), `config.json` and `bc_log.json`.
+
+`--eval-only` prints `success_once`, the grasp rates and the "ever" shares, and writes
+`runs/${NAME}_eval/eval.json`. What to look at: `ever hold` (the holder grasped the body at least
+once in the episode) must be near 1.00, `ever rot` and `ever both` clearly above 0, the face
+angle max well above 0 degrees. The BC policy alone is slower and less precise than the expert
+(it closes the gripper a little early or late at the phase changes), so a low success rate is
+expected. Mac CPU sim, 20 episodes each, 100 epochs: BC on 400 clean demos gave `success_once
+0.00`, `ever hold 1.00 rot 0.10 both 0.10`, face max 32 degrees; BC on 400 demos collected with
+`--action-noise 0.1` gave `success_once 0.20`, `ever hold 1.00 rot 0.60 both 0.60`, face max 90
+degrees (against `ever hold 0.00` for IPPO from scratch). That is why the noisy demos are the
+recommended ones. If `ever hold` is not near 1, fix the demos / BC before spending GPU hours
+on PPO.
+
+```bash
+# 4. IPPO fine-tune, detached, restartable. The same command is the restart command: a run with
+#    runs/$NAME/latest.pt is continued with --resume (stdout appended), otherwise it starts.
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+NAME=faceturn_bc_s1; mkdir -p runs/$NAME
+setsid nohup bash -c '
+if [ -f runs/'$NAME'/latest.pt ]; then
+  uv run python -m callosum.training.ippo --resume runs/'$NAME' >> runs/'$NAME'/stdout.log 2>&1
+else
+  uv run python -m callosum.training.ippo --env-id FaceTurn-v0 --seed 1 --exp-name '$NAME' \
+      --total-timesteps 10000000 --partner-obs full \
+      --checkpoint runs/bc_full/bc.pt --critic-warmup-iters 10 \
+      --demos runs/demos/faceturn_a.pt --bc-coef 1.0 --bc-decay-iters 100 \
+      --learning-rate 1e-4 > runs/'$NAME'/stdout.log 2>&1
+fi' > /dev/null 2>&1 < /dev/null &
+tail -f runs/$NAME/stdout.log
+```
+
+What the flags do: `--checkpoint` warm-starts both actors and critics from BC (log-std -1.6,
+std 0.2, optimizer and LR schedule start fresh); `--critic-warmup-iters 10` updates only the
+critics for the first 10 iterations (the BC critic does not know the noisy on-policy returns
+yet, so early advantages would push the cloned actor around at random); `--demos --bc-coef
+--bc-decay-iters` add a DAPG-style auxiliary loss `bc_coef * mse(actor_mean(demo_obs),
+demo_action)` to every PPO minibatch step, decaying linearly to 0 over 100 iterations; the
+lower `--learning-rate 1e-4` keeps PPO from erasing the clone. The warm-up window and the BC
+schedule are functions of the iteration, so `--resume` continues them; `config.json` holds
+the flags (a resumed run needs the demo file at the same path).
+
+Watch (`tail -f runs/$NAME/stdout.log`, TensorBoard):
+
+* the `eval @ iter 0` line is the BC policy under the trainer's evaluation: it should match the
+  `--eval-only` numbers;
+* `hold a/b` (rollout grasp rates) and, in the `eval @ iter` lines, `ever hold / rot / both` and
+  `eval_succ`: they must stay near the BC level during warm-up and the first iterations and then
+  rise; a collapse of `ever hold` to 0 right after the warm-up means PPO is erasing the clone
+  (lower the learning rate, raise `--bc-coef` or `--bc-decay-iters`);
+* `bc coef X loss a/b ...` in the iteration line (TensorBoard: `charts/bc_coef`,
+  `losses/agent_*/bc_loss`): the BC loss grows as PPO moves the policy away from the demos
+  while the coefficient decays; the line shows `critic warm-up` instead during the warm-up;
+* `kl a/b` against `target_kl` 0.1: at the start it can be above it (the update epochs are cut
+  short), which is another sign the learning rate is too high.
+
+Mac CPU smoke of the whole fine-tune path (one env; about 30 s; remove `runs/smoke*` afterwards):
+
+```bash
+PYTHONPATH=. uv run -q --no-project --python 3.12 --with mani-skill==3.0.1 --with torch --with tensorboard \
+    python -m callosum.training.ippo --sim-backend cpu --num-steps 20 --num-minibatches 4 \
+    --total-timesteps 800 --eval-freq 10 --checkpoint runs/bc_full/bc.pt \
+    --critic-warmup-iters 2 --demos runs/demos/faceturn_a.pt --bc-coef 1.0 --bc-decay-iters 5 \
+    --exp-name smoke_ft
+```
+
+#### Continue a fine-tune after a restart
+
+If a fine-tune run like `ft_full_s1` was started before a container restart:
+
+```bash
+source ~/.callosum-env.sh && cd "$CALLOSUM_REPO"
+
+# Check if the run has a checkpoint from before the restart.
+ls ~/callosum-runs/ft_full_s1/
+
+# If latest.pt exists, continue from there (stdout appends):
+if [ -f runs/ft_full_s1/latest.pt ]; then
+  setsid nohup uv run python -m callosum.training.ippo --resume runs/ft_full_s1 \
+      >> runs/ft_full_s1/train.log 2>&1 < /dev/null &
+else
+  # Otherwise (first-time setup), launch with the same command as before.
+  # This is the template; fill in the exact flags from your earlier run.
+  setsid nohup uv run python -m callosum.training.ippo --resume runs/ft_full_s1 \
+      --checkpoint runs/bc_full/bc.pt --demos runs/demos/faceturn_a.pt \
+      --critic-warmup-iters 10 --bc-coef 1.0 --bc-decay-iters 100 \
+      --learning-rate 1e-4 --partner-obs full --total-timesteps 10000000 \
+      --seed 1 --exp-name ft_full_s1 \
+      >> runs/ft_full_s1/train.log 2>&1 < /dev/null &
+fi
+echo $!
+tail -f runs/ft_full_s1/train.log
+```
+
+The `--resume` flag continues from the latest checkpoint if it exists; otherwise it starts fresh.
+The same command is the restart command: after a shutdown or crash, run it again unchanged, and the run
+picks up where it left off or starts over if there is no checkpoint.
+
+Unverified on the GPU server (everything above was run on the Mac CPU sim only): the expert and
+`collect_demos.py` with many envs, BC on CUDA, and the fine-tune loop at scale.
 
 ### 4. Watching and collecting results
 
 Checkpoints and TensorBoard logs live under `runs/` (→ `~/callosum-runs`) and are
 git-ignored, so they do **not** come back via git. `wandb.ai` is not reachable
-from the server, so metrics stay local. **`$HOME` has < 1 GB free**: check
-`du -sh runs/*` after each run, delete checkpoints you will not use, and download
-the keepers promptly (the quota is shared with everything else in `$HOME`).
+from the server, so metrics stay local. `$HOME` is a persistent 100 GB disk, so checkpoints
+(~7 MB each, full training state) can stay there; still check `du -sh runs/*` now and then and
+download the keepers.
 
 TensorBoard has no SSH tunnel to ride on. Two options:
 
@@ -366,7 +632,7 @@ TensorBoard has no SSH tunnel to ride on. Two options:
 
    ```bash
    tar czf ~/runs-logs.tar.gz --exclude='*.pt' -C "$CALLOSUM_REPO" runs
-   du -sh ~/runs-logs.tar.gz                   # must fit in the 888 MB quota
+   du -sh ~/runs-logs.tar.gz
    ```
 
    Download `runs-logs.tar.gz` from the file browser (right-click → Download),
@@ -390,9 +656,9 @@ Vulkan part of `bash scripts/update_server.sh`: `✓ ... GPU render device (NVID
 
 | Symptom | Cause | What setup does |
 |---|---|---|
-| `OSError: libcuda.so: cannot open shared object file` from `sapien/physx/__init__.py` (`enable_gpu`), while torch sees the GPU | SAPIEN loads the *unversioned* `libcuda.so`; the container runtime only injects `libcuda.so.1` | symlinks `libcuda.so.1` into `<scratch>/lib/libcuda.so`, prepends it to `LD_LIBRARY_PATH` |
-| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"`; or `Failed to find a supported physical device "cuda:0"` (lavapipe) | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) is too old for the 570.x NVIDIA ICD; the pod has the NVIDIA user-space libs (`libGLX_nvidia.so.0`, despite `NVIDIA_DRIVER_CAPABILITIES=compute,utility`) but a usable ICD manifest may be missing, and when `/usr/share/vulkan/icd.d/nvidia_icd.json` is absent SAPIEN swaps in its own bundled manifest (api 1.2.140), which hides the driver | **Expected result: hardware NVIDIA Vulkan** via a manifest generated at `<scratch>/vulkan/icd.d/nvidia_icd.json` (absolute path to `libGLX_nvidia.so.0`) plus a current loader: `conda create -p <scratch>/mesa -c conda-forge mesalib vulkan-tools` (conda cache moved off `$HOME`), only `libvulkan.so.1` symlinked into `<scratch>/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch). Setup **probes** candidates in order (generated manifest + current loader, + system loader, stock, other system manifests, lavapipe) in fresh processes and takes the first that constructs `RenderMaterial()` **and** `RenderSystem("cuda:0")` (proof it is the GPU). It is re-evaluated on every run (a past lavapipe pick is not sticky; inherited `VK_ICD_FILENAMES`/`vklib` are ignored) and `~/.callosum-env.sh` is rewritten. Lavapipe (software) is only the fallback: fine for state training with `render_backend="none"`, not for vision. **History:** hardware worked on this server in Aug 2026 (archived `step/2.1-ippo`); on 2026-10-04 the first `setup_server.sh` run ended on lavapipe (that version only scanned manifests already on disk and never wrote its own for `libGLX_nvidia.so.0`; the exact cause on the new pod is unconfirmed, the probe log will tell). Check the current state with `bash scripts/diagnose_vulkan.sh` (NVIDIA libs, manifests, loader versions, `vulkaninfo --summary` per candidate, SAPIEN's view); every probe's stderr is in `<scratch>/vulkan-probe.log` |
-| First `gym.make(..., sim_backend="gpu")` hangs/fails while downloading | SAPIEN fetches `libPhysXGpu_64.so` (~240 MB unpacked) from a `github.com` release into `~/.sapien/physx/<version>/` | `~/.sapien` is a symlink into scratch; setup pre-fetches via `physx.enable_gpu()`. Manual fallback: download the `linux-so.zip` named in SAPIEN's message elsewhere, upload, unzip into that directory |
+| `OSError: libcuda.so: cannot open shared object file` from `sapien/physx/__init__.py` (`enable_gpu`), while torch sees the GPU | SAPIEN loads the *unversioned* `libcuda.so`; the container runtime only injects `libcuda.so.1` | symlinks `libcuda.so.1` into `~/.callosum/lib/libcuda.so`, prepends it to `LD_LIBRARY_PATH` |
+| `vkCreateInstance: Found no drivers!` / `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` when creating *any* env, even with `obs_mode="state"`; or `Failed to find a supported physical device "cuda:0"` (lavapipe) | SAPIEN's URDF loader builds `RenderMaterial()` unconditionally, so a Vulkan device is mandatory; the system `libvulkan.so.1` (1.3.275) is too old for the 570.x NVIDIA ICD; the pod has the NVIDIA user-space libs (`libGLX_nvidia.so.0`, despite `NVIDIA_DRIVER_CAPABILITIES=compute,utility`) but a usable ICD manifest may be missing, and when `/usr/share/vulkan/icd.d/nvidia_icd.json` is absent SAPIEN swaps in its own bundled manifest (api 1.2.140), which hides the driver | **Expected result: hardware NVIDIA Vulkan** via a manifest generated at `~/.callosum/vulkan/icd.d/nvidia_icd.json` (absolute path to `libGLX_nvidia.so.0`) plus a current loader: `conda create -p ~/.callosum/mesa -c conda-forge mesalib vulkan-tools` (conda cache in `~/.callosum/conda-pkgs`; persistent, so this runs once), only `libvulkan.so.1` symlinked into `~/.callosum/vklib` (conda's whole `lib/` would shadow `libstdc++` and break torch). Setup **probes** candidates in order (generated manifest + current loader, + system loader, stock, other system manifests, lavapipe) in fresh processes and takes the first that constructs `RenderMaterial()` **and** `RenderSystem("cuda:0")` (proof it is the GPU). It is re-evaluated on every run (a past lavapipe pick is not sticky; inherited `VK_ICD_FILENAMES`/`vklib` are ignored) and `~/.callosum-env.sh` is rewritten. Lavapipe (software) is only the fallback: fine for state training with `render_backend="none"`, not for vision. **History:** hardware worked on this server in Aug 2026 (archived `step/2.1-ippo`); on 2026-10-04 the first `setup_server.sh` run ended on lavapipe (that version only scanned manifests already on disk and never wrote its own for `libGLX_nvidia.so.0`; the exact cause on the new pod is unconfirmed, the probe log will tell). Check the current state with `bash scripts/diagnose_vulkan.sh` (NVIDIA libs, manifests, loader versions, `vulkaninfo --summary` per candidate, SAPIEN's view); every probe's stderr is in `~/.callosum/vulkan-probe.log` |
+| First `gym.make(..., sim_backend="gpu")` hangs/fails while downloading | SAPIEN fetches `libPhysXGpu_64.so` (~240 MB unpacked) from a `github.com` release into `~/.sapien/physx/<version>/` | `~/.sapien` is a real directory in `$HOME` (persistent); setup pre-fetches via `physx.enable_gpu()`. Manual fallback: download the `linux-so.zip` named in SAPIEN's message elsewhere, upload, unzip into that directory |
 
 Notes:
 
@@ -422,6 +688,6 @@ Everything above that is not a measured fact, in the order it will bite:
 3. `~/.bashrc` is read by new JupyterHub terminals (so `~/.callosum-env.sh` loads).
 4. `setsid nohup` runs survive closing the tab; whether the lab kills long processes.
 5. `jupyter-server-proxy` present? (for TensorBoard)
-6. Is `/tmp` really wiped on restart, and is `$HOME` really kept? Is the repo public
+6. (`/tmp` wiped and `$HOME` kept: confirmed 2026-10-08.) Is the repo public
    (HTTPS clone without credentials)?
-7. How long a from-scratch setup takes after a wipe (add the number here).
+7. How long the first from-scratch setup into `~/.callosum` takes (add the number here); that the home-layout setup runs cleanly over the leftovers of the old `/tmp` layout.

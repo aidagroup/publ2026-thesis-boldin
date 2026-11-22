@@ -16,6 +16,7 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 
 from callosum.configs.face_turn import FaceTurnPhysicsConfig, FaceTurnRewardConfig
+from callosum.envs._diag import DIAG_PREFIX
 from callosum.envs._face_lock import update_face_lock
 from callosum.envs._turntable_cube import build_turntable_cube
 from callosum.envs.two_so101_base import TwoSO101Base
@@ -23,6 +24,16 @@ from callosum.envs.two_so101_base import TwoSO101Base
 TARGET_FACE_ANGLE = math.pi / 2  # a quarter turn
 _DEFAULT_REWARD_CONFIG = FaceTurnRewardConfig()
 _DEFAULT_PHYSICS_CONFIG = FaceTurnPhysicsConfig()
+# Raw `info` quantities that are republished as `diag_<name>` diagnostics (see `evaluate`).
+_DIAG_QUANTITIES = (
+    "holder_grasp",
+    "rotator_grasp",
+    "both_grasp",
+    "body_pos_drift",
+    "body_rot_drift",
+    "holder_to_body",
+    "rotator_to_face",
+)
 
 
 # 400 control steps: the scripted holder-then-rotator expert (scripts/probe_face_turn.py, CPU sim)
@@ -43,6 +54,12 @@ class FaceTurn(TwoSO101Base):
     shared extra-obs dict; who sees which one is decided in `callosum.training._agent_obs`), and
     `compute_dense_reward` / `evaluate` read TCP poses straight off `self.agent_a`/`agent_b`
     (privileged, CTDE-style access).
+
+    Diagnostics: `evaluate` also publishes `diag_*` info keys (see `callosum.envs._diag`): both
+    grasps (`diag_holder_grasp`, `diag_rotator_grasp`, `diag_both_grasp`), body position/rotation
+    drift, the two TCP-to-target distances, the face angle, and every reward term's contribution
+    in normalised-reward units (`diag_r_*`, signed: the drift penalties are negative). They do not
+    affect the reward, observation or success.
 
     Face lock (`FaceTurnPhysicsConfig.lock_face_unless_held`, on by default): the face can only
     be turned while the holder grasps the body. Every control step the env checks
@@ -187,13 +204,46 @@ class FaceTurn(TwoSO101Base):
         rot_drift = common.quat_diff_rad(self.cube.pose.q, self.body_init_q)
         is_body_stable = (pos_drift < cfg.body_pos_tol) & (rot_drift < cfg.body_rot_tol)
 
-        return {
+        # The raw per-step quantities the reward is built from, computed once here and read back
+        # from `info` by compute_dense_reward (ManiSkill's BaseEnv.step runs get_info() ->
+        # evaluate() first and passes the same dict to get_reward). `is_grasping` therefore runs
+        # once per step, on the post-simulation contact forces, which is what the reward used
+        # before. The face lock's own `is_grasping` call (`_before_control_step`) is separate on
+        # purpose: it reads the previous step's forces at the start of the next control step.
+        info = {
             "success": angle_ok & is_body_stable,
             "face_angle": face_angle,
             "is_body_stable": is_body_stable,
+            "holder_grasp": self.agent_a.is_grasping(self.body_link),
+            "rotator_grasp": self.agent_b.is_grasping(self.face_link),
+            "body_pos_drift": pos_drift,
+            "body_rot_drift": rot_drift,
+            "holder_to_body": torch.linalg.norm(self.agent_a.tcp_pos - self.cube.pose.p, dim=1),
+            "rotator_to_face": torch.linalg.norm(
+                self.agent_b.tcp_pos - self.face_link.pose.p, dim=1
+            ),
         }
 
-    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        # Diagnostics (never used by the reward or the observation): aliases of the raw
+        # quantities above plus each reward term's contribution in normalised-reward units, so
+        # the trainer can show which terms the policies actually earn.
+        info["both_grasp"] = info["holder_grasp"] & info["rotator_grasp"]
+        for key in _DIAG_QUANTITIES:
+            info[DIAG_PREFIX + key] = info[key]
+        info[DIAG_PREFIX + "face_angle"] = face_angle
+        divisor = cfg.max_positive_reward
+        for name, term in self._reward_terms(info).items():
+            info[DIAG_PREFIX + "r_" + name] = term / divisor
+        return info
+
+    def _reward_terms(self, info: dict) -> dict[str, torch.Tensor]:
+        """The weighted dense-reward terms in raw units, signed (the drift penalties are negative),
+        from the raw per-step quantities `evaluate` put into `info`.
+
+        `compute_dense_reward` sums them in this order; `evaluate`
+        calls this too, to publish the per-term diagnostics (cheap elementwise ops, so the reward
+        itself stays a pure function of `info` and its value does not depend on the diagnostics).
+        """
         cfg = self.reward_config
 
         # (a) rotator reaches for the face, (d) holder reaches for the body.
@@ -203,14 +253,12 @@ class FaceTurn(TwoSO101Base):
         # gripper should be able to pinch the layer from its side faces.
         # Unconfirmed without GPU sim whether the gripper actually closes on
         # it there.
-        rotator_to_face = torch.linalg.norm(self.agent_b.tcp_pos - self.face_link.pose.p, dim=1)
-        rotator_reach = 1 - torch.tanh(5 * rotator_to_face)
-        holder_to_body = torch.linalg.norm(self.agent_a.tcp_pos - self.cube.pose.p, dim=1)
-        holder_reach = 1 - torch.tanh(5 * holder_to_body)
+        rotator_reach = 1 - torch.tanh(5 * info["rotator_to_face"])
+        holder_reach = 1 - torch.tanh(5 * info["holder_to_body"])
 
         # (b) the rotator grasping the face, (f) the holder grasping the body.
-        rotator_grasp = self.agent_b.is_grasping(self.face_link).float()
-        holder_grasp = self.agent_a.is_grasping(self.body_link).float()
+        rotator_grasp = info["rotator_grasp"].float()
+        holder_grasp = info["holder_grasp"].float()
 
         # (c) progress of the face angle toward the target, in [0, 1].
         angle_remaining = (TARGET_FACE_ANGLE - info["face_angle"]).clamp(min=0)
@@ -232,26 +280,33 @@ class FaceTurn(TwoSO101Base):
         # (e) penalty for the body drifting from its initial pose. Separate
         # weights since position (m) and rotation (rad) drift aren't on
         # commensurate scales. Hinged at the success tolerances if configured.
-        pos_drift = torch.linalg.norm(self.cube.pose.p - self.body_init_pos, dim=1)
-        rot_drift = common.quat_diff_rad(self.cube.pose.q, self.body_init_q)
+        pos_drift = info["body_pos_drift"]
+        rot_drift = info["body_rot_drift"]
         if cfg.hinge_drift_penalty:
             pos_drift = (pos_drift - cfg.body_pos_tol).clamp(min=0)
             rot_drift = (rot_drift - cfg.body_rot_tol).clamp(min=0)
 
-        dense = (
-            cfg.weight_rotator_reach * rotator_reach
-            + cfg.weight_grasp * grasp_gate * rotator_grasp
-            + cfg.weight_angle_progress * angle_gate * angle_progress
-            + cfg.weight_holder_reach * holder_reach
-            + cfg.weight_holder_grasp * holder_grasp
-            - cfg.weight_body_pos_drift * pos_drift
-            - cfg.weight_body_rot_drift * rot_drift
-        )
+        return {
+            "rotator_reach": cfg.weight_rotator_reach * rotator_reach,
+            "rotator_grasp": cfg.weight_grasp * grasp_gate * rotator_grasp,
+            "angle_progress": cfg.weight_angle_progress * angle_gate * angle_progress,
+            "holder_reach": cfg.weight_holder_reach * holder_reach,
+            "holder_grasp": cfg.weight_holder_grasp * holder_grasp,
+            "body_pos_drift": -(cfg.weight_body_pos_drift * pos_drift),
+            "body_rot_drift": -(cfg.weight_body_rot_drift * rot_drift),
+        }
+
+    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        t = self._reward_terms(info)
+        # Left-to-right in the dict's order, i.e. `a + b + c + d + e - pos_penalty - rot_penalty`.
+        dense = t["rotator_reach"]
+        for term in list(t.values())[1:]:
+            dense = dense + term
         # One-step bonus on the step where the episode terminates with success (see
         # FaceTurnRewardConfig.success_bonus): finishing must beat lingering near the goal.
         # The dense reward carries it in raw units, so the normalised reward (dense / divisor)
         # carries exactly `success_bonus`.
-        return cfg.add_success_bonus(dense, info["success"])
+        return self.reward_config.add_success_bonus(dense, info["success"])
 
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
         # The divisor comes from the config weights (single source of truth).
