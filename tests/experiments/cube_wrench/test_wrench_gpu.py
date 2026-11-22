@@ -264,8 +264,7 @@ def _gpu_env(nworld: int, partner_mode: str = "none", **kwargs):
     """Build a `WrenchCubeBatchGPU` or skip when the GPU stack/CUDA is unavailable."""
     env_gpu = _gpu_module()
     pytest.importorskip("mujoco_warp")
-    import torch
-
+    torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     return env_gpu, env_gpu.WrenchCubeBatchGPU(
@@ -274,8 +273,7 @@ def _gpu_env(nworld: int, partner_mode: str = "none", **kwargs):
 
 
 def test_batch_env_shapes_validation_and_one_step() -> None:
-    import torch
-
+    torch = pytest.importorskip("torch")
     from callosum.experiments.cube_wrench.logic import AGENT_KEYS, obs_size
 
     _env_gpu, env = _gpu_env(4, partner_mode="oracle")
@@ -344,8 +342,7 @@ def test_batch_env_rejects_non_cuda_and_bad_world_count() -> None:
 
 def test_batch_env_matches_the_cpu_env_one_step() -> None:
     """One-step parity sentinel (the full multi-step check is the pod parity script)."""
-    import torch
-
+    torch = pytest.importorskip("torch")
     from callosum.experiments.cube_wrench import WrenchCubeEnv
     from callosum.experiments.cube_wrench.config import WrenchCubeConfig
     from callosum.experiments.cube_wrench.logic import AGENT_KEYS
@@ -481,8 +478,7 @@ def test_evaluate_greedy_hands_cuda_style_tensors_to_a_torch_io_env() -> None:
 
 def test_cuda_graph_replay_is_bit_identical_to_the_eager_loop() -> None:
     """S3: graph capture is only a launch optimisation, not a different physics path."""
-    import torch
-
+    torch = pytest.importorskip("torch")
     from callosum.experiments.cube_wrench.logic import AGENT_KEYS
 
     _env_gpu, graph_env = _gpu_env(3, partner_mode="oracle")
@@ -508,8 +504,7 @@ def test_cuda_graph_replay_is_bit_identical_to_the_eager_loop() -> None:
 
 def test_two_envs_with_the_same_seed_and_actions_are_bit_identical() -> None:
     """S8: the same seed + action sequence must reproduce the trajectory exactly."""
-    import torch
-
+    torch = pytest.importorskip("torch")
     from callosum.experiments.cube_wrench.logic import AGENT_KEYS
 
     _env_gpu, first = _gpu_env(4, partner_mode="oracle")
@@ -536,8 +531,7 @@ def test_two_envs_with_the_same_seed_and_actions_are_bit_identical() -> None:
 
 def test_checkpoint_restores_the_cuda_rng_state(tmp_path) -> None:
     """S1: a warp run's GPU policy sampling is reproducible after `--resume`."""
-    import torch
-
+    torch = pytest.importorskip("torch")
     pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
@@ -604,15 +598,13 @@ class _ToyTorchVec:
         return self._obs()
 
     def _obs(self) -> dict:
-        import torch
-
+        torch = pytest.importorskip("torch")
         return {name: torch.zeros(self.num_envs, self.obs_dim) for name in _AGENT_KEYS_IMPORT}
 
     def step(self, actions: dict) -> object:
         import types
 
-        import torch
-
+        torch = pytest.importorskip("torch")
         assert all(torch.is_tensor(value) for value in actions.values())
         self._elapsed += 1
         truncated = np.full(self.num_envs, self._elapsed >= self._episode_steps)
