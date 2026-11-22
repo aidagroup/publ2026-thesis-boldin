@@ -16,13 +16,18 @@
 
 ## Честные оговорки
 
-- Первый aggregate eval BC дал 1.000/64 эп., но был **загрязнён harness-багом** (raw ManiSkill
-  episode без auto-reset повторял `terminated`); пайплайн с per-episode reset перезапущен, но
-  итоговый честный aggregate не успел до отключения пода. **Evidence на данный момент — сам
-  learned-демо-эпизод** (37 decisions до реального success), а не aggregate success rate.
-- **Sexy move `R U R' U'` conductor-ом пока заблокирован**: `U` работает, `R` требует флипа;
-  после флипа hand-off/release не сходится (куб остаётся в воздухе, rotator не получает ход).
-  Это следующий фикс flip-макроса; learned sexy move не делали.
+- Aggregate eval BC: **0.719 success на 64 эпизодах** (timeout 0.281, decisions 68.7; в успешных
+  эпизодах 36.8 decisions) — честный per-episode-reset протокол на merged `main`. Первый
+  «1.000/64» был загрязнён harness-багом (raw ManiSkill episode без auto-reset) и НЕ используется.
+  JSON: `results/skills_e1/honest_eval_64.json`.
+- Learned-демо: success=True, 37 decisions, 90.0°, drift 0.31 см; HUD с close-up и маркером
+  активного слоя. Это один успешный эпизод, не заменяет aggregate 0.719.
+- **Sexy move `R U R' U'` conductor-ом заблокирован на post-flip drift**: после фиксов (numpy
+  `np.isin` frozenset, proximity-grasp gate для turn_assist, flip-home leg) `R` **завершает
+  поворот** (plan_index 1/1, 89.9–90.0°, 1 флип), но env success=False: drift **3.9 см** при
+  `body_pos_tol=0.03` (при 0.05 — 5.6 см; уменьшение lift ломает флип). Полный `R U R' U'` —
+  2/6 мувов за 600 решений и 3 флипа. Это честный BLOCKED на drift/hand-off, не на plan/quaternion.
+  Learned sexy move не делали.
 - Bi-JEPA на skill-level **не измерен**: в skills-тренере `predicted` — zero-stub (предиктор не
   подключён). Никаких чисел не выдумывали.
 - CPU-симуляция + software Vulkan (llvmpipe) для рендера; GPU-sim путь не проверялся.

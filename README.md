@@ -6,8 +6,9 @@
 **⚙️ Сетап и деплой:** [`docs/setup.md`](docs/setup.md).
 
 **🦾 Learned arm policy (2026-11-22):** в skill-линии SO-ARM101 починен env и обучена
-BC-политика на один поворот: conductor `U` — success 1.000, learned-демо — success=True, 90°,
-13.5 s (`demo/arms_face_turn/demo_arms_learned_turn.mp4`). Мост reduced→arms:
+BC-политика на один поворот: conductor `U` — success 1.000; learned BC — honest eval
+**0.719/64 эп.**, learned-демо success=True, 90°, 14.5 s
+(`demo/arms_face_turn/demo_arms_learned_turn.mp4`). Мост reduced→arms:
 `demo/bridge/`. Детали — `docs/results-arm-skill-e1.md`, `docs/results-wrench-bridge.md`;
 sexy move пока blocked на флипе.
 

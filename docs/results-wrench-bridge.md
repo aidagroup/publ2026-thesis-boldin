@@ -76,11 +76,17 @@ conductor на плане `U` даёт success 1.0, а план `R` (требу�
 
 ## Артефакты
 
-- `demo/bridge/bridge_wrench_to_skills.mp4` — side-by-side: слева reduced learned policy
-  (EGL-рендер из записанной трассы), справа две SO-ARM101 (SAPIEN/lavapipe) исполняют
-  примитивы; HUD `LEARNED REDUCED POLICY → ARM SKILLS`, фазы hold/turn, углы, wrenches,
-  phase shares, onset offset, success.
-- `demo/bridge/bridge_wrench_to_skills_preview.gif`, `demo/bridge/frame_*.png` — превью/стиллы.
+- `demo/bridge/bridge_wrench_to_skills.mp4` — side-by-side slow-mo (~19.7 s, 10 fps,
+  1280×576): слева reduced learned policy (EGL-рендер трассы, камера приближена), справа две
+  SO-ARM101 (SAPIEN/lavapipe) исполняют те же намерения примитивами. Правая сцена: close-up
+  камера, из multi-face-куба показаны только ядро + активный слой (остальные slabs скрыты
+  render-only), на слое — бирюзовая и пурпурная полосы (вращаются со слоем), на столе —
+  жёлтая полоса-референс; 90° поворот читается. HUD: `LEARNED REDUCED POLICY → ARM SKILLS`,
+  dial 0–90° с двумя стрелками (reduced слой / arm грань), таймлайн HOLD→TURN→RELEASE,
+  intended vs realized primitives, onset offset, SUCCESS.
+- `demo/bridge/bridge_wrench_to_skills_preview.gif`, `bridge_{engage,hold,turn,success}.png` —
+  превью и стиллы ключевых фаз (turn-стилл: бирюзовая полоса повёрнута на ~90° относительно
+  жёлтого референса).
 - `demo/bridge/bridge_metrics.json` — полный JSON: reduced-трасса, фазы, расписание (share+dt),
   arm-трасса conductor и replay, тайминг-метрики, limitations, CLI.
 - `demo/bridge/bridge_metrics_blocked_pre_fix.json` — исторический BLOCKED-прогон до фикса env

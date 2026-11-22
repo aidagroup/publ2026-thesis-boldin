@@ -697,6 +697,12 @@ class SkillsRuntime:
                         lambda envs: self._plan_vertical(0, envs, -FLIP_LIFT),
                         settle=SETTLE_STEPS,
                     ),
+                    lambda: TrackPath(
+                        n,
+                        "flip home",
+                        lambda envs: self._plan_flip_home(envs),
+                        settle=SETTLE_STEPS,
+                    ),
                 ],
             )
         raise ValueError(f"unknown holder primitive {name!r}")
@@ -944,6 +950,21 @@ class SkillsRuntime:
         q = self.cmd.q[arm][envs]
         tcp, finger, open_axis = self._tool_world(arm, q, envs)
         return self._plan_path_world(arm, envs, tcp + height * _UP, finger, open_axis)
+
+    def _plan_flip_home(self, envs: np.ndarray):
+        """The flip macro's final leg: drag the hanging cube back over its home XY.
+
+        The flip's roll arc leaves the held cube 2-3 cm off centre, and at the arm's height
+        the rotator's vertical-finger reach is centred on the episode home, so the cube is
+        slid back while the grip is kept (Z stays live, so nothing is lifted or dropped).
+        """
+        view = self._require_view()
+        q = self.cmd.q[0][envs]
+        tcp, finger, open_axis = self._tool_world(0, q, envs)
+        if view.cube_home is None:
+            return self._plan_vertical(0, envs, 0.0)
+        goal = np.concatenate([view.cube_home[envs][:, :2], tcp[:, 2:3]], axis=1)
+        return self._plan_path_world(0, envs, goal, finger, open_axis)
 
     def _plan_retreat(self, arm: int, envs: np.ndarray):
         """`retreat`: back along the approach and up (holder), or up-and-away
