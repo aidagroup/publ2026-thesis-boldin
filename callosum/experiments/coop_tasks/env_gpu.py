@@ -1568,6 +1568,13 @@ class CoopBatchGPU:
             # here once per control step (0 stays 0, so a fresh episode can pass immediately).
             self._pass_cooldown.sub_(1).clamp_(min=0)
             self._pad_contact_flag.zero_()
+            # The raw ball/paddle contact flags are accumulated over the `control_every`
+            # substeps of THIS control step and must start clear every step: the CPU env
+            # rebuilds `data.contact` on every `mj_step`, so its `_contact_side` rising-edge
+            # rule sees a fresh contact state each substep. A sticky GPU flag would keep the
+            # "previous contact" side high forever, so the pass counter (and with it the toss
+            # success rule) could never count a second pass on the same paddle.
+            self._flags.zero_()
             passes_before = self._passes.clone()
             self._prepare_toss_step(applied)
         else:

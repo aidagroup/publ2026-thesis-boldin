@@ -1292,6 +1292,11 @@ class GpuDemoEnv:
             state["passes"] = float(goal[0])
             state["target_passes"] = float(self.config.n_passes)
             state.update(self._toss_contact_flags())
+            # The scripted toss oracle plans its deadbeat command in SERVO-TARGET space (the
+            # plates are physical bounded-force servos now, so the measured pose lags the
+            # target it is chasing). The targets are not part of the shared observation block,
+            # so they are read from the GPU env's task state.
+            state.update(self._toss_pad_targets())
         self._state = state
 
     def _toss_contact_flags(self) -> dict[str, float]:
@@ -1300,14 +1305,37 @@ class GpuDemoEnv:
         The batched GPU env keeps the flags in a Warp-backed tensor that the shared
         observation does not carry, while the scripted toss oracle reads them for its
         restitution estimate. The attribute is read defensively and defaults to "no contact"
-        so the ongoing dynamic-paddle physics rework of the toss-catch cannot crash the
-        renderer; the toss GPU demo is not finalised yet (see the render todo).
+        so a future backend without the flags cannot crash the renderer.
         """
         contact = getattr(self._gpu, "_contact_side", None)
         if contact is None:  # pragma: no cover - the current GPU env defines it for toss
-            return {side: 0.0 for side in AGENT_KEYS}
+            return {f"{side}_contact": 0.0 for side in AGENT_KEYS}
         values = contact[0].tolist()
-        return {side: float(values[index]) for index, side in enumerate(AGENT_KEYS)}
+        return {f"{side}_contact": float(values[index]) for index, side in enumerate(AGENT_KEYS)}
+
+    def _toss_pad_targets(self) -> dict[str, float]:
+        """The toss-catch paddle servo targets `(x, z, tilt)` of the current world.
+
+        The GPU env's `_pad_target` holds the command-limited servo references the plates
+        physically chase; the scripted oracle's deadbeat command is computed against them,
+        so the demo adapter must expose them under the CPU state's
+        `{side}_pad_target_{x,z,tilt}` keys. The attribute is read defensively and defaults
+        to the measured pose so a future backend without explicit targets cannot crash the
+        renderer.
+        """
+        targets = getattr(self._gpu, "_pad_target", None)
+        if targets is None:  # pragma: no cover - the current GPU env defines it for toss
+            return {
+                f"{side}_pad_target_{name}": float(self._state[f"{side}_pad_{name}"])
+                for side in AGENT_KEYS
+                for name in ("x", "z", "tilt")
+            }
+        values = targets[0].tolist()
+        return {
+            f"{side}_pad_target_{axis}": float(values[index][position])
+            for index, side in enumerate(AGENT_KEYS)
+            for position, axis in enumerate(("x", "z", "tilt"))
+        }
 
 
 # --- action sources -------------------------------------------------------------------------
