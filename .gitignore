@@ -268,3 +268,6 @@ results_coop_gpu/
 # Physical-toss evaluation JSONs
 results_toss_phys2/
 results_toss_bc/
+
+# Hidden-partner occlusion eval JSONs
+results_occ2/
