@@ -31,6 +31,7 @@ train = [
 # Reduced wrench-level cube sandbox (MuJoCo, CPU; runs on macOS and Linux).
 sandbox = [
     "mujoco",
+    "pillow",
 ]
 # Batched GPU backend of the same sandbox (MuJoCo-Warp: Linux + NVIDIA/CUDA only). Optional
 # and linux-marked in `uv.lock`, so macOS/CI resolution is untouched; the pod is normally

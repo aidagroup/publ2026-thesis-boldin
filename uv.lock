@@ -120,6 +120,7 @@ dev = [
 ]
 sandbox = [
     { name = "mujoco" },
+    { name = "pillow" },
 ]
 sandbox-gpu = [
     { name = "mujoco-warp", marker = "sys_platform == 'linux'" },
@@ -146,6 +147,7 @@ requires-dist = [
     { name = "mujoco-warp", marker = "sys_platform == 'linux' and extra == 'sandbox-gpu'", specifier = "==4.0.1" },
     { name = "numpy" },
     { name = "pettingzoo", marker = "extra == 'sim'" },
+    { name = "pillow", marker = "extra == 'sandbox'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "tensorboard", marker = "extra == 'train'" },
