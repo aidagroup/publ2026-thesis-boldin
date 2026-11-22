@@ -5,6 +5,12 @@
 **📂 Рабочие материалы для диплома:** [`docs/thesis/`](docs/thesis/README.md) — заметки-исходники (идея, обзор литературы, метод, эксперименты, стек).
 **⚙️ Сетап и деплой:** [`docs/setup.md`](docs/setup.md).
 
+**🦾 Learned arm policy (2026-11-22):** в skill-линии SO-ARM101 починен env и обучена
+BC-политика на один поворот: conductor `U` — success 1.000, learned-демо — success=True, 90°,
+13.5 s (`demo/arms_face_turn/demo_arms_learned_turn.mp4`). Мост reduced→arms:
+`demo/bridge/`. Детали — `docs/results-arm-skill-e1.md`, `docs/results-wrench-bridge.md`;
+sexy move пока blocked на флипе.
+
 **🕵️ OccludedToss (hidden partner, 2026-11-22):** партнёрская ракетка скрыта из наблюдений;
 Bi-JEPA `predicted` **0.860** vs `none` 0.945 vs `oracle` 0.895 (3×3×128) — скрытие почти не
 вредит `none`, метод не подтверждается и здесь. Детали — `docs/results-coop-suite.md`.
