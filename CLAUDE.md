@@ -17,6 +17,11 @@ Short "what next" list: [PLAN.md](PLAN.md) (full spec: [docs/implementation-plan
 - **Never run simulations, probes, demo collection, BC or IPPO training on the Mac**, neither directly nor through subagents (the user's laptop overheated). Locally only `ruff`, small `pytest` unit tests and code reading; give the user the server commands instead.
 - **GPU-first rule (2026-11-21):** every experiment run (training, held-out eval, demo rendering) MUST execute on the GPU (`--backend warp`, `mujoco_warp`/CUDA). CPU paths exist only for parity checks, CI/unit tests and tiny 1-2 env probes. A CPU-only task implementation (like the original coop-suite) is a defect, not a deviation: before adding a task, wire its batched GPU backend or do not call the experiment done. The pod/GPU runs at most ~7.65 CPU cores by quota, so CPU training is hours where GPU is minutes.
 
+- **Pod jobs (no polling):** run every long pod command through `scripts/ops/pod_job.sh`
+  (`install` once, then `start NAME -- cmd`, `wait NAME --follow`, `wait-file PATH --pattern ...`,
+  `status/logs`). `wait` runs as a background DSH job and returns exactly on the `finished` event;
+  it auto-reconnects through SSH drops. **Do not write `sleep`/poll loops** for pod jobs — status
+  and logs live in `/workspace/callosum-jobs` (`jobctl.py`), see `docs/pod-jobs.md`.
 - **Model roles:** Haiku subagents (`model: "haiku"`) write the code, Sonnet reviews the diffs (and tests/lint) and commits/pushes, Opus plans and does the global review after a whole stage (step). Briefs are self-contained with disjoint file ownership and "no local sim, don't commit". Docs-only edits can be done directly.
 - **Commits:** subject `type: msg` (the hook adds the `step/...` prefix); no `Co-Authored-By` or other attribution lines. Push routinely to the step branch; merge into `main` only server-verified, stable work; confirm other outward or hard-to-reverse actions first.
 - **Simulation only** for now (no real hardware). **Reply to the user in English** (global settings `language: english`); docs stay in Russian, code and comments in English.

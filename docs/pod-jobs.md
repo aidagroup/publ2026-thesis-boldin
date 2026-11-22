@@ -45,3 +45,10 @@ scripts/ops/pod_job.sh wait-file /root/gpu_toss_phys_grid.log --pattern GPU_PHYS
 - `start` выставляет `WRENCH_TORCH_THREADS/OMP/MKL=1` по умолчанию (как у GPU-first прогонов).
 - `wait --timeout N` возвращает управление, если задача не уложилась в N секунд.
 - Переменные подключения: `POD_HOST`, `POD_PORT`, `POD_KEY` (по умолчанию текущий A40-под).
+
+## Правило для субагентов
+
+Все агенты (и главный поток) запускают длинные команды на поде **только** через
+`scripts/ops/pod_job.sh`: `start` → `wait`/`wait-file` (фоновый DSH job, уведомление по
+`finished`). Никаких `sleep`-циклов и ручных опросов: `wait` сам переподключается при обрывах
+SSH, состояние и логи лежат на volume. Для коротких проверок — `status`/`logs` (один SSH).
