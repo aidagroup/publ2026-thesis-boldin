@@ -399,11 +399,15 @@ def test_gpu_env_auto_reset_contract(task: str) -> None:
                     # (the evaluator writes it into the JSON report).
                     assert {"pad_min_gap", "pad_penetration", "pad_contact_steps"} <= set(info)
                     assert info["pad_penetration"] == 0.0
-            if step == budget - 1:
+            if step == budget - 1 and task != "toss":
                 assert len(done_rows) == 4, "every world must truncate after max_control_steps"
                 assert all(length == budget for length in result.finished_lengths)
-            elif step < budget - 1:
+            elif step < budget - 1 and task != "toss":
                 assert not done_rows, "no episode may end before the budget"
+            elif task == "toss" and done_rows:
+                # A zero-action toss lets the ball drop, so early FAILURES are legitimate;
+                # only the truncation assertion is task-specific.
+                assert all(not info["success"] for info in result.finished_infos)
         for role in AGENT_KEYS:
             assert torch.isfinite(result.obs[role]).all()
     finally:
@@ -567,8 +571,10 @@ def test_gpu_toss_physical_paddles_match_the_cpu_env() -> None:
         cpu_obs, _ = cpu.reset(seed=0)
         gpu_obs = env.reset(seed=0)
         for role in AGENT_KEYS:
+            # World 0 gets episode seed 0 like the CPU env; the other worlds use different
+            # per-episode seeds (different randomisation), so only world 0 is comparable.
             np.testing.assert_allclose(
-                gpu_obs[role].cpu().numpy(), np.stack([cpu_obs[role]] * 2), rtol=0.0, atol=1e-5
+                gpu_obs[role][0].cpu().numpy(), cpu_obs[role], rtol=0.0, atol=1e-5
             )
         # The measured paddle state is the same as the CPU's ready pose.
         np.testing.assert_allclose(
