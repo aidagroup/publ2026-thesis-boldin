@@ -19,6 +19,7 @@ from callosum.experiments.arm.skills import (
     RandomizationConfig,
     validate_partner_visibility,
 )
+from callosum.experiments.arm.skills_plans import AssemblyPlan, parse_face_turn_sequence
 
 # The agent keys the env and the conductor use for the two fixed roles (agent_a = holder,
 # agent_b = rotator, the FaceTurn-v0 convention).
@@ -73,15 +74,32 @@ class FaceTurnSkillsConfig:
     """Episode budget in decisions (one decision = `decision_period` sim substeps).
     Measured on the A40 probe: with 1 s decisions a plan move WITHOUT a flip is
     ~20-25 decisions and WITH a flip ~55-70 (lift, roll, set-down, re-grasp, turn);
-    E1 (1 move, flip possible) fits in ~70-80, E2 (2-3 moves) in ~120-140. NOTE:
-    `gym.make(..., max_episode_steps=...)` only rewraps the outer TimeLimit
-    (decision-level); to change this internal budget pass
+    E1 (1 move, flip possible) fits in ~70-80, E2 (2-3 moves) in ~120-140. The fixed
+    pif-paf plan `"R U R' U'"` (6 executable moves, flips included) needs a bigger
+    budget: pass --max-episode-decisions to the smoke/eval scripts (or set this field)
+    with ~400-600. NOTE: `gym.make(..., max_episode_steps=...)` only rewraps the outer
+    TimeLimit (decision-level); to change this internal budget pass
     `skills_config=FaceTurnSkillsConfig(max_episode_decisions=...)`."""
 
     # --- plan input ----------------------------------------------------------------------
     plan_length: int = 1
     """Moves per episode (E1: 1, E2: 2-3, E3: 5+). The plan itself is sampled per episode
-    and per env by `callosum.experiments.arm.skills_plans.random_plan`; planning is not learned."""
+    and per env by `callosum.experiments.arm.skills_plans.random_plan`; planning is not learned.
+
+    With `plan_notation` set this is DERIVED from the notation (`__post_init__`), because a
+    prime turn expands into two executable moves; an explicitly passed conflicting value
+    (anything but the default 1) is rejected instead of silently overwritten."""
+
+    plan_notation: str = ""
+    """Fixed plan in standard face-turn notation, applied to EVERY env and EVERY episode
+    (`"R U R' U'"` = the Sexy Move / pif-paf, the demo target). Empty = random plans of
+    `plan_length` moves, the E1/E2/E3 behaviour.
+
+    The notation is parsed by `callosum.experiments.arm.skills_plans.parse_face_turn_sequence`
+    (the same expansion a Kociemba solution goes through), so a prime turn `X'` becomes the two
+    executable moves `X X2` on the [0, 180] deg layer joints: `"R U R' U'"` is 6 plan moves.
+    Multi-face env only (`FaceTurnSkills-v0`); the single-face `FaceTurn-v0` has no plan
+    input at all. Invalid tokens raise at construction, not inside the simulator."""
 
     # --- partner visibility (bookkeeping only) --------------------------------------------
     partner_mode: str = "none"
@@ -193,6 +211,24 @@ class FaceTurnSkillsConfig:
             )
         if self.plan_length < 0:
             raise ValueError(f"plan_length must be >= 0, got {self.plan_length}")
+        if self.plan_notation:
+            # Parse eagerly: a bad token or a bad notation/length pairing must fail at
+            # construction, not on the first reset inside the simulator.
+            expanded = len(parse_face_turn_sequence(self.plan_notation))
+            if expanded == 0:
+                raise ValueError("plan_notation must contain at least one face turn")
+            if self.plan_length not in (1, expanded):
+                raise ValueError(
+                    f"plan_length ({self.plan_length}) disagrees with plan_notation "
+                    f"{self.plan_notation!r}: it expands to {expanded} executable moves "
+                    "(a prime turn is two moves: 90 + 180). Leave plan_length at its "
+                    "default or pass the expanded length."
+                )
+            if self.plan_length != expanded:
+                # The default 1 only means "E1 random plan", which the fixed notation
+                # overrides: derive the real length so every plan_length consumer (env
+                # plan columns, remaining-moves observation, done test) is consistent.
+                object.__setattr__(self, "plan_length", expanded)
         validate_partner_visibility(self.partner_mode)
         lo, hi = self.slip_prob_range
         if not 0 <= lo <= hi <= 1:
@@ -220,6 +256,16 @@ class FaceTurnSkillsConfig:
     def angle_tol_rad(self) -> float:
         """`angle_tol_deg` in the simulator's unit (radians)."""
         return math.radians(self.angle_tol_deg)
+
+    @property
+    def fixed_plan(self) -> AssemblyPlan | None:
+        """The parsed fixed plan (`plan_notation`) or None for random per-episode plans.
+
+        Primes are already expanded into executable moves; `len(fixed_plan) == plan_length`.
+        """
+        if not self.plan_notation:
+            return None
+        return parse_face_turn_sequence(self.plan_notation)
 
     @property
     def lock_write_tol_rad(self) -> float:

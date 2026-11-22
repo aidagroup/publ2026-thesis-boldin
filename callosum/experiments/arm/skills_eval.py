@@ -62,6 +62,7 @@ from callosum.experiments.arm.skills import (
     num_primitives,
     validate_partner_visibility,
 )
+from callosum.experiments.arm.skills_config import FaceTurnSkillsConfig
 from callosum.experiments.arm.skills_obs import (
     INFO_SUCCESS,
     INFO_TIME_TO_SUCCESS,
@@ -133,6 +134,25 @@ def _tag(holder_label: str, rotator_label: str) -> str:
 # --- [cloud] environment and policies (lazy imports) ---------------------------------------
 
 
+def _skills_env_config(args: argparse.Namespace) -> FaceTurnSkillsConfig:
+    """The env config of the eval run: the plan input and the internal decision budget.
+
+    `--plan-notation` fixes the plan for every episode (the pif-paf `"R U R' U'"`); with it
+    the config derives `plan_length` from the prime expansion, so the random-plan
+    `--plan-length` kwarg is not passed at all in that case. `--max-episode-decisions`
+    overrides the env's internal budget (`FaceTurnSkillsConfig.max_episode_decisions`),
+    which is separate from the outer `--max-decisions` TimeLimit wrapper.
+    """
+    kwargs: dict = {}
+    if args.max_episode_decisions is not None:
+        kwargs["max_episode_decisions"] = int(args.max_episode_decisions)
+    if args.plan_notation:
+        kwargs["plan_notation"] = args.plan_notation
+    else:
+        kwargs["plan_length"] = int(args.plan_length)
+    return FaceTurnSkillsConfig(**kwargs)
+
+
 def _make_env(args: argparse.Namespace, inject: bool):
     """The vectorised FaceTurnSkills env, as `ippo.make_envs` builds it (state, no render)."""
     import gymnasium as gym
@@ -148,7 +168,7 @@ def _make_env(args: argparse.Namespace, inject: bool):
         "render_backend": "none",
         "render_mode": None,
         "partner_mode": args.partner_mode,
-        "plan_length": args.plan_length,
+        "skills_config": _skills_env_config(args),
     }
     if args.max_decisions is not None:
         # One env step is one decision (design decision 5), so the episode limit counts
@@ -405,13 +425,33 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=1,
         help="Plan moves per episode; must match the training task (E1: 1, E2: 2-3, E3: 5+). "
-        "(default: %(default)s)",
+        "Ignored when --plan-notation is given. (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--plan-notation",
+        default="",
+        help=(
+            "Fixed plan in standard face-turn notation for every episode, e.g. \"R U R' U'\" "
+            "(the Sexy Move / pif-paf, 6 executable moves after the prime expansion). "
+            "Empty = random plans of --plan-length."
+        ),
+    )
+    parser.add_argument(
+        "--max-episode-decisions",
+        type=int,
+        default=None,
+        help=(
+            "Env-internal episode budget in decisions (FaceTurnSkillsConfig."
+            "max_episode_decisions; the config default is 150, the pif-paf needs ~400-600). "
+            "Separate from --max-decisions, which wraps the outer TimeLimit. "
+            "(default: the env config's value)"
+        ),
     )
     parser.add_argument(
         "--max-decisions",
         type=int,
         default=None,
-        help="Episode limit in decisions (default: the env's registered limit).",
+        help="Outer TimeLimit in decisions (default: the env's registered limit).",
     )
     parser.add_argument(
         "--cross-play",
@@ -466,8 +506,15 @@ def main(argv: list[str] | None = None) -> None:
         print("WARNING: --cross-play with a single checkpoint measures self-play only")
     pairs = pair_grid(checkpoints, args.cross_play)
     writer = _make_writer(args)
+    env_config = _skills_env_config(args)
+    plan_text = (
+        f"fixed {args.plan_notation!r} ({env_config.plan_length} executable moves)"
+        if args.plan_notation
+        else f"random {args.plan_length} move(s)"
+    )
     print(
-        f"eval {args.env_id} | partner-mode {args.partner_mode} | plan {args.plan_length} | "
+        f"eval {args.env_id} | partner-mode {args.partner_mode} | plan {plan_text} | "
+        f"budget {env_config.max_episode_decisions} decisions | "
         f"{args.episodes} episodes x {len(pairs)} pair(s) | sim {args.sim_backend} | "
         f"seed {args.seed}"
     )

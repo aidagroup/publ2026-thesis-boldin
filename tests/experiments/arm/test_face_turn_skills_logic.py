@@ -82,6 +82,50 @@ def test_reward_config_requires_penalty_below_bonus() -> None:
         SkillsRewardConfig(success_bonus=0.01, step_penalty=0.01)
 
 
+def test_config_fixed_plan_derives_the_expanded_length() -> None:
+    """The pif-paf notation: primes expand, and plan_length follows the expansion."""
+    cfg = FaceTurnSkillsConfig(plan_notation="R U R' U'")
+    plan = cfg.fixed_plan
+    assert plan is not None
+    assert cfg.plan_length == len(plan) == 6  # R U R R2 U U2
+    assert [str(move) for move in plan] == ["R", "U", "R", "R2", "U", "U2"]
+    assert [move.face for move in plan] == ["R", "U", "R", "R", "U", "U"]
+    assert [move.quarter_turns for move in plan] == [1, 1, 1, 2, 1, 2]
+    # The notation's own replay stays the single source of truth on every access.
+    assert cfg.fixed_plan == plan
+
+
+def test_config_fixed_plan_accepts_the_expanded_length_explicitly() -> None:
+    cfg = FaceTurnSkillsConfig(plan_length=6, plan_notation="R U R' U'")
+    assert cfg.plan_length == 6
+    assert cfg.fixed_plan is not None and len(cfg.fixed_plan) == 6
+
+
+def test_config_fixed_plan_rejects_an_inconsistent_length() -> None:
+    with pytest.raises(ValueError, match="disagrees with plan_notation"):
+        FaceTurnSkillsConfig(plan_length=3, plan_notation="R U R' U'")
+
+
+def test_config_fixed_plan_rejects_invalid_notation() -> None:
+    with pytest.raises(ValueError, match="invalid face-turn token"):
+        FaceTurnSkillsConfig(plan_notation="R X2")
+
+
+def test_config_empty_notation_keeps_the_random_plan_behaviour() -> None:
+    cfg = FaceTurnSkillsConfig()
+    assert cfg.plan_notation == ""
+    assert cfg.fixed_plan is None
+    assert cfg.plan_length == 1  # E1 default untouched
+
+
+def test_config_fixed_plan_budget_is_independent_of_the_plan() -> None:
+    """The pif-paf's bigger decision budget is a plain config value, not tied to the plan."""
+    cfg = FaceTurnSkillsConfig(plan_notation="R U R' U'", max_episode_decisions=600)
+    assert cfg.max_episode_decisions == 600
+    assert cfg.plan_length == 6
+    assert FaceTurnSkillsConfig().max_episode_decisions == 150  # default unchanged
+
+
 # --- decision / interruption machine -------------------------------------------------------
 
 
@@ -617,6 +661,23 @@ def test_needed_flip_logic_end_to_end() -> None:
     pi_quat = (1.0, 0.0, 0.0, 0.0)  # 180 deg about +x
     assert up_face_from_quat(pi_quat) == "D"
     assert CubeOrientation.upright().flipped(Flip("R", 2)).up == "D"
+
+
+def test_sapien_quat_reorder_matches_the_orientation_contract() -> None:
+    """SAPIEN Pose.q is (w, x, y, z); the skills orientation contract is xyzw."""
+    from callosum.experiments.arm.skills_runtime import sapien_quat_to_xyzw
+
+    identity_wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+    assert np.array_equal(sapien_quat_to_xyzw(identity_wxyz), [0.0, 0.0, 0.0, 1.0])
+    assert up_face_from_quat(sapien_quat_to_xyzw(identity_wxyz)) == "U"
+    assert orientation_from_quat(sapien_quat_to_xyzw(identity_wxyz)) == CubeOrientation.upright()
+    # Reading the SAPIEN identity DIRECTLY (the pre-fix bug) makes an upright cube look D-up;
+    # that wrong model picked flips on the wrong axis and the conductor looped forever.
+    assert up_face_from_quat(identity_wxyz) == "D"
+    # SAPIEN wxyz of +90 deg about the world -y axis (the flip that brings R up from upright).
+    half = math.sqrt(0.5)
+    flip_wxyz = np.array([half, 0.0, -half, 0.0])
+    assert up_face_from_quat(sapien_quat_to_xyzw(flip_wxyz)) == "R"
 
 
 def test_plan_move_face_matches_onehot_order() -> None:

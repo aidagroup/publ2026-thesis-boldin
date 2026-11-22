@@ -110,6 +110,7 @@ from callosum.experiments.arm.ppo_config import (
 )
 from callosum.experiments.arm.sim_compat import prepare_sim_backend
 from callosum.experiments.arm.skills_agent_obs import SkillsObsBuilder
+from callosum.experiments.arm.skills_config import FaceTurnSkillsConfig
 
 AGENT_NAMES = ("agent_a", "agent_b")
 
@@ -138,7 +139,18 @@ def make_envs(cfg: IPPOConfig, num_envs: int, ignore_terminations: bool) -> Mani
     # TODO(cloud verify): the FaceTurnSkills gym.make kwargs (no control_mode/partner_obs; is
     # reward_mode accepted as-is?).
     joint_only = {} if skills_env else {"partner_obs": cfg.partner_obs}
-    skills_only = {"plan_length": cfg.plan_length} if skills_env else {}
+    skills_only: dict = {}
+    if skills_env:
+        # A fixed plan (plan_notation) is authoritative and derives plan_length from the
+        # prime expansion; the random-plan path keeps passing plan_length.
+        skills_kwargs: dict = {}
+        if cfg.plan_notation:
+            skills_kwargs["plan_notation"] = cfg.plan_notation
+        else:
+            skills_kwargs["plan_length"] = cfg.plan_length
+        if cfg.max_episode_decisions is not None:
+            skills_kwargs["max_episode_decisions"] = int(cfg.max_episode_decisions)
+        skills_only = {"skills_config": FaceTurnSkillsConfig(**skills_kwargs)}
     env = gym.make(
         cfg.env_id,
         num_envs=num_envs,

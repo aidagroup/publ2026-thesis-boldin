@@ -11,10 +11,13 @@ interrupts), and the observation/info contract of `callosum.experiments.arm.skil
 back: one flat shared vector `[holder_own_block | rotator_own_block]` plus per-agent
 proprioception under the agent keys.
 
-The plan is an environment INPUT (`plan_length` random moves per episode, per env --
-E1 = 1; Kociemba plans arrive with E3/E4 through the same `AssemblyPlan` shape). A move
-on a non-up face needs the holder's flip first (`_plans.flips_to_bring_up`); success =
-every move reached its layer-angle target within tolerance AND the cube stayed put.
+The plan is an environment INPUT: by default `plan_length` random moves per episode, per env
+(E1 = 1; Kociemba plans arrive with E3/E4 through the same `AssemblyPlan` shape); a FIXED
+plan in standard notation (`skills_config.plan_notation`, e.g. the pif-paf `"R U R' U'"`)
+replaces the random draw for every env and episode, with primes already expanded by
+`_plans.parse_face_turn_sequence`. A move on a non-up face needs the holder's flip first
+(`_plans.flips_to_bring_up`); success = every move reached its layer-angle target within
+tolerance AND the cube stayed put.
 
 Episode randomization and failure injection (task 2.3) are the private-randomness
 sources of design decision 9: per-episode/per-hand primitive speeds and start delays
@@ -77,6 +80,7 @@ from callosum.experiments.arm.skills_runtime import (
     SkillsRuntime,
     orientation_from_quat,
     own_block_key_layout,
+    sapien_quat_to_xyzw,
     turn_target_rad,
     up_face_from_quat,
     useless_actions,
@@ -88,6 +92,13 @@ AGENT_UIDS = ("so101_pg-0", "so101_pg-1")
 convention (`callosum.experiments.arm.skills_agent_obs.ROLES`)."""
 
 _NEAR_TOL = 0.05  # m: a TCP within this of its grasp target counts as "near" (useless facts)
+
+_GRASP_MIN_FORCE = 0.5  # N: per-jaw contact force that counts as a grip (the robot's default)
+_GRASP_MAX_ANGLE_DEG = (
+    85.0  # deg: max angle between a jaw's opening direction and its contact force
+)
+"""Grasp thresholds of `SO101ParallelGripper.is_grasping` (Panda's convention), reused by the
+env's multi-link grasp check below."""
 
 
 class _EnvInjection(InjectionSource):
@@ -139,6 +150,7 @@ class FaceTurnSkills(TwoSO101Base):
         *args,
         partner_mode: str = "none",
         plan_length: int | None = None,
+        plan_notation: str | None = None,
         grasp_failure_prob_range: tuple[float, float] | None = None,
         slip_prob_range: tuple[float, float] | None = None,
         skills_config: FaceTurnSkillsConfig | None = None,
@@ -148,6 +160,9 @@ class FaceTurnSkills(TwoSO101Base):
         config = skills_config if skills_config is not None else FaceTurnSkillsConfig()
         if plan_length is not None:
             config = dataclasses.replace(config, plan_length=int(plan_length))
+        if plan_notation is not None:
+            # Validated (and plan_length derived from the prime expansion) in __post_init__.
+            config = dataclasses.replace(config, plan_notation=str(plan_notation))
         if grasp_failure_prob_range is not None:
             lo, hi = grasp_failure_prob_range
             config = dataclasses.replace(
@@ -164,6 +179,7 @@ class FaceTurnSkills(TwoSO101Base):
         # Validates partner_mode (and everything else) at construction: fail loudly.
         config = dataclasses.replace(config, partner_mode=partner_mode)
         self.skills_config = config
+        self._fixed_plan = config.fixed_plan
         self.cube_config = cube_config if cube_config is not None else MultiFaceCubeConfig()
         self._advertise_joint_actions = False
         self._skill_action_space = gymnasium.spaces.Dict(
@@ -225,6 +241,22 @@ class FaceTurnSkills(TwoSO101Base):
         plan_cols = max(self.skills_config.plan_length, 1)
         self._plan_faces = torch.zeros((n, plan_cols), dtype=torch.long, device=self.device)
         self._plan_quarters = torch.zeros_like(self._plan_faces)
+        # The fixed plan (plan_notation) is static: build its column tensors once here and
+        # scatter them into every env at reset instead of drawing random moves.
+        if self._fixed_plan is not None:
+            self._fixed_plan_faces = torch.tensor(
+                [FACES.index(move.face) for move in self._fixed_plan],
+                dtype=torch.long,
+                device=self.device,
+            )
+            self._fixed_plan_quarters = torch.tensor(
+                [move.quarter_turns for move in self._fixed_plan],
+                dtype=torch.long,
+                device=self.device,
+            )
+        else:
+            self._fixed_plan_faces = None
+            self._fixed_plan_quarters = None
         self._plan_index = torch.zeros(n, dtype=torch.long, device=self.device)
         self._move_target = torch.zeros(n, device=self.device)
         self._decision_count = torch.zeros(n, dtype=torch.long, device=self.device)
@@ -262,11 +294,18 @@ class FaceTurnSkills(TwoSO101Base):
             self._layer_lock_angle[env_idx] = 0.0
             self.body_init_pos[env_idx] = self.cube.pose.p[env_idx]
             # Fresh random plan per env (torch RNG, the FaceTurn jitter precedent; the
-            # trainer seeds torch globally).
+            # trainer seeds torch globally) -- or the SAME fixed notation plan for every
+            # env when `skills_config.plan_notation` is set (the pif-paf demo).
             length = cfg.plan_length
             if length > 0:
-                self._plan_faces[env_idx] = torch.randint(0, len(FACES), (b, length))
-                self._plan_quarters[env_idx] = torch.randint(1, 3, (b, length))
+                if self._fixed_plan_faces is not None:
+                    self._plan_faces[env_idx] = self._fixed_plan_faces.unsqueeze(0).expand(b, -1)
+                    self._plan_quarters[env_idx] = self._fixed_plan_quarters.unsqueeze(0).expand(
+                        b, -1
+                    )
+                else:
+                    self._plan_faces[env_idx] = torch.randint(0, len(FACES), (b, length))
+                    self._plan_quarters[env_idx] = torch.randint(1, 3, (b, length))
             self._plan_index[env_idx] = 0
             self._decision_count[env_idx] = 0
             self._episode_substeps[env_idx] = 0
@@ -307,15 +346,57 @@ class FaceTurnSkills(TwoSO101Base):
 
     # --- layer lock (generalized face lock) -------------------------------------------------
 
+    def _jaw_press(self, agent, link) -> tuple[torch.Tensor, torch.Tensor]:
+        """`(left jaw presses link, right jaw presses link)` in the `is_grasping` convention.
+
+        Same force/angle test as `SO101ParallelGripper.is_grasping`, but evaluated per
+        LINK instead of against one object: on the ARTICULATED multi-face cube the two
+        jaws squeeze two DIFFERENT layer slabs (e.g. clamp_1 on `layer_L` and clamp_2 on
+        `layer_R`), so the robot's pairwise `is_grasping(any_single_link)` can never be
+        true -- one jaw always reads zero force on that link. That is why the holder
+        looked "not grasping" while physically lifting the cube, every layer stayed
+        locked and no face turn could ever execute.
+        """
+        from mani_skill.utils import common
+
+        finger1, finger2 = agent.finger1_link, agent.finger2_link
+        left_forces = self.scene.get_pairwise_contact_forces(finger1, link)
+        right_forces = self.scene.get_pairwise_contact_forces(finger2, link)
+        left_force = torch.linalg.norm(left_forces, dim=1)
+        right_force = torch.linalg.norm(right_forces, dim=1)
+        left_dir = finger1.pose.to_transformation_matrix()[..., :3, 0]
+        right_dir = -finger2.pose.to_transformation_matrix()[..., :3, 0]
+        # Zero-force contact pairs give a NaN angle; the comparison below is then False.
+        left_angle = torch.nan_to_num(
+            torch.rad2deg(common.compute_angle_between(left_dir, left_forces)), nan=180.0
+        )
+        right_angle = torch.nan_to_num(
+            torch.rad2deg(common.compute_angle_between(right_dir, right_forces)), nan=180.0
+        )
+        left = (left_force >= _GRASP_MIN_FORCE) & (left_angle <= _GRASP_MAX_ANGLE_DEG)
+        right = (right_force >= _GRASP_MIN_FORCE) & (right_angle <= _GRASP_MAX_ANGLE_DEG)
+        return left, right
+
+    def _grasp_any(self, agent, links) -> torch.Tensor:
+        """Per env: both jaws press SOME link of the (articulated) object.
+
+        For a multi-link object the two jaws may press different links, so the per-link
+        `is_grasping` calls are OR-ed per jaw before AND-ing the two jaws.
+        """
+        left = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        right = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        for link in links:
+            left_link, right_link = self._jaw_press(agent, link)
+            left |= left_link
+            right |= right_link
+        return left & right
+
     def _holder_holds(self) -> torch.Tensor:
         """The holder clamps the cube BODY: the core is fully enclosed by the six
         layer slabs, so the jaws can only ever touch a slab -- and every layer is
         rigidly locked to the core while it is not held (the lock's whole point), so
         grasping ANY link of the articulation IS grasping the body."""
-        held = self.agent_a.is_grasping(self.core_link)
-        for link in self.cube.links:
-            held = held | self.agent_a.is_grasping(link)
-        return held
+        return self._grasp_any(self.agent_a, self.cube.links)
 
     _TURN_IDS = frozenset(p.index for p in ROTATOR_PRIMITIVES if p.name in ("turn90", "turn180"))
     _ROTATOR_GRASPISH_IDS = frozenset(
@@ -351,7 +432,12 @@ class FaceTurnSkills(TwoSO101Base):
         grasping = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         for face_idx in torch.unique(face[turning_t]):
             mask = turning_t & (face == face_idx)
-            grasping |= mask & self.agent_b.is_grasping(self._active_layer_link(int(face_idx)))
+            # Per-jaw test as well: the rim pinch presses the same layer link with both
+            # jaws, but the pairwise `is_grasping` call also fails if their contact
+            # forces land on different sub-links of the slab.
+            grasping |= mask & self._grasp_any(
+                self.agent_b, [self._active_layer_link(int(face_idx))]
+            )
         active = turning_t & grasping & (self._plan_index < self.skills_config.plan_length)
         if not bool(active.any()):
             return
@@ -500,14 +586,14 @@ class FaceTurnSkills(TwoSO101Base):
         if not within.any():
             return
         self._plan_index[within] += 1
-        self._refresh_move_targets(torch.flatnonzero(within).cpu().numpy())
+        self._refresh_move_targets(torch.nonzero(within).flatten().cpu().numpy())
 
     def _compute_needed_flip(self) -> list:
         """Per env: the single `Flip` that brings the current move's face up (or None)."""
         needed: list = [None] * self.num_envs
         if self.skills_config.plan_length == 0:
             return needed
-        quat = self.cube.pose.q.cpu().numpy()
+        quat = sapien_quat_to_xyzw(self.cube.pose.q).cpu().numpy()
         faces = self._plan_faces.cpu().numpy()
         index = self._plan_index.cpu().numpy()
         for env in range(self.num_envs):
@@ -537,7 +623,7 @@ class FaceTurnSkills(TwoSO101Base):
             base_pos=[b[:, :3, 3] for b in bases],
             base_rot=[b[:, :3, :3] for b in bases],
             cube_pos=self.cube.pose.p.cpu().numpy(),
-            cube_quat=self.cube.pose.q.cpu().numpy(),
+            cube_quat=sapien_quat_to_xyzw(self.cube.pose.q).cpu().numpy(),
             cube_home=self.body_init_pos.cpu().numpy(),
             layer_angle=angle.cpu().numpy(),
             turn_target=target.cpu().numpy(),
@@ -618,7 +704,7 @@ class FaceTurnSkills(TwoSO101Base):
                     )
         up_is_move = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if self.skills_config.plan_length > 0:
-            quat = self.cube.pose.q.cpu().numpy()
+            quat = sapien_quat_to_xyzw(self.cube.pose.q).cpu().numpy()
             face_np = self._face_tensor().cpu().numpy()
             index = self._plan_index.cpu().numpy()
             for env in range(self.num_envs):
@@ -736,7 +822,9 @@ class FaceTurnSkills(TwoSO101Base):
                 "plan_moves_remaining": (remaining if arm == 0 else remaining.clone()).unsqueeze(1),
                 "cube_position": self.cube.pose.p if arm == 0 else self.cube.pose.p.clone(),
                 "cube_orientation_quat": (
-                    self.cube.pose.q if arm == 0 else self.cube.pose.q.clone()
+                    sapien_quat_to_xyzw(self.cube.pose.q)
+                    if arm == 0
+                    else sapien_quat_to_xyzw(self.cube.pose.q).clone()
                 ),
                 "active_layer_angle": (
                     angle / math.pi if arm == 0 else angle.clone() / math.pi

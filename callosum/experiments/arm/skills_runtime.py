@@ -154,6 +154,19 @@ def turn_target_rad(current_rad: float, quarter_turns: int) -> float:
     return target
 
 
+def sapien_quat_to_xyzw(quat):
+    """Reorder SAPIEN's `(w, x, y, z)` pose quaternions to the skills contract's `xyzw`.
+
+    SAPIEN (`Pose.q`, and therefore `env.cube.pose.q`) stores the scalar part first, while
+    `_quat_to_matrix` and every consumer of the `cube_orientation_quat` observation field
+    (`skills_conductor`, the pure tests) use the ManiSkill/PyTorch `(x, y, z, w)` order.
+    Reading a SAPIEN quaternion directly makes the upright cube look rotated 180 deg about
+    x (`up = D` at reset), which sends the conductor's flip on the wrong axis and loops the
+    first plan move forever. Works on numpy arrays and torch tensors alike.
+    """
+    return quat[..., [1, 2, 3, 0]]
+
+
 def _quat_to_matrix(quat: np.ndarray) -> np.ndarray:
     """Rotation matrix/matrices `(..., 3, 3)` from xyzw quaternion(s) (pure numpy)."""
     q = np.asarray(quat, dtype=float)
@@ -949,9 +962,11 @@ class SkillsRuntime:
         """The flip macro's roll leg: wrist rotation about the CURRENT finger axis.
 
         The cube is rigidly held, so rotating the wrist by `delta` about the finger
-        axis `f` rotates the cube by `delta * sign(w . f)` about the flip axis `w` --
-        the sign below makes the cube turn the way `Flip`'s right-hand convention
-        demands. No IK: the target is the current command with the wrist offset.
+        axis `f` rotates the cube by `-delta * sign(w . f)` about the flip axis `w`
+        (`ArmModel.tool` returns the finger direction as MINUS the roll-joint axis, so
+        the wrist joint turns the opposite way) -- the sign below makes the cube turn
+        the way `Flip`'s right-hand convention demands. No IK: the target is the current
+        command with the wrist offset.
 
         AIM GATE: the roll only flips the right face if the finger line is close
         to the flip axis. A grip aimed at a previous move's axis cannot roll
@@ -975,7 +990,7 @@ class SkillsRuntime:
                 ok[i] = False
                 continue
             sign = 1.0 if float(axis @ finger[i]) >= 0 else -1.0
-            q[i, -1] += sign * theta
+            q[i, -1] -= sign * theta
         return q[:, None, :], ok
 
     def _plan_turn(self, envs: np.ndarray, quarter_turns: int):

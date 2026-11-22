@@ -19,7 +19,7 @@ Own-block field order (fixed; sizes in parentheses):
     plan_quarter_turns (1)       1 or 2, normalised by 2
     plan_moves_remaining (1)     remaining moves / initial plan length, [0, 1]
     cube_position (3)
-    cube_orientation_quat (4)
+    cube_orientation_quat (4)    cube-root orientation, xyzw (SAPIEN's wxyz reordered by the env)
     active_layer_angle (1)       radians / pi, [0, 1]
     own_qpos (7)
     own_qvel (7)

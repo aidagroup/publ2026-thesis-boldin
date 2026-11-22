@@ -58,6 +58,16 @@ class IPPOConfig:
     plan_length: int = 1
     """Skills env: random plan length per episode (E1 = 1 move, E2 = 2-3). Ignored
     for the joint-level envs."""
+    plan_notation: str = ""
+    """Skills env: FIXED plan in standard face-turn notation for every env/episode
+    (`"R U R' U'"` = the Sexy Move / pif-paf; primes expand into two executable moves),
+    replacing the random plan of `plan_length`. Empty = random plans. Ignored for the
+    joint-level envs. The skill env's internal decision budget is
+    `max_episode_decisions` (separate from `max_episode_steps`)."""
+    max_episode_decisions: int | None = None
+    """Skills env: internal episode budget in decisions
+    (`FaceTurnSkillsConfig.max_episode_decisions`; the config default is 150, the pif-paf
+    needs ~400-600). `None` keeps the config default. Ignored for the joint-level envs."""
     """Skill-level partner-information mode (`callosum.experiments.arm.skills_agent_obs`): which
     partner block is appended to the per-agent inputs of the discrete (FaceTurnSkills) envs --
     "none" / "oracle" / "predicted" / "predicted-direct". Only read when the env's action space
