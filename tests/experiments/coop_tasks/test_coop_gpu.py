@@ -123,6 +123,35 @@ def test_observation_blocks_match_the_pure_layout(task: str, partner_mode: str) 
             assert owners[3:] == [None, None, None] + [partner_of(role)] * 4
 
 
+@pytest.mark.parametrize("task", _ALL_TASKS)
+@pytest.mark.parametrize("partner_mode", ("none", "oracle"))
+def test_observation_blocks_match_the_occlusion_layout(task: str, partner_mode: str) -> None:
+    """The GPU blocks under the hidden-partner occlusion match the pure masked layout."""
+    from callosum.experiments.coop_tasks.logic import obs_size, shared_fields_for
+
+    spec = task_spec(task)
+    blocks = observation_blocks(spec, partner_mode, "partner")
+    for role in AGENT_KEYS:
+        expected = obs_size(spec, partner_mode, occlusion="partner")
+        dimensions = {
+            "action": spec.action_dim,
+            "command": spec.action_dim,
+            "params": 3,
+            "privileged": 1,
+            "shared": len(shared_fields_for(spec, role, "partner")),
+            "goal": len(spec.goal_fields),
+            "time": 1,
+        }
+        width = sum(dimensions[key] for key, _owner in blocks[role])
+        assert width == expected
+    if task == "toss":
+        assert len(shared_fields_for(spec, "left", "partner")) == 10
+        assert obs_size(spec, "none", occlusion="partner") == 20
+        assert obs_size(spec, "oracle", occlusion="partner") == 30
+    else:
+        assert blocks == observation_blocks(spec, partner_mode)
+
+
 def test_observation_blocks_reject_an_unknown_partner_mode() -> None:
     with pytest.raises(ValueError, match="partner_mode"):
         observation_blocks(task_spec("cartpole"), "predicted")
@@ -176,6 +205,75 @@ def test_randomization_packer_matches_the_cpu_sampler(task: str) -> None:
         if name == "wind_active":
             assert tensor.dtype == torch.bool
             assert tensor.tolist() == values.tolist()
+
+
+def test_torch_paddle_helpers_match_the_pure_numpy_model() -> None:
+    """The GPU torch mirrors of the paddle projection/SAT must equal the pure CPU model.
+
+    This runs on the CPU (torch only), so the two backends' command projection and plate
+    overlap diagnostics are compared without the GPU stack; a drift here would be a silent
+    CPU-vs-GPU physics difference.
+    """
+    torch = pytest.importorskip("torch")
+    from callosum.experiments.coop_tasks import paddle_model
+    from callosum.experiments.coop_tasks.env_gpu import pad_pair_sat, project_pad_targets
+
+    generator = torch.Generator().manual_seed(17)
+    cfg = coop_config("toss")
+    num_worlds = 64
+    half_x, half_z = 0.30, 0.03
+    left_x = -cfg.pad_inner_x - torch.rand(num_worlds, generator=generator) * 0.5
+    right_x = cfg.pad_inner_x + torch.rand(num_worlds, generator=generator) * 0.5
+    z = cfg.pad_min_z + torch.rand(num_worlds, generator=generator) * 1.0
+    tilt_left = (torch.rand(num_worlds, generator=generator) * 2.0 - 1.0) * cfg.pad_tilt_limit
+    tilt_right = (torch.rand(num_worlds, generator=generator) * 2.0 - 1.0) * cfg.pad_tilt_limit
+    targets = torch.stack(
+        (
+            torch.stack((left_x, z, tilt_left), dim=1),
+            torch.stack((right_x, z, tilt_right), dim=1),
+        ),
+        dim=1,
+    )
+    left_out, right_out = project_pad_targets(
+        targets,
+        half_x=half_x,
+        half_z=half_z,
+        left_x_range=cfg.paddle_x_range("left"),
+        right_x_range=cfg.paddle_x_range("right"),
+    )
+    for world in range(num_worlds):
+        expected_left, expected_right = paddle_model.project_targets_apart(
+            paddle_model.PaddleTarget(*targets[world, 0].tolist()),
+            paddle_model.PaddleTarget(*targets[world, 1].tolist()),
+            half_x=half_x,
+            half_z=half_z,
+            left_x_range=cfg.paddle_x_range("left"),
+            right_x_range=cfg.paddle_x_range("right"),
+        )
+        assert left_out[world].tolist() == pytest.approx(
+            [expected_left.x, expected_left.z, expected_left.tilt], abs=1e-5
+        )
+        assert right_out[world].tolist() == pytest.approx(
+            [expected_right.x, expected_right.z, expected_right.tilt], abs=1e-5
+        )
+        if left_out[world, 0] != targets[world, 0, 0]:
+            required = (
+                paddle_model.projected_half_x(left_out[world, 2].item(), half_x, half_z)
+                + paddle_model.projected_half_x(right_out[world, 2].item(), half_x, half_z)
+                + paddle_model.PADDLE_CONTACT_MARGIN
+            )
+            assert right_out[world, 0].item() - left_out[world, 0].item() >= required - 1e-5
+    # SAT geometry parity on the same target poses (and their measured-pose form).
+    penetration, separation = pad_pair_sat(targets, half_x=half_x, half_z=half_z)
+    for world in range(num_worlds):
+        expected_penetration, expected_separation = paddle_model.paddle_pair_geometry(
+            paddle_model.PaddleTarget(*targets[world, 0].tolist()),
+            paddle_model.PaddleTarget(*targets[world, 1].tolist()),
+            half_x=half_x,
+            half_z=half_z,
+        )
+        assert penetration[world].item() == pytest.approx(expected_penetration, abs=1e-5)
+        assert separation[world].item() == pytest.approx(expected_separation, abs=1e-5)
 
 
 def test_packer_rejects_an_empty_batch() -> None:
@@ -276,9 +374,10 @@ def test_gpu_env_is_bit_identical_across_instances(task: str) -> None:
 def test_gpu_env_auto_reset_contract(task: str) -> None:
     """A tiny episode budget forces truncations; the finished lists match the done worlds."""
     torch = pytest.importorskip("torch")
-    # The toss-catch config requires n_passes * 4 <= max_control_steps, so it needs a slightly
-    # larger (still tiny) budget than the two contact-free tasks.
-    budget = 6 if task != "toss" else 14
+    # The toss-catch config requires `n_passes * max(4, min_pass_interval_steps + 1) <=
+    # max_control_steps` (3 * 5 = 15 at the tightened interval 4; 3 * 6 = 18 at 5), so it
+    # needs a slightly larger (still tiny) budget than the two contact-free tasks.
+    budget = 6 if task != "toss" else 20
     config = dataclasses.replace(coop_config(task), max_control_steps=budget)
     env = _gpu_env(task, 4, config=config)
     try:
@@ -294,6 +393,12 @@ def test_gpu_env_auto_reset_contract(task: str) -> None:
             assert len(done_rows) == len(result.finished_infos)
             for info in result.finished_infos:
                 assert "success" in info
+                assert info["occlusion_partner"] == 0.0
+                if task == "toss":
+                    # The physical paddles' geometry evidence must reach the finished info
+                    # (the evaluator writes it into the JSON report).
+                    assert {"pad_min_gap", "pad_penetration", "pad_contact_steps"} <= set(info)
+                    assert info["pad_penetration"] == 0.0
             if step == budget - 1:
                 assert len(done_rows) == 4, "every world must truncate after max_control_steps"
                 assert all(length == budget for length in result.finished_lengths)
@@ -441,6 +546,112 @@ def test_gpu_one_step_parity_with_the_cpu_env(task: str) -> None:
     finally:
         env.close()
         cpu.close()
+
+
+def test_gpu_toss_physical_paddles_match_the_cpu_env() -> None:
+    """The GPU toss backend runs the same physical servo-target path as the CPU env.
+
+    The paddles are rigid bodies on x/z/tilt joints driven by bounded-force position servos,
+    so the reset observation and the first zero-command steps must agree with the CPU
+    reference (float32 Warp physics vs float64 MuJoCo) and the plates must keep holding their
+    ready pose instead of falling. One step of servo tracking and the release impulse are
+    compared; the contact-rich multi-step parity is the pod script's job.
+    """
+    pytest.importorskip("mujoco")
+    torch = pytest.importorskip("torch")
+    from callosum.experiments.coop_tasks import make_coop_env
+
+    env = _gpu_env("toss", 2)
+    cpu = make_coop_env("toss", config=env.config)
+    try:
+        cpu_obs, _ = cpu.reset(seed=0)
+        gpu_obs = env.reset(seed=0)
+        for role in AGENT_KEYS:
+            np.testing.assert_allclose(
+                gpu_obs[role].cpu().numpy(), np.stack([cpu_obs[role]] * 2), rtol=0.0, atol=1e-5
+            )
+        # The measured paddle state is the same as the CPU's ready pose.
+        np.testing.assert_allclose(
+            env._pad_state[0].cpu().numpy(),
+            np.asarray(
+                [
+                    cpu._data.qpos[cpu._pad_qpos["left"][0]],
+                    cpu._data.qpos[cpu._pad_qpos["left"][1]],
+                    cpu._data.qpos[cpu._pad_qpos["left"][2]],
+                    cpu._data.qpos[cpu._pad_qpos["right"][0]],
+                    cpu._data.qpos[cpu._pad_qpos["right"][1]],
+                    cpu._data.qpos[cpu._pad_qpos["right"][2]],
+                ],
+                dtype=np.float32,
+            ),
+            rtol=0.0,
+            atol=1e-6,
+        )
+        actions = _zero_actions(torch, 2, env.action_dim)
+        for _step in range(5):
+            _cpu_next, _cpu_reward, _cpu_term, _cpu_trunc, _cpu_info = cpu.step(
+                {role: np.zeros(env.action_dim, dtype=np.float64) for role in AGENT_KEYS}
+            )
+            result = env.step(actions)
+        env.synchronize()
+        np.testing.assert_allclose(
+            env.state()["qpos"][0].cpu().numpy(),
+            np.asarray(cpu._data.qpos, dtype=np.float32),
+            rtol=0.0,
+            atol=2e-4,
+        )
+        np.testing.assert_allclose(
+            env.state()["qvel"][0].cpu().numpy(),
+            np.asarray(cpu._data.qvel, dtype=np.float32),
+            rtol=0.0,
+            atol=2e-3,
+        )
+        # The plates did not fall: the z servo holds the ready height (~1 mm sag).
+        assert abs(float(env._pad_state[0, 1]) - float(cpu.config.pad_start_z)) < 5e-3
+        assert abs(float(env._pad_state[0, 4]) - float(cpu.config.pad_start_z)) < 5e-3
+        # The paddle targets advanced identically (the servo references, not the measured
+        # joints, are what the commands integrate on).
+        cpu_targets = np.asarray(
+            [
+                cpu._pad_target["left"].x,
+                cpu._pad_target["left"].z,
+                cpu._pad_target["left"].tilt,
+                cpu._pad_target["right"].x,
+                cpu._pad_target["right"].z,
+                cpu._pad_target["right"].tilt,
+            ],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(
+            env._pad_target[0].reshape(-1).cpu().numpy(), cpu_targets, rtol=0.0, atol=1e-6
+        )
+        assert torch.isfinite(result.obs[AGENT_KEYS[0]]).all()
+    finally:
+        env.close()
+        cpu.close()
+
+
+def test_gpu_toss_paddles_never_overlap_on_random_rollouts() -> None:
+    """Random-contact GPU rollouts keep the plate SAT penetration at zero (no pass-through)."""
+    torch = pytest.importorskip("torch")
+    env = _gpu_env("toss", 4, seed=3)
+    try:
+        env.reset(seed=3)
+        generator = torch.Generator().manual_seed(5)
+        for _step in range(20):
+            actions = {
+                role: (torch.rand((4, env.action_dim), generator=generator) * 2.0 - 1.0).to("cuda")
+                for role in AGENT_KEYS
+            }
+            env.step(actions)
+            env.synchronize()
+            left_x = env._pad_state[:, 0]
+            right_x = env._pad_state[:, 3]
+            assert bool((left_x < right_x).all())
+            assert float(env._pad_penetration.max().cpu()) == 0.0
+            assert bool((env._pad_min_gap >= 0.0).all())
+    finally:
+        env.close()
 
 
 def test_gpu_eager_fallback_matches_the_graph() -> None:

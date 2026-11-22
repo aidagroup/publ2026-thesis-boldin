@@ -5,7 +5,7 @@ one `CoopTaskEnv` in a Python loop of `mj_step` calls; the pod's CPU quota turns
 400-1200-update runs into hours. This module is the batched GPU twin for all three tasks
 (`cartpole`, `pendulum`, `toss`): all `nworld` worlds live in ONE MuJoCo-Warp `Model`/`Data`
 pair, the control step of `callosum.experiments.coop_tasks.base.CoopTaskEnv` (latency queues,
-start-delay suppression, one-sided scaling, the paddle pose interpolation, the
+start-delay suppression, one-sided scaling, the toss-catch paddle servo targets, the
 `control_every` physics substeps, observations, reward, success/failure and the auto-reset of
 the finished worlds) is tensor algebra on the GPU, and one Python `step()` advances thousands
 of environments.
@@ -26,23 +26,30 @@ Task specifics:
   `dof_damping` (`put_model(batch_sizes={"dof_damping": nworld})`) carries the sampled hidden
   joint damping, the agents' forces/torques go through `xfrc_applied`, and the observation
   blocks are assembled from `qpos`/`qvel` exactly in the CPU layout/order.
-* `toss` is the suite's contact/timing task (free ball + two MOCAP paddles). Per-world
-  `geom_solref`/`geom_friction` carry the sampled contact restitution/friction, the paddles'
-  poses are interpolated over the `control_every` substeps and written to `mocap_pos`/
-  `mocap_quat`, and the ball/paddle contacts are detected per substep with small Warp kernels
-  so the alternating pass counter of `toss_catch.py` keeps its CPU semantics -- including the
-  anti-chatter gate: a pass counts only on the contacting paddle's own court half and at
-  least `min_pass_interval_steps` control steps after the previous counted pass. The paddles'
-  per-substep poses live in a constant pose/quaternion bank computed with torch before the
-  graph replay, so no quaternion trigonometry happens inside the captured kernels.
+* `toss` is the suite's contact/timing task (free ball + two PHYSICAL servoed paddles). The
+  paddle bodies are the same dynamic rigid bodies as on the CPU path: two prismatic joints
+  (court x, vertical z) and a hinge (tilt about world +y) per plate, driven by three
+  bounded-force position servos. Per-world `geom_solref`/`geom_friction` carry the sampled
+  ball/plate contact restitution/friction; the agents' normalized `(dx, dz, dtheta)` commands
+  only advance the servo TARGETS (`data.ctrl`, written per world by torch before the graph
+  replay, exactly like the CPU env's `data.ctrl`), so the plates physically track them. The
+  ball/paddle contacts are detected per substep with a small Warp kernel so the alternating
+  pass counter of `toss_catch.py` keeps its CPU semantics -- including the anti-chatter gate:
+  a pass counts only on the contacting paddle's own court half and at least
+  `min_pass_interval_steps` control steps after the previous counted pass. The commanded
+  target pair is projected apart (the pure `paddle_model.project_targets_apart` rule, mirrored
+  in torch) when both plates would be driven into each other, and a tiny Warp kernel counts
+  the pad/pad contact-shell contacts; the plate overlap itself is measured geometrically
+  (separating-axis test on the measured paddle poses) for the diagnostics, because the stiff
+  pad/pad contact shells are what physically forbid the plates to pass through each other.
 
-CUDA graph: the whole control step (the substep loop with its per-substep paddle-pose writes,
-contact flags and pass tracker) is captured ONCE into a CUDA graph (`warp.ScopedCapture`, the
-pattern of `mujoco_warp`'s own speed tests) and replayed per control step: the tiny models are
-launch-bound without it. The graph references the fixed Warp arrays, so the per-step torch
-writes (`qpos`/`qvel`/`xfrc_applied`/per-world damping or contact fields/the paddle pose
-banks) are seen by the replay. A capture failure is not fatal: the env warns once and falls
-back to the eager loop (`use_cuda_graph=False` forces it).
+CUDA graph: the whole control step (the substep loop with its per-substep contact flags, pass
+tracker and pad/pad contact counter) is captured ONCE into a CUDA graph (`warp.ScopedCapture`,
+the pattern of `mujoco_warp`'s own speed tests) and replayed per control step: the tiny models
+are launch-bound without it. The graph references the fixed Warp arrays, so the per-step torch
+writes (`qpos`/`qvel`/`ctrl`/`xfrc_applied`/per-world damping or contact fields) are seen by
+the replay. A capture failure is not fatal: the env warns once and falls back to the eager
+loop (`use_cuda_graph=False` forces it).
 
 Randomisation: the per-episode records are sampled on the CPU with the SAME stdlib samplers
 as the CPU env (`pack_episode_randomization` uploads them as tensors; an auto-reset batch only
@@ -61,8 +68,10 @@ importing the package on a machine without the GPU stack fails only when an inst
 
 Known limits: `torch.float32` physics (the CPU reference is float64), so the two backends are
 interchangeable for training/evaluation but a curve is not bit-identical across them; the
-`toss` contacts are floating-point-sensitive, so the parity tolerance there is looser than for
-the contact-free tasks (see `scripts/experiments/coop_tasks/check_coop_gpu_parity.py`). The
+`toss` task is now contact- AND servo-driven (dynamic paddles with bounded-force position
+servos plus the stiff pad/pad and soft ball/plate contacts), so its parity tolerance is looser
+and the compared trajectories diverge faster than the contact-free tasks' (see
+`scripts/experiments/coop_tasks/check_coop_gpu_parity.py`). The
 float32 Warp contact solver can also produce a non-finite `qpos`/`qvel` on a rare deep
 high-speed ball/paddle impact where float64 MuJoCo stays finite: the env treats such a world as
 a FAILED episode and auto-resets it (`CoopBatchGPU.physics_failures` counts those events, which
@@ -103,9 +112,15 @@ from callosum.experiments.coop_tasks.logic import (
     partner_of,
     sample_episode_randomization,
     sample_toss_randomization,
+    shared_field_indices,
+    shared_fields_for,
     task_spec,
+    validate_occlusion,
     validate_partner_mode,
     validate_task,
+)
+from callosum.experiments.coop_tasks.paddle_model import (
+    PADDLE_CONTACT_MARGIN as _PADDLE_CONTACT_MARGIN,
 )
 
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
@@ -160,19 +175,22 @@ _PARTNER_BLOCK_FIELDS = {
 
 
 def observation_blocks(
-    spec: CoopTaskSpec, partner_mode: str
+    spec: CoopTaskSpec, partner_mode: str, occlusion: str = "none"
 ) -> dict[str, tuple[tuple[str, str | None], ...]]:
     """The ordered `(tensor_key, owner)` blocks of each agent's flat observation.
 
     `owner` is the role whose tensors the block is read from (the agent itself for its own
     blocks, the partner under `"oracle"`), or `None` for the shared-state/goal/time blocks.
-    The blocks are validated against `callosum.experiments.coop_tasks.logic.obs_fields`, so a
-    change of the pure observation layout (a new field, a reordered block) fails at
-    construction instead of silently producing an observation the policy was not trained on.
+    The blocks are validated against `callosum.experiments.coop_tasks.logic.obs_fields` for
+    EACH agent, so a change of the pure observation layout (a new field, a reordered block,
+    an occlusion mask) fails at construction instead of silently producing an observation the
+    policy was not trained on.
 
     Args:
         spec: The task's observation/action layout.
         partner_mode: Observation visibility mode, `"none"` or `"oracle"`.
+        occlusion: Shared-state occlusion mode, `"none"` or `"partner"` (only the toss-catch
+            task has agent-owned shared fields, so the other tasks are unaffected).
 
     Returns:
         `{role: ((tensor_key, owner), ...)}` in observation column order.
@@ -181,24 +199,27 @@ def observation_blocks(
         RuntimeError: if the blocks do not concatenate to `logic.obs_fields`.
     """
     validate_partner_mode(partner_mode)
-    expected: list[str] = []
-    for key in ("action", "params", "privileged"):
-        expected.extend(_OWN_BLOCK_FIELDS[key](spec))
-    expected.extend(spec.shared_fields)
-    expected.extend(spec.goal_fields)
-    expected.append(TIME_FIELD)
-    if partner_mode != "none":
-        for key in ("action", "command", "params", "privileged"):
-            expected.extend(_PARTNER_BLOCK_FIELDS[key](spec))
-    if tuple(expected) != obs_fields(spec, partner_mode):
-        raise RuntimeError(
-            "the GPU observation blocks and callosum.experiments.coop_tasks.logic.obs_fields "
-            f"disagree for task {spec.name!r}: blocks concatenate to {len(expected)} fields, "
-            f"obs_fields has {len(obs_fields(spec, partner_mode))}; update "
-            "callosum/experiments/coop_tasks/env_gpu.py next to the logic module"
-        )
+    validate_occlusion(occlusion)
     blocks: dict[str, tuple[tuple[str, str | None], ...]] = {}
     for role in AGENT_KEYS:
+        expected: list[str] = []
+        for key in ("action", "params", "privileged"):
+            expected.extend(_OWN_BLOCK_FIELDS[key](spec))
+        expected.extend(shared_fields_for(spec, role, occlusion))
+        expected.extend(spec.goal_fields)
+        expected.append(TIME_FIELD)
+        if partner_mode != "none":
+            for key in ("action", "command", "params", "privileged"):
+                expected.extend(_PARTNER_BLOCK_FIELDS[key](spec))
+        pure = obs_fields(spec, partner_mode, agent=role, occlusion=occlusion)
+        if tuple(expected) != pure:
+            raise RuntimeError(
+                "the GPU observation blocks and callosum.experiments.coop_tasks.logic."
+                f"obs_fields disagree for task {spec.name!r} agent {role!r} "
+                f"(occlusion={occlusion!r}): blocks concatenate to {len(expected)} fields, "
+                f"obs_fields has {len(pure)}; update callosum/experiments/coop_tasks/"
+                "env_gpu.py next to the logic module"
+            )
         role_blocks: list[tuple[str, str | None]] = [
             (key, role) for key in ("action", "params", "privileged")
         ]
@@ -306,30 +327,114 @@ def pack_episode_randomization(
     return agents, episode
 
 
+# --- torch mirrors of the pure paddle geometry (unit-testable without a GPU) ---------------
+
+
+def project_pad_targets(
+    target: torch.Tensor,
+    *,
+    half_x: float,
+    half_z: float,
+    left_x_range: tuple[float, float],
+    right_x_range: tuple[float, float],
+    margin: float = _PADDLE_CONTACT_MARGIN,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torch mirror of `paddle_model.project_targets_apart` (batched over worlds).
+
+    Args:
+        target: `(nworld, 2, 3)` paddle servo targets `(x, z, tilt)`; index 0 is the left
+            paddle, 1 the right one.
+        half_x: Paddle half extent along its face x axis (m, XML-owned).
+        half_z: Paddle half thickness (m, XML-owned).
+        left_x_range: Left paddle `(min, max)` x joint range (m).
+        right_x_range: Right paddle `(min, max)` x joint range (m).
+        margin: Extra x clearance to keep (m).
+
+    Returns:
+        `(left, right)` projected `(nworld, 3)` targets.
+    """
+    left = target[:, 0]
+    right = target[:, 1]
+    left_shift = half_x * left[:, 2].cos().abs() + half_z * left[:, 2].sin().abs()
+    right_shift = half_x * right[:, 2].cos().abs() + half_z * right[:, 2].sin().abs()
+    left_half_z = half_z * left[:, 2].cos().abs() + half_x * left[:, 2].sin().abs()
+    right_half_z = half_z * right[:, 2].cos().abs() + half_x * right[:, 2].sin().abs()
+    delta_x = (right[:, 0] - left[:, 0]).abs()
+    delta_z = (right[:, 1] - left[:, 1]).abs()
+    can_touch = (delta_x < left_shift + right_shift) & (delta_z < left_half_z + right_half_z)
+    deficit = torch.where(
+        can_touch,
+        (left_shift + right_shift + margin - (right[:, 0] - left[:, 0])).clamp(min=0.0),
+        torch.zeros_like(delta_x),
+    )
+    left_room = left[:, 0] - left_x_range[0]
+    right_room = right_x_range[1] - right[:, 0]
+    symmetric = torch.minimum(
+        torch.minimum(deficit / 2.0, left_room.clamp(min=0.0)), right_room.clamp(min=0.0)
+    )
+    left_x = left[:, 0] - symmetric
+    right_x = right[:, 0] + symmetric
+    remaining = deficit - 2.0 * symmetric
+    extra_left = torch.minimum(remaining.clamp(min=0.0), (left_room - symmetric).clamp(min=0.0))
+    left_x = left_x - extra_left
+    remaining = remaining - extra_left
+    extra_right = torch.minimum(remaining.clamp(min=0.0), (right_room - symmetric).clamp(min=0.0))
+    right_x = right_x + extra_right
+    return (
+        torch.stack((left_x, left[:, 1], left[:, 2]), dim=1),
+        torch.stack((right_x, right[:, 1], right[:, 2]), dim=1),
+    )
+
+
+def pad_pair_sat(
+    pose: torch.Tensor, *, half_x: float, half_z: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torch mirror of `paddle_model.paddle_pair_geometry` (batched over worlds).
+
+    Args:
+        pose: `(nworld, 2, 3)` measured paddle poses `(x, z, tilt)`.
+        half_x: Paddle half extent along its face x axis (m, XML-owned).
+        half_z: Paddle half thickness (m, XML-owned).
+
+    Returns:
+        `(penetration, separation)` `(nworld,)` tensors: exactly one is zero per world.
+    """
+    delta_x = pose[:, 1, 0] - pose[:, 0, 0]
+    delta_z = pose[:, 1, 1] - pose[:, 0, 1]
+    sin_left, cos_left = pose[:, 0, 2].sin(), pose[:, 0, 2].cos()
+    sin_right, cos_right = pose[:, 1, 2].sin(), pose[:, 1, 2].cos()
+    zeros = torch.zeros_like(delta_x)
+    ones = torch.ones_like(delta_x)
+    axes = (
+        (ones, zeros),
+        (zeros, ones),
+        (sin_left, cos_left),
+        (cos_left, -sin_left),
+        (sin_right, cos_right),
+        (cos_right, -sin_right),
+    )
+    overlaps = []
+    for axis_x, axis_z in axes:
+        left_extent = (
+            half_x * (cos_left * axis_x - sin_left * axis_z).abs()
+            + half_z * (sin_left * axis_x + cos_left * axis_z).abs()
+        )
+        right_extent = (
+            half_x * (cos_right * axis_x - sin_right * axis_z).abs()
+            + half_z * (sin_right * axis_x + cos_right * axis_z).abs()
+        )
+        axis_gap = (delta_x * axis_x + delta_z * axis_z).abs()
+        overlaps.append(left_extent + right_extent - axis_gap)
+    narrowest = torch.stack(overlaps, dim=1).min(dim=1).values
+    return narrowest.clamp(min=0.0), (-narrowest).clamp(min=0.0)
+
+
 # --- Warp kernels used by the toss-catch control step -------------------------------------
 #
 # They are defined at module level only where Warp is importable (the `sandbox-gpu` extra), so
 # importing this module on macOS/CI does not need the GPU stack.
 
 if wp is not None:
-
-    @wp.kernel
-    def _apply_paddle_pose(
-        pose: wp.array3d(dtype=wp.vec3),
-        quat: wp.array3d(dtype=wp.quat),
-        substep: int,
-        pad_mocap: wp.array(dtype=int),
-        mocap_pos: wp.array2d(dtype=wp.vec3),
-        mocap_quat: wp.array2d(dtype=wp.quat),
-        flags: wp.array2d(dtype=int),
-    ):
-        """Write the substep's interpolated paddle pose and clear its contact flag."""
-        world, side = wp.tid()
-        mocap = pad_mocap[side]
-        pose_world = pose[substep, world, side]
-        mocap_pos[world, mocap] = wp.vec3(pose_world[0], 0.0, pose_world[1])
-        mocap_quat[world, mocap] = quat[substep, world, side]
-        flags[world, side] = 0
 
     @wp.kernel
     def _contact_flags(
@@ -356,6 +461,26 @@ if wp is not None:
                 first == right_geom and second == ball_geom
             ):
                 flags[world, 1] = 1
+
+    @wp.kernel
+    def _pad_pair_contacts(
+        contact_geom: wp.array(dtype=wp.vec2i),
+        contact_worldid: wp.array(dtype=int),
+        nacon: wp.array(dtype=int),
+        left_shell: int,
+        right_shell: int,
+        flags: wp.array(dtype=int),
+    ):
+        """Mark the worlds whose two pad collision shells are in contact in this substep."""
+        index = wp.tid()
+        if index < nacon[0]:
+            geom = contact_geom[index]
+            first = geom[0]
+            second = geom[1]
+            if (first == left_shell and second == right_shell) or (
+                first == right_shell and second == left_shell
+            ):
+                flags[contact_worldid[index]] = 1
 
     @wp.kernel
     def _update_passes(
@@ -555,9 +680,21 @@ class CoopBatchGPU:
             )
         cfg = self.config
         self.partner_mode = partner_mode
+        # `validate_occlusion` is a pure validator on the CPU path; keep the assignment here
+        # independent of its return value so the GPU backend is robust to either form.
+        self.occlusion = getattr(self.config, "occlusion", "none")
+        validate_occlusion(self.occlusion)
         self.num_envs = int(num_envs)
         self._spec = task_spec(task)
-        self.obs_dim = obs_size(self._spec, partner_mode)
+        self.obs_dim = obs_size(self._spec, partner_mode, occlusion=self.occlusion)
+        self._shared_indices = {
+            role: torch.tensor(
+                shared_field_indices(self._spec, role, self.occlusion),
+                dtype=torch.long,
+                device=self._torch_device,
+            )
+            for role in AGENT_KEYS
+        }
         self.action_dim = self._spec.action_dim
         self._base_seed = int(seed)
         self._next_seed = self._base_seed + self.num_envs
@@ -586,16 +723,24 @@ class CoopBatchGPU:
             self._ctrl = None
         if self._qpos.dtype != torch.float32:
             raise RuntimeError(f"unexpected qpos dtype {self._qpos.dtype}")
-        self._mocap_pos = None
-        self._mocap_quat = None
         self._contact_geom = None
         self._contact_worldid = None
         self._model_damping = None
         self._model_solref = None
         self._model_friction = None
+        self._ready_x_offset = 0.0
         if task == "toss":
-            self._mocap_pos = wp.to_torch(self._data.mocap_pos)
-            self._mocap_quat = wp.to_torch(self._data.mocap_quat)
+            # The physical ready pose is shared with the CPU env (`toss_catch`): import it
+            # lazily so this module stays importable without the MuJoCo dependency chain.
+            from callosum.experiments.coop_tasks.toss_catch import _READY_X_OFFSET
+
+            self._ready_x_offset = _READY_X_OFFSET
+        if task == "toss":
+            if self._ctrl is None:
+                raise RuntimeError(
+                    "the physical toss_catch.xml needs the six paddle servos, but "
+                    "mujoco_warp did not expose `data.ctrl`; check the mujoco-warp version"
+                )
             self._contact_geom = wp.to_torch(self._data.contact.geom)
             self._contact_worldid = wp.to_torch(self._data.contact.worldid)
             self._model_solref = wp.to_torch(self._model.geom_solref)
@@ -649,7 +794,7 @@ class CoopBatchGPU:
         self._prev_potential = torch.zeros(self.num_envs, dtype=torch.float32, device=zeros)
         self._episode_return = torch.zeros(self.num_envs, dtype=torch.float64, device=zeros)
         self._episode_length = torch.zeros(self.num_envs, dtype=torch.int64, device=zeros)
-        self._obs_blocks = observation_blocks(self._spec, partner_mode)
+        self._obs_blocks = observation_blocks(self._spec, partner_mode, self.occlusion)
         self._zero = torch.zeros((), dtype=torch.float32, device=zeros)
         self._reward_success = torch.tensor(
             cfg.reward.success_bonus - cfg.reward.step_penalty,
@@ -679,7 +824,7 @@ class CoopBatchGPU:
         return (1.0, -1.0)
 
     def _resolve_model_ids(self, model) -> None:
-        """Resolve the task's joint/body/geom/mocap ids after loading the MJCF."""
+        """Resolve the task's joint/body/geom/actuator ids after loading the MJCF."""
         self._cart_joint = -1
         self._pole_joint = -1
         self._cart_qpos = self._cart_dof = self._pole_qpos = self._pole_dof = -1
@@ -690,9 +835,12 @@ class CoopBatchGPU:
         self._ball_body = self._ball_geom = -1
         self._ball_qpos = self._ball_dof = -1
         self._pad_geom: dict[str, int] = {}
-        self._pad_mocap: dict[str, int] = {}
-        self._pad_mocap_ids: dict[str, int] = {}
-        self._mocap_count = 0
+        self._pad_shell: dict[str, int] = {}
+        self._pad_qpos_index: list[int] = []
+        self._pad_dof_index: list[int] = []
+        self._pad_actuator_index: list[int] = []
+        self._pad_half_x = 0.0
+        self._pad_half_z = 0.0
         if self.task == "cartpole":
             self._cart_joint = int(model.joint("cart_slide").id)
             self._pole_joint = int(model.joint("pole_hinge").id)
@@ -726,17 +874,36 @@ class CoopBatchGPU:
             self._ball_body = int(model.body("ball").id)
             self._ball_geom = int(model.geom("ball_geom").id)
             for side, body_name in (("left", "pad_left"), ("right", "pad_right")):
-                body = model.body(body_name)
                 self._pad_geom[side] = int(model.geom(f"{body_name}_geom").id)
-                self._pad_mocap[side] = int(body.mocapid[0])
-            layout = (self._ball_qpos, self._ball_dof, model.nq, model.nv)
-            if layout != (0, 0, 7, 6):
+                self._pad_shell[side] = int(model.geom(f"{body_name}_shell").id)
+            # Physical paddle joints/actuators, in the CPU's `_PAD_JOINTS`/`_PAD_ACTUATORS`
+            # order: per side `(x, z, tilt)`, all six DOFs after the ball's six.
+            self._pad_qpos_index: list[int] = []
+            self._pad_dof_index: list[int] = []
+            self._pad_actuator_index: list[int] = []
+            for side in AGENT_KEYS:
+                for axis in ("x", "z", "tilt"):
+                    joint = int(model.joint(f"pad_{side}_{axis}").id)
+                    self._pad_qpos_index.append(int(model.jnt_qposadr[joint]))
+                    self._pad_dof_index.append(int(model.jnt_dofadr[joint]))
+                    self._pad_actuator_index.append(
+                        int(model.actuator(f"pad_{side}_{axis}_servo").id)
+                    )
+            layout = (self._ball_qpos, self._ball_dof, model.nq, model.nv, model.nu)
+            if layout != (0, 0, 13, 12, 6):
                 raise RuntimeError(
-                    "this GPU backend assumes the toss_catch.xml layout (one free ball joint "
-                    f"at qpos/dof 0, nq=7, nv=6), got qpos={self._ball_qpos}, "
-                    f"dof={self._ball_dof}, nq={model.nq}, nv={model.nv}"
+                    "this GPU backend assumes the physical toss_catch.xml layout (one free "
+                    "ball joint at qpos/dof 0, two x/z/tilt paddle joints, 6 servos; nq=13, "
+                    f"nv=12, nu=6), got qpos={self._ball_qpos}, dof={self._ball_dof}, "
+                    f"nq={model.nq}, nv={model.nv}, nu={model.nu}"
                 )
-            self._mocap_count = int(model.nmocap)
+            if int(model.nmocap) != 0:
+                raise RuntimeError(
+                    "the physical toss_catch.xml must have no MOCAP bodies, got "
+                    f"nmocap={model.nmocap}"
+                )
+            self._pad_half_x = float(model.geom_size[self._pad_geom["left"]][0])
+            self._pad_half_z = float(model.geom_size[self._pad_geom["left"]][2])
 
     def _write_host_model(self, model, cfg) -> None:
         """Write the config's timing/physics into the host model (config as truth)."""
@@ -752,6 +919,18 @@ class CoopBatchGPU:
             model.dof_damping[self._hinge_dof] = cfg.hinge_damping
             model.dof_armature[self._hinge_dof] = cfg.hinge_armature
         elif self.task == "toss":
+            # Config-as-truth joint workspace and servo target ranges (the XML ranges are
+            # placeholders matching the config defaults): a servo can never be asked to
+            # leave its own joint range.
+            z_range = (cfg.pad_min_z, cfg.pad_max_z)
+            tilt_range = (-cfg.pad_tilt_limit, cfg.pad_tilt_limit)
+            for side in AGENT_KEYS:
+                x_range = cfg.paddle_x_range(side)
+                for axis, joint_range in zip(("x", "z", "tilt"), (x_range, z_range, tilt_range)):
+                    model.jnt_range[int(model.joint(f"pad_{side}_{axis}").id)] = joint_range
+                    model.actuator_ctrlrange[int(model.actuator(f"pad_{side}_{axis}_servo").id)] = (
+                        joint_range
+                    )
             # The per-episode damping ratio/friction are batched per world and overwritten on
             # every reset; the host values below only seed the broadcast, and the nonzero
             # friction avoids mujoco_warp's zero-friction NaN warning at construction.
@@ -760,7 +939,13 @@ class CoopBatchGPU:
                 model.geom_friction[geom, 0] = 0.5
 
     def _batch_sizes(self) -> dict[str, int]:
-        """The per-world model fields `mujoco_warp.put_model` must batch."""
+        """The per-world model fields `mujoco_warp.put_model` must batch.
+
+        The toss-catch batches only the ball/plate contact parameters: the paddles' servo
+        gains and force limits are XML-owned and identical in every world (the per-agent
+        gain/authority randomisation is applied to the COMMANDS by the env, exactly as on the
+        CPU path).
+        """
         if self.task in ("cartpole", "pendulum"):
             return {"dof_damping": self.num_envs}
         return {"geom_solref": self.num_envs, "geom_friction": self.num_envs}
@@ -774,10 +959,11 @@ class CoopBatchGPU:
         """Run the physics part of one control step (what the CUDA graph captures).
 
         For the contact-free tasks this is `control_every` plain `mujoco_warp.step` calls. The
-        toss-catch additionally writes the substep's interpolated paddle pose (from the
-        per-step pose/quaternion banks), clears the substep contact flags, detects the
-        ball/paddle contacts and updates the alternating pass counter -- all inside the same
-        captured sequence, so the graph replay reproduces the CPU `_on_substep` loop.
+        toss-catch additionally detects the ball/paddle contacts, counts the pad/pad contact
+        shell contacts and updates the alternating pass counter on every substep -- all inside
+        the same captured sequence, so the graph replay reproduces the CPU `_on_substep` loop.
+        The paddle servo targets are NOT written here: like the CPU env's `data.ctrl`, they are
+        a per-control-step torch write (`_prepare_toss_step`) that the replay sees in memory.
         """
         cfg = self.config
         if self.task != "toss":
@@ -785,20 +971,7 @@ class CoopBatchGPU:
                 self._physics_step(self._model, self._data)
             return
         warp = self._warp
-        for substep in range(cfg.control_every):
-            warp.launch(
-                _apply_paddle_pose,
-                dim=(self.num_envs, 2),
-                inputs=[
-                    self._pose_bank,
-                    self._quat_bank,
-                    substep,
-                    self._pad_mocap_array,
-                    self._data.mocap_pos,
-                    self._data.mocap_quat,
-                    self._flags_warp,
-                ],
-            )
+        for _substep in range(cfg.control_every):
             self._physics_step(self._model, self._data)
             warp.launch(
                 _contact_flags,
@@ -811,6 +984,18 @@ class CoopBatchGPU:
                     self._pad_geom["left"],
                     self._pad_geom["right"],
                     self._flags_warp,
+                ],
+            )
+            warp.launch(
+                _pad_pair_contacts,
+                dim=self._contact_geom.shape[0],
+                inputs=[
+                    self._data.contact.geom,
+                    self._data.contact.worldid,
+                    self._data.nacon,
+                    self._pad_shell["left"],
+                    self._pad_shell["right"],
+                    self._pad_contact_warp,
                 ],
             )
             warp.launch(
@@ -832,9 +1017,9 @@ class CoopBatchGPU:
         """Capture the control-step physics into a CUDA graph (or fail soft).
 
         The captured sequence touches only the fixed Warp model/data arrays, so it can be
-        replayed after the per-step torch writes of `qpos`/`qvel`/`xfrc_applied`/the per-world
-        damping or contact fields/the toss paddle pose banks. A capture failure (unsupported
-        toolkit/driver) is not fatal: the env falls back to the eager loop.
+        replayed after the per-step torch writes of `qpos`/`qvel`/`ctrl`/`xfrc_applied`/the
+        per-world damping or contact fields. A capture failure (unsupported toolkit/driver) is
+        not fatal: the env falls back to the eager loop.
 
         Returns:
             The captured `warp.Graph`, or `None` when capture is unsupported here.
@@ -938,7 +1123,6 @@ class CoopBatchGPU:
     def _new_task_state_buffers(self) -> dict[str, torch.Tensor]:
         """The task-specific episode trackers (pendulum amplitude, toss pass counter, paddles)."""
         device = self._torch_device
-        cfg = self.config
         buffers: dict[str, torch.Tensor] = {}
         if self.task == "pendulum":
             buffers["peak_abs_angle"] = torch.zeros(
@@ -951,52 +1135,55 @@ class CoopBatchGPU:
                 self.num_envs, dtype=torch.int64, device=device
             )
         elif self.task == "toss":
-            pads = 2
-            self._pad_start = torch.zeros(
-                (self.num_envs, pads, 3), dtype=torch.float32, device=device
+            # The physical paddles: per side `(x, z, tilt)` measured joint state, servo targets,
+            # measured joint velocities, pass/contact trackers and the geometry diagnostics.
+            self._pad_qpos_tensor = torch.tensor(
+                self._pad_qpos_index, dtype=torch.long, device=device
             )
-            self._pad_target = torch.zeros_like(self._pad_start)
-            self._pad_velocity = torch.zeros_like(self._pad_start)
+            self._pad_dof_tensor = torch.tensor(
+                self._pad_dof_index, dtype=torch.long, device=device
+            )
+            self._pad_actuator_tensor = torch.tensor(
+                self._pad_actuator_index, dtype=torch.long, device=device
+            )
+            self._pad_state = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=device)
+            self._pad_vel_state = torch.zeros_like(self._pad_state)
+            self._pad_pose = self._pad_state.view(self.num_envs, 2, 3)
+            self._pad_velocity = self._pad_vel_state.view(self.num_envs, 2, 3)
+            self._pad_target = torch.zeros(
+                (self.num_envs, 2, 3), dtype=torch.float32, device=device
+            )
             self._launch_velocity = torch.zeros(
                 (self.num_envs, 3), dtype=torch.float32, device=device
             )
             self._release_step = torch.zeros(self.num_envs, dtype=torch.int64, device=device)
-            self._pose_bank = wp.to_torch(
-                wp.zeros((cfg.control_every, self.num_envs, pads), dtype=wp.vec3)
-            )
-            self._quat_bank = wp.to_torch(
-                wp.zeros((cfg.control_every, self.num_envs, pads), dtype=wp.quat)
-            )
-            self._flags_warp = wp.zeros((self.num_envs, pads), dtype=int)
-            self._contact_side_warp = wp.zeros((self.num_envs, pads), dtype=int)
+            self._flags_warp = wp.zeros((self.num_envs, 2), dtype=int)
+            self._contact_side_warp = wp.zeros((self.num_envs, 2), dtype=int)
             self._passes_warp = wp.zeros(self.num_envs, dtype=int)
             self._last_side_warp = wp.zeros(self.num_envs, dtype=int)
             self._pass_cooldown_warp = wp.zeros(self.num_envs, dtype=int)
+            self._pad_contact_warp = wp.zeros(self.num_envs, dtype=int)
             self._flags = wp.to_torch(self._flags_warp)
             self._contact_side = wp.to_torch(self._contact_side_warp)
             self._passes = wp.to_torch(self._passes_warp)
             self._last_side = wp.to_torch(self._last_side_warp)
             self._pass_cooldown = wp.to_torch(self._pass_cooldown_warp)
+            self._pad_contact_flag = wp.to_torch(self._pad_contact_warp)
             self._last_pass_step = torch.full(
                 (self.num_envs,), -1, dtype=torch.int64, device=device
             )
-            self._pad_mocap_array = wp.array(
-                np.asarray([self._pad_mocap["left"], self._pad_mocap["right"]], dtype=np.int32),
-                dtype=int,
+            self._pad_penetration = torch.zeros(self.num_envs, dtype=torch.float32, device=device)
+            self._pad_min_gap = torch.full(
+                (self.num_envs,), float("inf"), dtype=torch.float32, device=device
             )
-            self._alpha = torch.tensor(
-                [(substep + 1) / cfg.control_every for substep in range(cfg.control_every)],
-                dtype=torch.float32,
-                device=device,
-            ).view(cfg.control_every, 1, 1)
+            self._pad_contact_steps = torch.zeros(self.num_envs, dtype=torch.int64, device=device)
             self._ready_pose = self._initial_pad_pose()
-            self._pad_pose = torch.zeros_like(self._pad_start)
         return buffers
 
     def _initial_pad_pose(self) -> torch.Tensor:
         """The ready pose `(2, 3)` of the two paddles: `(x, z, tilt)` per side, CPU-identical."""
         cfg = self.config
-        mid_x = cfg.pad_inner_x + 0.10
+        mid_x = cfg.pad_inner_x + self._ready_x_offset
         pose = torch.empty((2, 3), dtype=torch.float32, device=self._torch_device)
         pose[0, 0] = -mid_x
         pose[1, 0] = mid_x
@@ -1141,7 +1328,7 @@ class CoopBatchGPU:
             self._model_damping[indices, dof] = damping[indices]
 
     def _write_task_state(self, indices: torch.Tensor | None) -> None:
-        """Reset the task-specific episode trackers (and the toss-catch paddles/mocap poses)."""
+        """Reset the task-specific episode trackers (and the toss-catch paddle state/targets)."""
         if self.task == "pendulum":
             initial = self._rand_episode["initial_value"]
             values = initial if indices is None else initial[indices]
@@ -1167,10 +1354,12 @@ class CoopBatchGPU:
                 self._launch_velocity[:, 1] = 0.0
                 self._launch_velocity[:, 2] = launch[:, 1]
                 self._release_step.copy_(self._rand_episode["release_delay_steps"])
-                self._pad_pose.copy_(self._ready_pose.unsqueeze(0).expand(self.num_envs, -1, -1))
-                self._pad_velocity.zero_()
-                for side_index, side in enumerate(AGENT_KEYS):
-                    self._write_mocap_pose(None, side_index, side)
+                self._pad_target.copy_(self._ready_pose.unsqueeze(0).expand(self.num_envs, -1, -1))
+                self._write_pad_joints(None)
+                self._pad_penetration.zero_()
+                self._pad_min_gap.fill_(float("inf"))
+                self._pad_contact_steps.zero_()
+                self._pad_contact_flag.zero_()
             else:
                 self._passes[indices] = 0
                 self._contact_side[indices] = 0
@@ -1181,34 +1370,38 @@ class CoopBatchGPU:
                 self._launch_velocity[indices, 1] = 0.0
                 self._launch_velocity[indices, 2] = launch[indices, 1]
                 self._release_step[indices] = self._rand_episode["release_delay_steps"][indices]
-                self._pad_pose[indices] = self._ready_pose
-                self._pad_velocity[indices] = 0.0
-                for side_index, side in enumerate(AGENT_KEYS):
-                    self._write_mocap_pose(indices, side_index, side)
-            self._pad_start.copy_(self._pad_pose)
-            self._pad_target.copy_(self._pad_pose)
+                self._pad_target[indices] = self._ready_pose
+                self._write_pad_joints(indices)
+                self._pad_penetration[indices] = 0.0
+                self._pad_min_gap[indices] = float("inf")
+                self._pad_contact_steps[indices] = 0
+                self._pad_contact_flag[indices] = 0
 
-    def _write_mocap_pose(self, indices: torch.Tensor | None, side_index: int, side: str) -> None:
-        """Write one paddle's ready pose into the Warp `mocap_pos`/`mocap_quat` arrays."""
-        mocap = self._pad_mocap[side]
-        pose = self._ready_pose[side_index]
-        half = pose[2] * 0.5
+    def _write_pad_joints(self, indices: torch.Tensor | None) -> None:
+        """Place the paddle joints at their servo targets (reset only; servos move them after).
+
+        The measured paddle state buffers are also refreshed here, so the fresh observation
+        of a reset world reports the ready pose before the first physics step.
+        """
+        ready = self._ready_pose.reshape(1, 6).expand(self.num_envs, -1)
         if indices is None:
-            self._mocap_pos[:, mocap, 0] = pose[0]
-            self._mocap_pos[:, mocap, 1] = 0.0
-            self._mocap_pos[:, mocap, 2] = pose[1]
-            self._mocap_quat[:, mocap, 0] = torch.cos(half)
-            self._mocap_quat[:, mocap, 1] = 0.0
-            self._mocap_quat[:, mocap, 2] = torch.sin(half)
-            self._mocap_quat[:, mocap, 3] = 0.0
+            self._qpos[:, self._pad_qpos_tensor] = ready
+            self._qvel[:, self._pad_dof_tensor] = 0.0
+            self._pad_state.copy_(ready)
+            self._pad_vel_state.zero_()
             return
-        self._mocap_pos[indices, mocap, 0] = pose[0]
-        self._mocap_pos[indices, mocap, 1] = 0.0
-        self._mocap_pos[indices, mocap, 2] = pose[1]
-        self._mocap_quat[indices, mocap, 0] = torch.cos(half)
-        self._mocap_quat[indices, mocap, 1] = 0.0
-        self._mocap_quat[indices, mocap, 2] = torch.sin(half)
-        self._mocap_quat[indices, mocap, 3] = 0.0
+        self._qpos[indices[:, None], self._pad_qpos_tensor[None, :]] = ready[indices]
+        self._qvel[indices[:, None], self._pad_dof_tensor[None, :]] = 0.0
+        self._pad_state[indices] = ready[indices]
+        self._pad_vel_state[indices] = 0.0
+
+    def _write_pad_ctrl(self, indices: torch.Tensor | None) -> None:
+        """Write the paddle servo targets into `data.ctrl` (the position-servo references)."""
+        targets = self._pad_target.reshape(self.num_envs, 6)
+        if indices is None:
+            self._ctrl[:, self._pad_actuator_tensor] = targets
+            return
+        self._ctrl[indices[:, None], self._pad_actuator_tensor[None, :]] = targets[indices]
 
     def _reset_solver_state(self, indices: torch.Tensor | None) -> None:
         """Zero the solver/actuator state the CPU env's `mj_resetData` clears on reset."""
@@ -1226,6 +1419,10 @@ class CoopBatchGPU:
                 data_field.zero_()
             else:
                 data_field[indices] = 0.0
+        if self.task == "toss":
+            # `data.ctrl` was just cleared; a position servo with a zero target would drive
+            # the plate to its joint limit, so the ready servo targets are written back.
+            self._write_pad_ctrl(indices)
 
     @staticmethod
     def _agent_params(fields: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -1256,6 +1453,9 @@ class CoopBatchGPU:
         cfg = self.config
         self._time_fraction[:, 0] = self._step.to(torch.float32) / cfg.max_control_steps
         shared = self._shared_state_tensor()
+        shared_by_role = {
+            role: shared.index_select(1, self._shared_indices[role]) for role in AGENT_KEYS
+        }
         goal = self._goal_tensor()
         per_agent = {}
         for role in AGENT_KEYS:
@@ -1270,7 +1470,13 @@ class CoopBatchGPU:
             parts: list[torch.Tensor] = []
             for key, owner in self._obs_blocks[role]:
                 if owner is None:
-                    parts.append({"shared": shared, "goal": goal, "time": self._time_fraction}[key])
+                    parts.append(
+                        {
+                            "shared": shared_by_role[role],
+                            "goal": goal,
+                            "time": self._time_fraction,
+                        }[key]
+                    )
                 else:
                     parts.append(per_agent[owner][key])
             observations[role] = torch.cat(parts, dim=1)
@@ -1297,10 +1503,10 @@ class CoopBatchGPU:
         )
         pads = torch.cat(
             (
-                self._pad_pose[:, 0, :],
-                self._pad_velocity[:, 0, :],
-                self._pad_pose[:, 1, :],
-                self._pad_velocity[:, 1, :],
+                self._pad_state[:, 0:3],
+                self._pad_vel_state[:, 0:3],
+                self._pad_state[:, 3:6],
+                self._pad_vel_state[:, 3:6],
             ),
             dim=1,
         )
@@ -1361,6 +1567,7 @@ class CoopBatchGPU:
             # `min_pass_interval_steps` by the captured kernel on every counted pass and aged
             # here once per control step (0 stays 0, so a fresh episode can pass immediately).
             self._pass_cooldown.sub_(1).clamp_(min=0)
+            self._pad_contact_flag.zero_()
             passes_before = self._passes.clone()
             self._prepare_toss_step(applied)
         else:
@@ -1483,7 +1690,14 @@ class CoopBatchGPU:
 
     # --- task-specific step mechanics ---------------------------------------------------
     def _prepare_toss_step(self, applied: dict[str, torch.Tensor]) -> None:
-        """Release the hidden throw impulse and write the paddles' per-substep pose banks."""
+        """Release the hidden throw impulse and advance the paddle servo targets + `data.ctrl`.
+
+        The command is a bounded pose increment of the servo TARGET (never of the measured
+        joint), exactly like the CPU `TossCatchEnv._apply_task_actions`: the plates then
+        physically track the target with their bounded-force position servos. The commanded
+        target pair is projected apart when the two plate boxes would overlap (the pure
+        `paddle_model.project_targets_apart` rule, mirrored here in torch).
+        """
         cfg = self.config
         ball_dof = self._ball_dof
         release = self._step == self._release_step
@@ -1492,59 +1706,62 @@ class CoopBatchGPU:
             self._qvel[:, ball_dof : ball_dof + 3] = torch.where(
                 release.unsqueeze(1), self._launch_velocity, current
             )
-        start = self._pad_pose
-        max_step = cfg.pad_speed * cfg.control_dt
-        max_dtilt = cfg.pad_tilt_rate * cfg.control_dt
-        target = torch.empty_like(start)
+        target = self._pad_target.clone()
         x_ranges = (
             (-cfg.pad_outer_x, -cfg.pad_inner_x),
             (cfg.pad_inner_x, cfg.pad_outer_x),
         )
         for side_index, role in enumerate(AGENT_KEYS):
             rand = self._rand_agents[role]
+            # `authority` is `(nworld,)`: the sampled per-agent gain x limit scale.
             authority = rand["gain"] * rand["limit_scale"]
+            max_step = (cfg.pad_speed * cfg.control_dt * authority).unsqueeze(1)
+            max_dtilt = (cfg.pad_tilt_rate * cfg.control_dt * authority).unsqueeze(1)
             command = applied[role]
             low_x, high_x = x_ranges[side_index]
             target[:, side_index, 0] = torch.clamp(
-                start[:, side_index, 0] + command[:, 0] * max_step * authority, low_x, high_x
+                target[:, side_index, 0] + command[:, 0] * max_step.squeeze(1), low_x, high_x
             )
             target[:, side_index, 1] = torch.clamp(
-                start[:, side_index, 1] + command[:, 1] * max_step * authority,
+                target[:, side_index, 1] + command[:, 1] * max_step.squeeze(1),
                 cfg.pad_min_z,
                 cfg.pad_max_z,
             )
             target[:, side_index, 2] = torch.clamp(
-                start[:, side_index, 2] + command[:, 2] * max_dtilt * authority,
+                target[:, side_index, 2] + command[:, 2] * max_dtilt.squeeze(1),
                 -cfg.pad_tilt_limit,
                 cfg.pad_tilt_limit,
             )
-        self._pad_start.copy_(start)
-        self._pad_target.copy_(target)
-        self._write_pose_banks()
+        left, right = self._project_pad_targets(target)
+        self._pad_target[:, 0].copy_(left)
+        self._pad_target[:, 1].copy_(right)
+        self._write_pad_ctrl(None)
 
-    def _write_pose_banks(self) -> None:
-        """Interpolate the paddles' poses over the substeps into the captured-graph banks."""
-        pads = self._pad_start
-        poses = pads.unsqueeze(0) + self._alpha.unsqueeze(-1) * (
-            self._pad_target.unsqueeze(0) - pads.unsqueeze(0)
+    def _project_pad_targets(self, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project a pair of paddle servo targets apart (the module-level torch mirror)."""
+        cfg = self.config
+        return project_pad_targets(
+            target,
+            half_x=self._pad_half_x,
+            half_z=self._pad_half_z,
+            left_x_range=cfg.paddle_x_range("left"),
+            right_x_range=cfg.paddle_x_range("right"),
         )
-        half = poses[:, :, :, 2] * 0.5
-        quats = torch.stack(
-            (
-                torch.cos(half),
-                torch.zeros_like(half),
-                torch.sin(half),
-                torch.zeros_like(half),
-            ),
-            dim=-1,
-        )
-        self._pose_bank.copy_(poses)
-        self._quat_bank.copy_(quats)
+
+    def _pad_pair_sat(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """The torch mirror of `paddle_model.paddle_pair_geometry` on the measured poses."""
+        return pad_pair_sat(self._pad_pose, half_x=self._pad_half_x, half_z=self._pad_half_z)
 
     def _finish_toss_step(self) -> None:
-        """Update the paddles' reported pose/velocity after the step (CPU `_after_step`)."""
-        self._pad_pose.copy_(self._pad_target)
-        self._pad_velocity.copy_((self._pad_target - self._pad_start) / self.config.control_dt)
+        """Update the measured paddle state and the plate/plate geometry diagnostics."""
+        self._pad_state.copy_(self._qpos.index_select(1, self._pad_qpos_tensor))
+        self._pad_vel_state.copy_(self._qvel.index_select(1, self._pad_dof_tensor))
+        penetration, separation = self._pad_pair_sat()
+        self._pad_penetration = torch.maximum(self._pad_penetration, penetration)
+        self._pad_min_gap = torch.minimum(self._pad_min_gap, separation)
+        touching = self._pad_contact_flag.to(torch.bool)
+        self._pad_contact_steps = self._pad_contact_steps + touching.to(torch.int64)
+        self._pad_contact_flag.zero_()
 
     def _update_pendulum_tracker(self) -> None:
         """The CPU `PendulumEnv._after_step` amplitude / zero-crossing tracker, batched."""
@@ -1699,6 +1916,9 @@ class CoopBatchGPU:
                     self._qpos[rows, 0].to(torch.float64),
                     self._qpos[rows, 2].to(torch.float64),
                     torch.sqrt(ball_vx**2 + ball_vz**2),
+                    self._pad_min_gap[rows].to(torch.float64),
+                    self._pad_penetration[rows].to(torch.float64),
+                    self._pad_contact_steps[rows].to(torch.float64),
                     step_time,
                 ),
                 dim=1,
@@ -1711,10 +1931,18 @@ class CoopBatchGPU:
                 "ball_x",
                 "ball_z",
                 "ball_speed",
+                "pad_min_gap",
+                "pad_penetration",
+                "pad_contact_steps",
                 "time",
             )
         for position, row_values in enumerate(values.cpu().tolist()):
-            info = {"success": bool(success[position])}
+            info = {
+                "success": bool(success[position]),
+                # The CPU env's `_info` records which observation layout the episode ran under
+                # (`1.0` = hidden partner); the evaluation writes it into the JSON report.
+                "occlusion_partner": float(self.occlusion == "partner"),
+            }
             info.update(zip(keys, (float(value) for value in row_values)))
             infos.append(info)
         return infos

@@ -41,7 +41,11 @@ reproducible from its seed and nothing crosses episode boundaries.
 
 The observation is a per-agent flat `spaces.Box` built by the pure
 `callosum.experiments.coop_tasks.logic.build_observation` from a role-tagged `values` dict; the partner
-block is present only under `partner_mode="oracle"`, so the "none" mode cannot leak it.
+block is present only under `partner_mode="oracle"`, so the "none" mode cannot leak it. The
+task config may additionally set `occlusion="partner"` (the hidden-partner `OccludedToss-v0`
+variant of `PLAN.md`): the env then hides the shared fields OWNED by the partner (the partner
+paddle) while keeping the shared object (the ball) and the agent's own fields; the privileged
+`oracle` partner block is not masked, so `oracle` stays the upper bound.
 """
 
 from __future__ import annotations
@@ -71,6 +75,7 @@ from callosum.experiments.coop_tasks.logic import (
     privileged_value_fields,
     sample_episode_randomization,
     team_reward,
+    validate_occlusion,
     validate_partner_mode,
     wind_active_on_step,
 )
@@ -121,7 +126,9 @@ class CoopTaskEnv(gymnasium.Env):
         """Load the MJCF model, write the config's parameters and build the spaces.
 
         Args:
-            config: The task config (the subclass's default config when `None`).
+            config: The task config (the subclass's default config when `None`). A config
+                with an `occlusion` field (the toss-catch `TossConfig`) selects the
+                hidden-partner observation variant; the other task configs have none.
             partner_mode: Observation visibility of the partner, `"none"` or `"oracle"`.
             render_mode: Unused -- the coop suite renders nothing; a non-None value is an
                 error rather than a silent no-op.
@@ -134,6 +141,9 @@ class CoopTaskEnv(gymnasium.Env):
             raise ValueError(f"{type(self).__name__} has no DEFAULT_CONFIG; pass config=")
         self.config = config if config is not None else default_config()
         self.partner_mode = partner_mode
+        # The hidden-partner variant lives in the task config (TossConfig.occlusion); tasks
+        # without the field are never occluded.
+        self.occlusion = validate_occlusion(getattr(self.config, "occlusion", "none"))
         self._task_spec = self.SPEC
 
         self._model = mujoco.MjModel.from_xml_path(str(_ASSETS_DIR / self.ASSET_NAME))
@@ -169,8 +179,8 @@ class CoopTaskEnv(gymnasium.Env):
 
     # --- setup ---------------------------------------------------------------------------
     def _obs_size(self) -> int:
-        """Width of one agent's flat observation under the env's partner mode."""
-        return obs_size(self._task_spec, self.partner_mode)
+        """Width of one agent's flat observation under the env's partner mode/occlusion."""
+        return obs_size(self._task_spec, self.partner_mode, occlusion=self.occlusion)
 
     def _write_model_params(self) -> None:
         """Write the config's timing and physics into the MuJoCo model.
@@ -409,13 +419,24 @@ class CoopTaskEnv(gymnasium.Env):
         """Both agents' flat observation vectors, from the pure `build_observation`."""
         values = self._values()
         return {
-            key: build_observation(values, key, self._task_spec, self.partner_mode)
+            key: build_observation(
+                values, key, self._task_spec, self.partner_mode, occlusion=self.occlusion
+            )
             for key in AGENT_KEYS
         }
 
     def _info(self, succeeded: bool) -> dict[str, float | bool]:
-        """The episode info dict: success flag plus the task's diagnostics."""
-        return {"success": bool(succeeded), **self._diagnostics()}
+        """The episode info dict: success flag, the occlusion variant and task diagnostics.
+
+        `occlusion_partner` is the numeric form of the env's occlusion variant (`1.0` for the
+        hidden-partner task, `0.0` otherwise), so an evaluation can record which observation
+        layout a checkpoint was judged under without string-valued info keys.
+        """
+        return {
+            "success": bool(succeeded),
+            "occlusion_partner": float(self.occlusion == "partner"),
+            **self._diagnostics(),
+        }
 
     def _diagnostics(self) -> dict[str, float]:
         """Human/CLI-readable task numbers of the current state (info dict)."""

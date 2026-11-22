@@ -456,10 +456,17 @@ class TossOracleParams:
     """Initial effective-restitution estimate used before the first observed bounce; the
     oracle then replaces it with the value it estimates from every observed bounce."""
 
-    reach_margin: float = 0.10
-    """Time margin (s) reserved so the paddle has arrived and stopped before the contact."""
+    reach_margin: float = 0.02
+    """Time margin (s) reserved before the contact for the servo to reach its target.
 
-    catch_clearance: float = 0.10
+    The paddles are physical bounded-force position servos now, not kinematic MOCAP bodies:
+    the servo settles one control step (0.04 s at the default timing) after the last target
+    change, and the target is already terminal at the planned contact, so the old 0.1 s
+    "arrived and stopped" margin made every plan with a realistic latency infeasible (the
+    ball is only airborne for ~0.5-0.8 s). Keeping one fifth of a control step of slack
+    matches the measured servo tracking error (~1 cm on a 0.27 m target step)."""
+
+    catch_clearance: float = 0.08
     """Minimum ball height above `floor_z` the oracle plans a contact for (m)."""
 
     plan_horizon: float = 1.6
@@ -544,7 +551,9 @@ class TossOracle:
         cfg = self.config
         state = env.state()
         step = int(state["step"])
-        pad = np.array([state[f"{side}_pad_x"], state[f"{side}_pad_z"]])
+        # The increments accumulate on the servo TARGET (the plate physically chases it), so
+        # the deadbeat command is computed in target space, not from the measured pose.
+        pad = np.array([state[f"{side}_pad_target_x"], state[f"{side}_pad_target_z"]])
         pending, pending_tilt = self._pending_offset(env, side, max_step, step)
         desired = np.array([target[0], target[1]]) - pad - pending
         norm = float(np.linalg.norm(desired))
@@ -556,7 +565,11 @@ class TossOracle:
         authority = agent.gain * agent.limit_scale
         max_dtilt = cfg.pad_tilt_rate * cfg.control_dt * authority
         d_tilt = float(
-            np.clip(target[2] - state[f"{side}_pad_tilt"] - pending_tilt, -max_dtilt, max_dtilt)
+            np.clip(
+                target[2] - state[f"{side}_pad_target_tilt"] - pending_tilt,
+                -max_dtilt,
+                max_dtilt,
+            )
         )
         return np.array([desired[0] / max_step, desired[1] / max_step, d_tilt / max_dtilt])
 
@@ -571,7 +584,7 @@ class TossOracle:
         state = env.state()
         scale = self._effective_limits(env)[side]
         step = int(state["step"])
-        pad = np.array([state[f"{side}_pad_x"], state[f"{side}_pad_z"]])
+        pad = np.array([state[f"{side}_pad_target_x"], state[f"{side}_pad_target_z"]])
         pending, _ = self._pending_offset(env, side, scale, step)
         future = pad + pending
         randomization = env.randomization
@@ -614,7 +627,7 @@ class TossOracle:
         assert randomization is not None
         latency = randomization.agents[AGENT_KEYS.index(side)].latency_steps * cfg.control_dt
         step = int(state["step"])
-        pad = np.array([state[f"{side}_pad_x"], state[f"{side}_pad_z"]])
+        pad = np.array([state[f"{side}_pad_target_x"], state[f"{side}_pad_target_z"]])
         pending, _ = self._pending_offset(env, side, scale, step)
         future = pad + pending
         other = partner_of(side)
@@ -665,7 +678,7 @@ class TossOracle:
         ball_vz = float(state["ball_vz"])
         ball_x = float(state["ball_x"])
         ball_vx = float(state["ball_vx"])
-        pad_z = float(state[f"{side}_pad_z"])
+        pad_z = float(state[f"{side}_pad_target_z"])
         tilt = paddle_tilt(side, cfg.pad_tilt)
         normal = pad_face_normal(tilt)
         offset = env.contact_offset()
@@ -714,13 +727,18 @@ class TossOracle:
             # A fresh episode: drop the per-episode plan/restitution caches so a reused
             # oracle instance (the smoke/eval loops build it once per env) cannot leak state.
             self._reset_episode()
-        ball_speed = math.hypot(state["ball_vx"], state["ball_vz"])
+        # The hidden release has not happened while the ball has no lateral velocity: the
+        # pre-release ball only free-falls (vx == 0). Testing the lateral component (not the
+        # full speed) keeps the anticipation loop from flip-flopping once gravity has given
+        # the ball a vertical velocity: with the physical servoed paddles a flip-flopping
+        # anticipation target would make the plate physically swing through the intercept.
+        launched = abs(state["ball_vx"]) > 1e-6
         limits = self._effective_limits(env)
-        if ball_speed < 1e-6:
-            # The hidden release has not happened yet: anticipate it by moving the receiving
-            # (right) paddle toward the middle of the court at the pre-throw height, while the
-            # left paddle waits at its ready pose. The hidden impulse then has to cover a much
-            # shorter distance for the first intercept.
+        if not launched:
+            # Anticipate the hidden throw by moving the receiving (right) paddle toward the
+            # middle of the court at the pre-throw height, while the left paddle waits at its
+            # ready pose. The hidden impulse then has to cover a much shorter distance for the
+            # first intercept.
             receive = (
                 env.paddle_receive_x(),
                 cfg.pad_ready_z,

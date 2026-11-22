@@ -37,11 +37,23 @@ Observation of ONE agent, in field order (`obs_fields`):
   (Bi-JEPA) has to supply. For the toss-catch task this is the partner's in-flight paddle
   command: the receiving agent must anticipate it to time its own paddle movement.
 
+The `occlusion` variant (PLAN.md "Hidden-partner regime") hides the partner's OWN actuator
+from the shared block: `CoopTaskSpec.shared_field_owners` tags every shared field with the
+agent it describes (the toss-catch paddles) or with `None` (the shared object: ball, cart,
+pendulum). Under `occlusion="partner"` an agent keeps the fields it owns and the fields owned
+by nobody, and drops the fields owned by its partner -- so the toss-catch agent still sees the
+ball and its own paddle but not the partner paddle's pose/velocity/tilt. The privileged
+partner block of `partner_mode="oracle"` is NOT masked by occlusion, so `oracle` remains the
+upper bound. `occlusion="none"` is the default and reproduces the historical layout
+bit-for-bit; the other coop tasks have no per-agent shared fields, so the variant cannot
+change their observation.
+
 The env does not assemble the vector itself: it collects one flat `{field: value}` dict of
-role-tagged facts and `build_observation(values, agent, spec, partner_mode)` selects and
-flattens the fields of `obs_fields(spec, partner_mode)`. Partner keys are always present in
-`values`; the mode alone decides whether they reach the vector, so the "none" leakage rule
-is concentrated in one pure function and tested bit-for-bit.
+role-tagged facts and `build_observation(values, agent, spec, partner_mode, occlusion=...)`
+selects and flattens the fields of `obs_fields(spec, partner_mode, agent=..., occlusion=...)`.
+Partner keys and the occluded shared keys are always present in `values`; the mode/occlusion
+alone decide whether they reach the vector, so the "none" leakage rule and the occlusion mask
+are concentrated in one pure function and tested bit-for-bit.
 
 The action path is testable here too: `delayed_command` is the per-agent latency queue (a
 command becomes the applied one exactly `latency_steps` steps later) and
@@ -75,6 +87,16 @@ PARTNER_MODES = ("none", "oracle")
 the trainer, not an env mode: the env stays at "none" and the predicted latent is appended
 by the trainer)."""
 
+OCCLUSION_MODES = ("none", "partner")
+"""Occlusion variants of the shared-state block (`PLAN.md` "Hidden-partner regime").
+
+`"none"` (the default) is the whole shared block, exactly as before the hidden-partner
+regime. `"partner"` drops the shared fields the PARTNER agent owns (see
+`CoopTaskSpec.shared_field_owners`) while keeping the fields the observing agent owns and
+the fields nobody owns (the shared object); the privileged `partner_mode="oracle"` block is
+not masked by it. Only a task with per-agent shared fields (the toss-catch paddles) can
+change under it."""
+
 TIME_FIELD = "time_fraction"
 """Name of the shared time-budget field (fraction of `max_control_steps` already used)."""
 
@@ -87,21 +109,65 @@ class CoopTaskSpec:
     """Static observation layout of one coop task.
 
     The env inherits all of its observation-assembly logic from the spec, so a new task
-    only declares its action width, its shared-state block and its goal block; the own and
-    partner blocks are shared by the whole suite.
+    only declares its action width, its shared-state block, its goal block and (optionally)
+    the owner of each shared field; the own and partner blocks are shared by the whole suite.
 
     Attributes:
-        name: Task name (`"cartpole"` / `"pendulum"`), matching the `--task` value.
-        action_dim: Width of ONE agent's continuous action (1 for both suite tasks).
+        name: Task name (`"cartpole"` / `"pendulum"` / `"toss"`), matching the `--task` value.
+        action_dim: Width of ONE agent's continuous action (1 for the one-sided tasks, 3 for
+            the toss-catch paddles).
         shared_fields: Names of the shared-state block, in `_shared_state_values` order.
         goal_fields: Names of the task-goal block, in `_goal_values` order (the shared
             `time_fraction` field is appended automatically by `obs_fields`).
+        shared_field_owners: Owner of each `shared_fields` entry, aligned with it: an agent
+            key for a field describing that agent's own actuator (the toss-catch paddles) or
+            `None` for a field both agents observe (the shared object). The default `()`
+            means every shared field is visible to both agents (the one-sided tasks). The
+            ownership is what `occlusion="partner"` masks and must be symmetric between the
+            two agents, so the observation width does not depend on the role.
     """
 
     name: str
     action_dim: int
     shared_fields: tuple[str, ...]
     goal_fields: tuple[str, ...]
+    shared_field_owners: tuple[str | None, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the optional owner mask (a mis-tagged field would leak or hide wrongly).
+
+        Raises:
+            ValueError: if the owner tuple does not align with `shared_fields`, names an
+                unknown agent, or gives the two agents different amounts of owned fields
+                (the observation width must not depend on the role).
+        """
+        owners = self.shared_field_owners
+        if not owners:
+            return
+        if len(owners) != len(self.shared_fields):
+            raise ValueError(
+                f"{self.name}: shared_field_owners has {len(owners)} entries for "
+                f"{len(self.shared_fields)} shared_fields"
+            )
+        for field_name, owner in zip(self.shared_fields, owners):
+            if owner is not None and owner not in AGENT_KEYS:
+                raise ValueError(
+                    f"{self.name}: shared field {field_name!r} has owner {owner!r}; expected "
+                    f"None or one of {AGENT_KEYS}"
+                )
+        for agent in AGENT_KEYS:
+            if sum(1 for owner in owners if owner == agent) == 0:
+                raise ValueError(
+                    f"{self.name}: shared_field_owners has no field owned by {agent!r}; an "
+                    "occludable task must own at least one shared field per agent"
+                )
+        counts = tuple(sum(1 for owner in owners if owner == agent) for agent in AGENT_KEYS)
+        if len(set(counts)) != 1:
+            raise ValueError(
+                f"{self.name}: shared_field_owners must be symmetric between the agents "
+                f"(owned-field counts {dict(zip(AGENT_KEYS, counts))}); otherwise the "
+                "occluded observation width would depend on the role"
+            )
 
 
 CARTPOLE_SPEC = CoopTaskSpec(
@@ -142,14 +208,35 @@ TOSS_SPEC = CoopTaskSpec(
         "right_pad_tilt_rate",
     ),
     goal_fields=("passes", "target_passes"),
+    shared_field_owners=(
+        None,
+        None,
+        None,
+        None,
+        "left",
+        "left",
+        "left",
+        "left",
+        "left",
+        "left",
+        "right",
+        "right",
+        "right",
+        "right",
+        "right",
+        "right",
+    ),
 )
 """TossCatch-v0: two tilted position-controlled paddles and a free ball.
 
 `action_dim=3` = the paddle's `(dx, dz, dtheta)` command: normalized translation in the
 court plane plus a tilt (about world +y) command. The shared block carries the ball state
 and both paddles' position/tilt/velocity, so each agent sees its own paddle, the ball, and
-(in `oracle` mode) the partner's in-flight command.
-"""
+(in `oracle` mode) the partner's in-flight command. Under `occlusion="partner"` (the
+`OccludedToss-v0` hidden-partner variant) the four ball fields stay visible to both agents
+and each agent keeps its own six paddle fields, so the layout drops from 16 shared fields to
+10 and the observation from 26/36 (none/oracle) to 20/30; the partner block of `oracle`
+(actions, commands, private parameters, start delay) is unchanged."""
 
 TASK_SPECS: dict[str, CoopTaskSpec] = {
     spec.name: spec for spec in (CARTPOLE_SPEC, PENDULUM_SPEC, TOSS_SPEC)
@@ -169,15 +256,37 @@ def task_spec(task: str) -> CoopTaskSpec:
     return TASK_SPECS[task]
 
 
-def task_obs_size(task: str, partner_mode: str) -> int:
-    """Width of one agent's flat observation of `task` under `partner_mode`."""
-    return obs_size(task_spec(task), partner_mode)
+def task_obs_size(task: str, partner_mode: str, occlusion: str = "none") -> int:
+    """Width of one agent's flat observation of `task` under `partner_mode`/`occlusion`."""
+    return obs_size(task_spec(task), partner_mode, occlusion=occlusion)
 
 
 def validate_partner_mode(mode: str) -> None:
     """Raise ValueError if `mode` isn't one of `PARTNER_MODES`."""
     if mode not in PARTNER_MODES:
         raise ValueError(f"partner_mode must be one of {PARTNER_MODES}, got {mode!r}")
+
+
+def validate_occlusion(mode: str) -> str:
+    """Validate `mode` against `OCCLUSION_MODES` and return it.
+
+    Unlike the other validators here this one RETURNS the validated mode, so an env wrapper
+    can write the safe assignment `self.occlusion = validate_occlusion(config.occlusion)`
+    without a second lookup (both the CPU `CoopTaskEnv` and the batched GPU backend use that
+    pattern).
+
+    Args:
+        mode: The occlusion mode to validate.
+
+    Returns:
+        `mode` unchanged, so the caller can store it.
+
+    Raises:
+        ValueError: if `mode` isn't one of `OCCLUSION_MODES`.
+    """
+    if mode not in OCCLUSION_MODES:
+        raise ValueError(f"occlusion must be one of {OCCLUSION_MODES}, got {mode!r}")
+    return mode
 
 
 def partner_of(agent: str) -> str:
@@ -224,19 +333,114 @@ def partner_fields(spec: CoopTaskSpec, mode: str) -> tuple[str, ...]:
     )
 
 
-def obs_fields(spec: CoopTaskSpec, mode: str) -> tuple[str, ...]:
-    """Full ordered field names of one agent's observation under `mode`."""
+def shared_fields_for(spec: CoopTaskSpec, agent: str, occlusion: str = "none") -> tuple[str, ...]:
+    """The shared-state fields `agent` observes under `occlusion`, in `spec.shared_fields` order.
+
+    Under `occlusion="none"` this is the whole shared block. Under `occlusion="partner"` the
+    fields OWNED by the partner are dropped (see `CoopTaskSpec.shared_field_owners`): the
+    observing agent keeps its own actuator's fields and the fields owned by nobody (the
+    shared object). A task whose spec declares no owners is unaffected by occlusion.
+
+    Args:
+        spec: The task's observation layout.
+        agent: `"left"` or `"right"` -- whose observation is being built.
+        occlusion: `"none"` or `"partner"`.
+
+    Returns:
+        The visible subset of `spec.shared_fields`, in its original order.
+
+    Raises:
+        ValueError: for an unknown agent or occlusion mode.
+    """
+    if agent not in AGENT_KEYS:
+        raise ValueError(f"agent must be one of {AGENT_KEYS}, got {agent!r}")
+    validate_occlusion(occlusion)
+    if occlusion == "none" or not spec.shared_field_owners:
+        return spec.shared_fields
+    hidden_owner = partner_of(agent)
+    return tuple(
+        field_name
+        for field_name, owner in zip(spec.shared_fields, spec.shared_field_owners)
+        if owner != hidden_owner
+    )
+
+
+def shared_field_indices(
+    spec: CoopTaskSpec, agent: str, occlusion: str = "none"
+) -> tuple[int, ...]:
+    """Column indices of `spec.shared_fields` `agent` observes under `occlusion`.
+
+    The batched backends build the whole shared-state tensor once per step and slice it with
+    these indices, so the occlusion mask lives only in the pure logic (no second copy of the
+    field -> column mapping in the simulator code).
+
+    Args:
+        spec: The task's observation layout.
+        agent: `"left"` or `"right"` -- whose observation is being built.
+        occlusion: `"none"` or `"partner"`.
+
+    Returns:
+        Ascending column indices (the identity for `occlusion="none"`).
+    """
+    visible = set(shared_fields_for(spec, agent, occlusion))
+    return tuple(
+        index for index, field_name in enumerate(spec.shared_fields) if field_name in visible
+    )
+
+
+def obs_fields(
+    spec: CoopTaskSpec,
+    mode: str,
+    *,
+    agent: str = AGENT_KEYS[0],
+    occlusion: str = "none",
+) -> tuple[str, ...]:
+    """Full ordered field names of `agent`'s observation under `mode` and `occlusion`.
+
+    Args:
+        spec: The task's observation layout.
+        mode: `"none"` or `"oracle"`; selects the partner block.
+        agent: `"left"` or `"right"`; only matters under `occlusion="partner"`, where it
+            decides which agent-owned shared fields stay visible.
+        occlusion: `"none"` (the whole shared block) or `"partner"` (the partner's own
+            shared fields are hidden).
+
+    Returns:
+        The observation field names in vector order.
+    """
     own = (
         tuple(f"own_action_{index}" for index in range(spec.action_dim))
         + tuple(f"own_{name}" for name in _PRIVATE_PARAM_NAMES)
         + ("own_start_delay",)
     )
-    return own + spec.shared_fields + spec.goal_fields + (TIME_FIELD,) + partner_fields(spec, mode)
+    return (
+        own
+        + shared_fields_for(spec, agent, occlusion)
+        + spec.goal_fields
+        + (TIME_FIELD,)
+        + partner_fields(spec, mode)
+    )
 
 
-def obs_size(spec: CoopTaskSpec, mode: str) -> int:
-    """Width of one agent's flat observation vector under `mode`."""
-    return len(obs_fields(spec, mode))
+def obs_size(spec: CoopTaskSpec, mode: str, *, occlusion: str = "none") -> int:
+    """Width of one agent's flat observation vector under `mode` and `occlusion`.
+
+    `occlusion="partner"` removes the partner's own shared fields, so the width shrinks by
+    the partner's field count. The `CoopTaskSpec` validation guarantees the ownership is
+    symmetric, so the width is the same for both agents; this function re-checks it for a
+    spec built programmatically with an asymmetric mask.
+    """
+    if occlusion == "none":
+        return len(obs_fields(spec, mode))
+    widths = {
+        agent: len(obs_fields(spec, mode, agent=agent, occlusion=occlusion)) for agent in AGENT_KEYS
+    }
+    if len(set(widths.values())) != 1:
+        raise ValueError(
+            f"{spec.name}: occlusion={occlusion!r} gives role-dependent observation widths "
+            f"{widths}; the shared-field ownership must be symmetric"
+        )
+    return next(iter(widths.values()))
 
 
 def _observation_field_value(
@@ -284,14 +488,21 @@ def _observation_field_value(
 
 
 def build_observation(
-    values: Mapping[str, float], agent: str, spec: CoopTaskSpec, partner_mode: str
+    values: Mapping[str, float],
+    agent: str,
+    spec: CoopTaskSpec,
+    partner_mode: str,
+    occlusion: str = "none",
 ) -> np.ndarray:
     """Build one agent's flat observation vector from the env's role-tagged `values`.
 
     Pure logic (no mujoco): the env collects the facts once per step and calls this for
-    each agent, so the partner-visibility rule is decided here, not in the simulator code.
-    Under `partner_mode="none"` every partner key of `values` is ignored, so changing them
-    cannot change the returned vector -- the leakage sentinel pins that bit-for-bit.
+    each agent, so the partner-visibility and occlusion rules are decided here, not in the
+    simulator code. Under `partner_mode="none"` every partner key of `values` is ignored, so
+    changing them cannot change the returned vector -- the leakage sentinel pins that
+    bit-for-bit. Under `occlusion="partner"` the partner's own shared fields (the partner
+    paddle for the toss-catch) are likewise ignored, while the shared object's fields and the
+    agent's own actuator's fields stay in the vector.
 
     Args:
         values: Role-tagged facts: `{agent}_action_{i}`, `{agent}_command_{i}` and
@@ -300,16 +511,20 @@ def build_observation(
         agent: `"left"` or `"right"` -- whose observation this is.
         spec: The task's observation layout.
         partner_mode: `"none"` or `"oracle"`; selects the partner block.
+        occlusion: `"none"` (whole shared block) or `"partner"` (the partner's own shared
+            fields are hidden).
 
     Returns:
-        `np.float32` vector of width `obs_size(spec, partner_mode)`, in `obs_fields` order.
+        `np.float32` vector of width `obs_size(spec, partner_mode, occlusion=occlusion)`, in
+        `obs_fields(spec, partner_mode, agent=agent, occlusion=occlusion)` order.
     """
     if agent not in AGENT_KEYS:
         raise ValueError(f"agent must be one of {AGENT_KEYS}, got {agent!r}")
     validate_partner_mode(partner_mode)
+    validate_occlusion(occlusion)
     vector = [
         _observation_field_value(values, agent, partner_mode, field_name)
-        for field_name in obs_fields(spec, partner_mode)
+        for field_name in obs_fields(spec, partner_mode, agent=agent, occlusion=occlusion)
     ]
     return np.asarray(vector, dtype=np.float32)
 

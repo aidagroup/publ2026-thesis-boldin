@@ -26,9 +26,11 @@ _ALL_TASKS = ("cartpole", "pendulum", "toss")
 _ORACLE_EPISODES = 4
 """Small local episode count for the oracle/baseline checks (the envs are CPU MuJoCo)."""
 
-_TOSS_ORACLE_EPISODES = 6
-"""The toss-catch oracle is the suite's hardest script (contact/timing): a few extra local
-episodes keep the "scripted upper bound reaches the task" check meaningful."""
+_TOSS_ORACLE_EPISODES = 16
+"""The toss-catch oracle is the suite's hardest script (contact/timing), and the PHYSICAL
+servoed paddles make the first catch timing-sensitive, so the script reaches ~0.89 of the
+episodes: enough local episodes are used for a statistically meaningful "scripted upper
+bound reaches the task" check without a slow CPU suite."""
 
 
 def _make_env(task: str, **kwargs):
@@ -137,6 +139,11 @@ def test_config_is_written_into_the_model_and_sampled_on_reset(task: str) -> Non
                     assert model.geom_friction[geom_id, 0] == pytest.approx(
                         env.randomization.contact_friction
                     )
+                # The paddle collision shells are NOT randomised: their stiff contact is the
+                # hard plate/plate constraint, not a tunable ball bounce.
+                for shell_id in env._pad_shell.values():
+                    assert model.geom_solref[shell_id, 0] == pytest.approx(0.001)
+                    assert model.geom_friction[shell_id, 0] == pytest.approx(0.4)
             else:
                 sampled = env.randomization.damping
                 assert (
@@ -225,8 +232,10 @@ def test_oracle_succeeds_and_only_left_baseline_fails(task: str) -> None:
             bool(_run_episode(env, oracle, seed=episode, drop_right=True)[0]["success"])
             for episode in range(episodes)
         ]
-        assert sum(oracle_successes) >= episodes - 1  # the scripted upper bound
-        assert not any(baseline)  # the absent-agent baseline cannot do the task
+        # The physical servoed paddles make the toss-catch timing-sensitive, so the scripted
+        # upper bound reaches ~0.89 of the episodes; the absent-agent baseline is ~1%.
+        assert sum(oracle_successes) >= episodes - 4  # the scripted upper bound
+        assert sum(baseline) <= 1  # the absent-agent baseline cannot do the task
         assert sum(oracle_successes) > sum(baseline)
         assert all(steps < env.config.max_control_steps for steps in oracle_steps)
     finally:
@@ -349,6 +358,8 @@ def test_vec_coop_contract_and_auto_reset() -> None:
                 "right_pad_x",
                 "right_pad_z",
                 "right_pad_tilt",
+                "pad_min_gap",
+                "pad_penetration",
             },
         ),
     ],
@@ -582,3 +593,199 @@ def test_vec_coop_toss_contract_and_finished_diagnostic() -> None:
             vec.step({key: np.zeros((3, 3), dtype=np.float32) for key in AGENT_KEYS})
     finally:
         vec.close()
+
+
+def test_toss_paddles_are_actuated_rigid_bodies_that_hold_their_pose() -> None:
+    """The paddles are physical servoed bodies: mass/inertia/servos exist, and they hold.
+
+    The old model had two MOCAP (kinematic) plates that the env teleported; the physical model
+    must have no MOCAP bodies, six bounded-force position servos (3 per plate) and a nonzero
+    plate mass, and a zero command must NOT make the plate fall: the position servo holds the
+    ready pose (its static sag under the plate's weight is ~1 mm).
+    """
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        model = env._model
+        assert int(model.nmocap) == 0
+        assert int(model.nu) == 6
+        for side in AGENT_KEYS:
+            x_range = cfg.paddle_x_range(side)
+            expected = (
+                x_range,
+                (cfg.pad_min_z, cfg.pad_max_z),
+                (-cfg.pad_tilt_limit, cfg.pad_tilt_limit),
+            )
+            for joint_id, actuator_id, joint_range in zip(
+                env._pad_joint[side], env._pad_actuator[side], expected
+            ):
+                assert tuple(model.jnt_range[joint_id]) == pytest.approx(joint_range)
+                assert tuple(model.actuator_ctrlrange[actuator_id]) == pytest.approx(joint_range)
+                assert model.actuator_forcerange[actuator_id][0] < 0.0
+                assert model.actuator_forcerange[actuator_id][1] > 0.0
+            assert model.body(env._pad_body[side]).mass[0] > 0.1
+        env.reset(seed=0)
+        start = env.state()
+        ready_target = {
+            side: (
+                start[f"{side}_pad_target_x"],
+                start[f"{side}_pad_target_z"],
+                start[f"{side}_pad_target_tilt"],
+            )
+            for side in AGENT_KEYS
+        }
+        # Eight zero-command steps: the ball is still airborne, the paddles must not sag
+        # beyond the servo's static deflection under their own weight.
+        for _ in range(8):
+            env.step(_toss_zero_action(env))
+        state = env.state()
+        for side in AGENT_KEYS:
+            assert state[f"{side}_pad_target_x"] == pytest.approx(ready_target[side][0], abs=1e-6)
+            assert state[f"{side}_pad_target_z"] == pytest.approx(ready_target[side][1], abs=1e-6)
+            assert state[f"{side}_pad_x"] == pytest.approx(ready_target[side][0], abs=2e-3)
+            assert state[f"{side}_pad_z"] == pytest.approx(ready_target[side][1], abs=3e-3)
+            assert state[f"{side}_pad_tilt"] == pytest.approx(ready_target[side][2], abs=2e-3)
+        # The measured pose tracks the servo target (the plate did not fall to its limit).
+        assert abs(state["left_pad_z"] - cfg.pad_start_z) < 3e-3
+        assert abs(state["right_pad_z"] - cfg.pad_start_z) < 3e-3
+    finally:
+        env.close()
+
+
+def test_toss_paddles_never_overlap_at_reset_or_on_random_rollouts() -> None:
+    """The two plates are separated at reset and never interpenetrate during contact play.
+
+    The SAT geometry measure (`paddle_model.paddle_pair_geometry`) is pure geometry, so this
+    is a real non-overlap assertion and not a restatement of the pass rule: at the ready pose
+    the plates must have a positive gap, on random rollouts they must never overlap and the
+    left plate must stay on the left of the right one (no pass-through).
+    """
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    rng = np.random.default_rng(0)
+    for seed in range(10):
+        env = _make_env("toss", config=cfg)
+        try:
+            env.reset(seed=seed)
+            state = env.state()
+            assert state["pad_min_gap"] > 0.01
+            for _ in range(30):
+                action = {
+                    key: rng.uniform(-1.0, 1.0, size=3).astype(np.float32) for key in AGENT_KEYS
+                }
+                _obs, _reward, terminated, truncated, _info = env.step(action)
+                state = env.state()
+                assert state["pad_penetration"] == 0.0, (seed, state["pad_penetration"])
+                assert state["pad_min_gap"] >= 0.0
+                assert state["left_pad_x"] < state["right_pad_x"]
+                if terminated or truncated:
+                    break
+        finally:
+            env.close()
+
+
+def test_toss_command_projection_keeps_the_targets_apart(monkeypatch) -> None:
+    """A pair of inward commands cannot drive the servo targets into each other.
+
+    This is the command-level safety: the env projects the two servo targets apart, so the
+    plates' target boxes keep a positive gap even when both agents command full speed toward
+    the court centre. The next test (collision) checks the physical constraint instead.
+    """
+    pytest.importorskip("mujoco")
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        env.reset(seed=0)
+        inward = {
+            "left": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            "right": np.array([-1.0, 0.0, 0.0], dtype=np.float32),
+        }
+        max_penetration = 0.0
+        for _ in range(20):
+            _obs, _reward, _terminated, _truncated, info = env.step(inward)
+            state = env.state()
+            max_penetration = max(max_penetration, state["pad_penetration"])
+            # The projected targets keep the plate boxes apart.
+            assert state["right_pad_target_x"] - state["left_pad_target_x"] > 0.35
+            assert state["left_pad_x"] < state["right_pad_x"]
+            assert info["pad_contact_steps"] == 0.0
+            assert state["pad_min_gap"] > 0.0
+            if _terminated or _truncated:
+                break
+        assert max_penetration == 0.0
+    finally:
+        env.close()
+
+
+def test_toss_paddle_paddle_collision_stops_the_plates(monkeypatch) -> None:
+    """The physical plate/plate contact (not just the command projection) stops the plates.
+
+    The projection is bypassed to command both servos into each other: the plates then really
+    touch (the stiff collision shells register a contact), cannot pass through each other
+    (the left plate stays left of the right one), the first forced impact may only transiently
+    overlap by up to one closing-speed timestep (a deliberate full-speed ram is outside the
+    action distribution the projection allows) and the jammed contact then settles to a
+    penetration-free state.
+    """
+    pytest.importorskip("mujoco")
+    import callosum.experiments.coop_tasks.toss_catch as toss_catch_module
+
+    cfg = coop_config("toss")
+    env = _make_env("toss", config=cfg)
+    try:
+        env.reset(seed=0)
+        monkeypatch.setattr(
+            toss_catch_module,
+            "project_targets_apart",
+            lambda left, right, **kwargs: (left, right),
+        )
+        inward = {
+            "left": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            "right": np.array([-1.0, 0.0, 0.0], dtype=np.float32),
+        }
+        from callosum.experiments.coop_tasks.paddle_model import (
+            PaddleTarget,
+            paddle_pair_geometry,
+        )
+
+        half_x, half_z = env.paddle_half_extents()
+        max_penetration = 0.0
+        contact_steps = 0.0
+        late_penetration = 0.0
+        for step in range(60):
+            # Keep the ball out of play: this test is about the plates' physical contact, and
+            # the ball would otherwise fail the episode within ~10 steps.
+            env._data.qpos[env._ball_qpos + 2] = 1.2
+            env._data.qvel[env._ball_dof : env._ball_dof + 3] = 0.0
+            _obs, _reward, _terminated, _truncated, info = env.step(inward)
+            state = env.state()
+            max_penetration = max(max_penetration, state["pad_penetration"])
+            contact_steps = max(contact_steps, info["pad_contact_steps"])
+            assert state["left_pad_x"] < state["right_pad_x"]
+            if step >= 55:
+                current_penetration, _separation = paddle_pair_geometry(
+                    PaddleTarget(state["left_pad_x"], state["left_pad_z"], state["left_pad_tilt"]),
+                    PaddleTarget(
+                        state["right_pad_x"], state["right_pad_z"], state["right_pad_tilt"]
+                    ),
+                    half_x=half_x,
+                    half_z=half_z,
+                )
+                late_penetration = max(late_penetration, current_penetration)
+        assert contact_steps > 0.0, "the plates were commanded into each other but never touched"
+        # A deliberately forced full-speed ram is far outside the action distribution (the
+        # command projection normally prevents it): the float32 solver's first impact step can
+        # transiently overlap the plates by up to one closing-speed step (~0.09 m at 18 m/s
+        # closing and dt=0.005). What matters physically is that the contact then HOLDS the
+        # plates apart -- the jammed steady state is essentially penetration-free.
+        assert max_penetration < 0.10, (
+            "the plate/plate contact transient must stay within one closing-speed step, got "
+            f"{max_penetration}"
+        )
+        assert late_penetration < 0.005, (
+            "the jammed plate/plate contact must settle to a sub-centimetre penetration, got "
+            f"{late_penetration}"
+        )
+    finally:
+        env.close()

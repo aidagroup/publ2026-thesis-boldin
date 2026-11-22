@@ -35,36 +35,47 @@ The learned-policy path reuses `callosum/experiments/coop_tasks/eval.py` (checkp
 input-mode resolution, greedy inference and the Bi-JEPA `predicted` input builder) instead of
 duplicating it, so a clip shows exactly what the ablation evaluates.
 
+Physics backend (``--backend``): the rollout physics runs either in the CPU MuJoCo env
+(``cpu``) or on the GPU through the batched `CoopBatchGPU`
+(`callosum/experiments/coop_tasks/env_gpu.py`, ``warp``). ``auto`` (the default) picks
+``warp`` when a CUDA device is visible and ``cpu`` otherwise. The GPU path is the GPU-first
+default on the pod: `GpuDemoEnv` drives ONE GPU world per demo episode, the scripted oracle
+stays the same numpy controller (it reads the GPU world's state through the adapter) and the
+learned policies run on the CUDA device with `torch_io` observation tensors -- only the
+per-frame render state (~30 floats) is copied back to the host. Frame capture, the HUD, the
+render-only MuJoCo visual copy (built from the same MJCF asset, CPU-side) and the MP4/GIF/JSON
+writers are shared by both backends, so the only intended difference is float32 Warp physics
+against float64 MuJoCo; ``frame_physics`` in the JSON records which one produced the clip.
+
 Nothing is installed: MP4 is written by OpenCV when available and by the system ``ffmpeg``
 otherwise, GIF by Pillow (`callosum.common.render_utils`). Rendering is offscreen: the script
 selects ``MUJOCO_GL=egl`` on Linux and ``cgl`` on macOS unless ``MUJOCO_GL`` is already set.
 
-Run on the pod (from the repo root; ``/root/.callosum/venv`` has mujoco + EGL + ffmpeg):
+Run on the pod (from the repo root; ``/root/.callosum/venv`` has mujoco + EGL + ffmpeg; the
+GPU physics path needs ``uv pip install --python /root/.callosum/venv/bin/python
+mujoco-warp==4.0.1``):
 
     MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
-        --task cartpole --scene oracle --seed 0 --attempts 3 \\
-        --width 640 --height 480 --fps 15 --out /workspace/callosum-runs/render_coop
+        --task cartpole --scene oracle --seed 0 --attempts 3 --backend warp \\
+        --width 640 --height 480 --fps 15 --out /workspace/callosum-runs/render_gpu_physics
 
     MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
-        --task pendulum --scene policy-vs-oracle \\
+        --task pendulum --scene policy-vs-oracle --backend warp \\
         --checkpoint /root/callosum/runs/coop_pendulum_none_s0/latest.pt \\
-        --input-mode none --out /workspace/callosum-runs/render_coop
+        --input-mode none --out /workspace/callosum-runs/render_gpu_physics
 
     MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
-        --task toss --scene policy-vs-oracle \\
-        --checkpoint /root/callosum/runs/coop_toss_oracle_s0/latest.pt \\
-        --input-mode oracle --out /workspace/callosum-runs/render_coop
+        --task cartpole --scene attempts --attempts 5 --seed 0 --backend warp \\
+        --checkpoint .../latest.pt --input-mode none --out /workspace/callosum-runs/render_gpu_physics
 
-    MUJOCO_GL=egl /root/.callosum/venv/bin/python -m callosum.experiments.coop_tasks.render \\
-        --task cartpole --scene attempts --attempts 5 --seed 0 \\
-        --checkpoint .../latest.pt --input-mode none --out /workspace/callosum-runs/render_coop
-
-Metric-only checks without OpenGL (also fine on the macOS dev laptop once the ``sandbox``
-extra is installed):
+Metric-only checks without OpenGL (the CPU path is also fine on the macOS dev laptop once the
+``sandbox`` extra is installed; the ``warp`` path needs the GPU stack):
 
     python callosum/experiments/coop_tasks/render.py --task cartpole --out /tmp/render --dry-run
     python callosum/experiments/coop_tasks/render.py --task pendulum --scene attempts \\
         --attempts 3 --out /tmp/render --dry-run
+    python callosum/experiments/coop_tasks/render.py --task cartpole --scene oracle \\
+        --backend warp --out /tmp/render --dry-run
 """
 
 from __future__ import annotations
@@ -75,6 +86,7 @@ import json
 import math
 import os
 import sys
+from collections import deque
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +110,8 @@ from callosum.common.render_utils import (
 )
 
 if TYPE_CHECKING:
+    import torch
+
     from callosum.experiments.coop_tasks.base import CoopTaskEnv
     from callosum.experiments.coop_tasks.config import (
         CartPoleConfig,
@@ -106,10 +120,20 @@ if TYPE_CHECKING:
     )
 
     TaskConfig = CartPoleConfig | PendulumConfig | TossConfig
-    PolicyEnv = CoopTaskEnv
+    DemoObs = dict[str, np.ndarray] | dict[str, "torch.Tensor"]
+    """One environment observation: numpy on the CPU backend, CUDA tensors on the GPU one."""
 
 RENDER_TASKS = ("cartpole", "pendulum", "toss")
 """The coop tasks this renderer supports (the full two-robot suite)."""
+
+PHYSICS_BACKENDS = ("cpu", "warp")
+"""Physics backends of the rollout: the CPU MuJoCo env or the batched mujoco_warp GPU env."""
+
+GPU_FRAME_PHYSICS = "gpu (mujoco_warp)"
+"""The JSON `frame_physics` value of a clip whose rollout physics ran on the GPU."""
+
+CPU_FRAME_PHYSICS = "cpu (mujoco)"
+"""The JSON `frame_physics` value of a clip whose rollout physics ran in the CPU env."""
 
 AGENT_KEYS = ("left", "right")
 """The suite's two agent keys (mirrors `coop_tasks.logic.AGENT_KEYS`).
@@ -791,20 +815,13 @@ def _build_render_model(
     return model, data, camera
 
 
-def _write_render_state(
-    task: str,
-    data: Any,
-    state: dict[str, float],
-    mocap: dict[str, int] | None = None,
-) -> None:
-    """Copy the env's kinematic state into the render copy's `qpos`/`qvel` (and mocap).
+def _write_render_state(task: str, data: Any, state: dict[str, float]) -> None:
+    """Copy the env's kinematic state into the render copy's `qpos`/`qvel`.
 
     Args:
         task: The suite task the state belongs to.
         data: The render copy's `MjData`.
         state: The env's `state()` dict.
-        mocap: For the toss-catch only: the render copy's paddle mocap ids per agent (the
-            paddles are kinematic MOCAP bodies, so their pose lives outside `qpos`).
 
     Raises:
         ValueError: if the state does not fit the render copy.
@@ -818,23 +835,25 @@ def _write_render_state(
     elif task == "toss":
         # The ball is a free sphere moving in the x-z court plane (no y motion by
         # construction), so the y pose/velocity are zero; the sphere's spin is irrelevant.
+        # The paddles are PHYSICAL servoed bodies: their x/z/tilt joints live in qpos/qvel
+        # (the same layout as `toss_catch.xml`), and the render copy is advanced from the
+        # env's measured state, exactly like the simulation.
         qpos = [float(state["ball_x"]), 0.0, float(state["ball_z"]), 1.0, 0.0, 0.0, 0.0]
         qvel = [float(state["ball_vx"]), 0.0, float(state["ball_vz"]), 0.0, 0.0, 0.0]
-        if mocap is None:
-            raise ValueError("the toss render state needs the paddle mocap ids")
         for side in AGENT_KEYS:
-            tilt = float(state[f"{side}_pad_tilt"])
-            index = mocap[side]
-            data.mocap_pos[index] = (
-                float(state[f"{side}_pad_x"]),
-                0.0,
-                float(state[f"{side}_pad_z"]),
+            qpos.extend(
+                (
+                    float(state[f"{side}_pad_x"]),
+                    float(state[f"{side}_pad_z"]),
+                    float(state[f"{side}_pad_tilt"]),
+                )
             )
-            data.mocap_quat[index] = (
-                math.cos(tilt / 2.0),
-                0.0,
-                math.sin(tilt / 2.0),
-                0.0,
+            qvel.extend(
+                (
+                    float(state[f"{side}_pad_vx"]),
+                    float(state[f"{side}_pad_vz"]),
+                    float(state[f"{side}_pad_tilt_rate"]),
+                )
             )
     else:
         raise ValueError(f"task must be one of {RENDER_TASKS}, got {task!r}")
@@ -859,16 +878,10 @@ class CoopDemoRenderer:
         self._renderer = mujoco.Renderer(self._model, height, width)
         self.width = int(width)
         self.height = int(height)
-        self._mocap: dict[str, int] | None = None
-        if task == "toss":
-            # The paddles are MOCAP bodies: their pose is written into `mocap_pos/quat`.
-            self._mocap = {
-                side: int(self._model.body(f"pad_{side}").mocapid[0]) for side in AGENT_KEYS
-            }
 
     def render_state(self, state: dict[str, float]) -> np.ndarray:
         """Render one RGB frame (uint8, `height` x `width` x 3) of the given env state."""
-        _write_render_state(self._task, self._data, state, self._mocap)
+        _write_render_state(self._task, self._data, state)
         self._mujoco.mj_forward(self._model, self._data)
         self._renderer.update_scene(self._data, camera=self._camera)
         return np.asarray(self._renderer.render(), dtype=np.uint8)
@@ -876,6 +889,425 @@ class CoopDemoRenderer:
     def close(self) -> None:
         """Release the offscreen OpenGL context."""
         self._renderer.close()
+
+
+# --- GPU physics backend --------------------------------------------------------------------
+
+
+def frame_physics_label(backend: str) -> str:
+    """The JSON `frame_physics` label of a rollout backend (`cpu` or `warp`)."""
+    return GPU_FRAME_PHYSICS if backend == "warp" else CPU_FRAME_PHYSICS
+
+
+def require_gpu_stack() -> None:
+    """Fail with an install hint when ``--backend warp`` is requested without the GPU stack.
+
+    Raises:
+        SystemExit: if torch, `mujoco_warp`/`warp` or a CUDA device is missing, so the CLI
+            never silently renders a "GPU" clip on the CPU.
+    """
+    try:
+        import torch
+
+        from callosum.experiments.coop_tasks import env_gpu
+    except ImportError as exc:  # pragma: no cover - only on a machine without the train extra
+        raise SystemExit(f"--backend warp needs torch + mujoco-warp: {exc}") from exc
+    if env_gpu.wp is None:
+        raise SystemExit(
+            "--backend warp needs the optional GPU backend; install it with "
+            "`uv pip install --python /root/.callosum/venv/bin/python mujoco-warp==4.0.1`"
+        )
+    if not torch.cuda.is_available():
+        raise SystemExit("--backend warp needs a CUDA device; none is visible to torch")
+
+
+def _observation_slices(spec: Any, partner_mode: str) -> dict[str, slice]:
+    """Column slices of the `shared` / `goal` / `time` blocks of a GPU env observation.
+
+    `CoopBatchGPU` returns both agents' flat observation vectors. The renderer takes the
+    shared-state and goal numbers from them (they are identical for both roles), so the
+    demo state can be rebuilt from the env's `final_obs` even on the step that auto-resets
+    the finished GPU world. The block order and widths come from the GPU env's own
+    `observation_blocks` layout, so the two can never disagree silently.
+
+    Args:
+        spec: The task's observation/action layout (`coop_tasks.logic.task_spec`).
+        partner_mode: The env's partner mode (`none` / `oracle`).
+
+    Returns:
+        `{block_key: slice}` for the `shared`, `goal` and `time` blocks.
+
+    Raises:
+        RuntimeError: if the reconstructed layout has no shared/goal/time blocks.
+    """
+    from callosum.experiments.coop_tasks.env_gpu import observation_blocks
+
+    widths = {
+        "action": int(spec.action_dim),
+        "command": int(spec.action_dim),
+        "params": 3,
+        "privileged": 1,
+        "shared": len(spec.shared_fields),
+        "goal": len(spec.goal_fields),
+        "time": 1,
+    }
+    blocks = observation_blocks(spec, partner_mode)
+    slices: dict[str, slice] = {}
+    offset = 0
+    for key, owner in blocks[AGENT_KEYS[0]]:
+        width = widths[key]
+        if owner is None:
+            slices[key] = slice(offset, offset + width)
+        offset += width
+    missing = {"shared", "goal", "time"} - set(slices)
+    if missing:  # pragma: no cover - guarded by observation_blocks/obs_size
+        raise RuntimeError(f"the GPU observation layout has no {sorted(missing)} blocks")
+    return slices
+
+
+@dataclass
+class _PendulumTracker:
+    """The `PendulumEnv._after_step` amplitude/zero-crossing tracker, replayed on the GPU state.
+
+    `CoopBatchGPU` keeps this tracker on the GPU but exposes neither it nor a live-info method
+    for a non-finished world, so the demo adapter replays the same update on the per-step
+    angle it already copies to the host for rendering. The formula is transcribed from
+    `callosum/experiments/coop_tasks/pendulum.py`; the GPU parity test compares
+    `peak_abs_angle`/`completed_cycles` against the CPU env step by step.
+    """
+
+    peak_abs_angle: float
+    last_angle_sign: float
+    completed_cycles: int
+
+    @classmethod
+    def reset(cls, angle: float) -> _PendulumTracker:
+        """The trackers at episode start (the CPU `_reset_task_state` initialisation)."""
+        return cls(
+            peak_abs_angle=abs(float(angle)),
+            last_angle_sign=1.0 if float(angle) >= 0.0 else -1.0,
+            completed_cycles=0,
+        )
+
+    def update(self, angle: float, target_amplitude: float) -> None:
+        """Advance the tracker by one control step's angle (the CPU `_after_step`)."""
+        angle = float(angle)
+        self.peak_abs_angle = max(self.peak_abs_angle, abs(angle))
+        sign = 1.0 if angle >= 0.0 else -1.0
+        if angle != 0.0 and sign != self.last_angle_sign:
+            if self.peak_abs_angle >= float(target_amplitude):
+                self.completed_cycles += 1
+            self.peak_abs_angle = abs(angle)
+            self.last_angle_sign = sign
+
+
+class GpuDemoEnv:
+    """One-world GPU physics driver of the demo renderer (`CoopBatchGPU`, `num_envs=1`).
+
+    The class is a thin adapter that gives the demo rollout the surface of the CPU
+    `CoopTaskEnv` it uses: `reset(seed=...)`, `step(action)`, `state()`,
+    `pending_commands()`, `randomization` and the scripted oracle's static model queries
+    (`linear_dynamics`, `energy_parameters`, the toss-catch paddle geometry). Everything
+    dynamic -- the control step, the per-episode private randomness, the observations, the
+    success/failure rules and the reward -- is the batched `mujoco_warp` backend, so the demo
+    physics runs on the GPU.
+
+    The demo state is rebuilt from the env's `final_obs` (the observation computed after the
+    control step and BEFORE the auto-reset of a finished world), so the last frame of an
+    episode still shows the terminal state even though the GPU env has already restarted the
+    world. Only that small render state (~30 floats per step) is copied to the host; the
+    learned-policy path keeps the observations as CUDA tensors (`torch_io = True`).
+
+    The per-episode randomisation record and the latency queues are the pure stdlib ones the
+    CPU env uses (`logic.sample_episode_randomization` / `logic.delayed_command`): the GPU
+    env samples the same records from the same episode seed, so the scripted oracle's
+    privileged view of the episode is the CPU demo's (the parity test checks the sampled
+    fields against the GPU env's tensors).
+    """
+
+    torch_io = True
+    """Marker: the policy controller receives `(1, obs_dim)` CUDA tensors from this env."""
+
+    def __init__(
+        self,
+        task: str,
+        config: TaskConfig,
+        partner_mode: str,
+        *,
+        seed: int = 0,
+        device: str = "cuda",
+    ) -> None:
+        """Build the one-world GPU env and the render-state bookkeeping.
+
+        Args:
+            task: The coop task (`cartpole`, `pendulum` or `toss`).
+            config: The task config the GPU env is built from (the CPU demo's own config).
+            partner_mode: Observation visibility mode, `none` or `oracle`.
+            seed: Default episode seed; `reset(seed=...)` overrides it per episode.
+            device: CUDA device string (`cuda` / `cuda:N`).
+
+        Raises:
+            ImportError: if the GPU stack (`mujoco_warp`/`warp`/CUDA torch) is missing.
+        """
+        import torch
+
+        from callosum.experiments.coop_tasks.env_gpu import CoopBatchGPU
+        from callosum.experiments.coop_tasks.logic import delayed_command, task_spec
+
+        self._torch = torch
+        self._delayed_command = delayed_command
+        self.task = task
+        self.config = config
+        self.partner_mode = partner_mode
+        self._spec = task_spec(task)
+        self._slices = _observation_slices(self._spec, partner_mode)
+        self._gpu = CoopBatchGPU(
+            task,
+            1,
+            partner_mode=partner_mode,
+            config=config,
+            seed=int(seed),
+            device=device,
+        )
+        self._device = torch.device(self._gpu.device)
+        self._default_seed = int(seed)
+        self._randomization: Any | None = None
+        self._static_env: Any | None = None
+        self._delay: dict[str, deque[np.ndarray]] = {role: deque() for role in AGENT_KEYS}
+        self._step_index = 0
+        self._state: dict[str, float] = {}
+        self._pendulum: _PendulumTracker | None = None
+
+    # --- env surface --------------------------------------------------------------------
+    @property
+    def randomization(self) -> Any | None:
+        """The episode's sampled randomisation record (the CPU env's `CoopTaskEnv.randomization`)."""
+        return self._randomization
+
+    @property
+    def device(self) -> str:
+        """The CUDA device string of the GPU env."""
+        return str(self._gpu.device)
+
+    @property
+    def cuda_graph(self) -> bool:
+        """Whether the env's control step runs from a captured CUDA graph."""
+        return bool(self._gpu.cuda_graph)
+
+    @property
+    def software_versions(self) -> str:
+        """The simulator/GPU software versions of the env (for the JSON report)."""
+        return str(self._gpu.software_versions())
+
+    def reset(
+        self, *, seed: int | None = None, options: dict | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Start a new episode: sample its randomness, reset the GPU world, return the obs.
+
+        Args:
+            seed: Episode seed; `None` uses the constructor's seed. The GPU env resets its
+                single world with exactly this seed, exactly like the CPU env's
+                `reset(seed=...)`.
+            options: Unused (gymnasium compatibility).
+
+        Returns:
+            `({role: (1, obs_dim) CUDA tensor}, {})`; the demo rollout ignores the info dict
+            (the CPU env's initial diagnostics are not shown in any frame).
+        """
+        del options
+        episode_seed = self._default_seed if seed is None else int(seed)
+        observations = self._gpu.reset(seed=episode_seed)
+        self._randomization = self._sample_randomization(episode_seed)
+        latencies = [int(agent.latency_steps) for agent in self._randomization.agents]
+        self._delay = {
+            role: deque(np.zeros(self._spec.action_dim) for _ in range(latencies[index]))
+            for index, role in enumerate(AGENT_KEYS)
+        }
+        self._step_index = 0
+        self._refresh_state(observations, fresh_episode=True)
+        return {role: observations[role] for role in AGENT_KEYS}, {}
+
+    def step(
+        self, action: dict[str, np.ndarray]
+    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+        """Advance the GPU world by one control step (auto-resetting a finished world).
+
+        Args:
+            action: `{role: (action_dim,)}` normalized commands (numpy or float32 arrays).
+
+        Returns:
+            `(obs, reward, terminated, truncated, info)` with the next-step observations as
+            CUDA tensors, the shared team reward as a float and the CPU env's terminal info
+            dict on the step that ends the episode (an empty dict otherwise, exactly like the
+            only frame the renderer decorates with it).
+
+        Raises:
+            ValueError: if an action has the wrong shape.
+        """
+        commands: dict[str, np.ndarray] = {}
+        for role in AGENT_KEYS:
+            vector = np.asarray(action[role], dtype=np.float64).reshape(-1)
+            if vector.shape != (self._spec.action_dim,):
+                raise ValueError(
+                    f"action[{role!r}] must have shape ({self._spec.action_dim},), "
+                    f"got {vector.shape}"
+                )
+            commands[role] = np.clip(vector, -1.0, 1.0)
+            # Keep the CPU-latency view in sync with the commands the GPU env receives, so
+            # the scripted oracle's `pending_commands()` is the CPU env's own queue content.
+            self._delayed_command(self._delay[role], commands[role].copy())
+        tensors = {
+            role: self._torch.as_tensor(
+                commands[role].reshape(1, -1),
+                dtype=self._torch.float32,
+                device=self._device,
+            )
+            for role in AGENT_KEYS
+        }
+        previous_state = dict(self._state)
+        result = self._gpu.step(tensors)
+        self._step_index += 1
+        terminated = bool(result.terminated[0])
+        truncated = bool(result.truncated[0])
+        non_finite = bool(result.nonfinite[0]) if result.nonfinite is not None else False
+        if non_finite:
+            # The float32 contact solver produced a non-finite state (treated as a FAILED
+            # episode and reset by the GPU env); keep the last valid frame state for the
+            # FAILED still instead of rendering the zeroed placeholder state.
+            self._state = previous_state
+        else:
+            self._refresh_state(result.final_obs, fresh_episode=False)
+        info: dict[str, Any] = {}
+        if (terminated or truncated) and result.finished_infos:
+            info = result.finished_infos[0]
+        observations = {role: result.obs[role] for role in AGENT_KEYS}
+        return observations, float(result.reward[0]), terminated, truncated, info
+
+    def state(self) -> dict[str, float]:
+        """The task's kinematic state plus the step index (the CPU env's `state()` dict)."""
+        return dict(self._state)
+
+    def pending_commands(self) -> dict[str, tuple[np.ndarray, ...]]:
+        """The agents' in-flight commands, oldest first (the CPU env's `pending_commands()`)."""
+        return {
+            role: tuple(np.array(command, dtype=np.float64, copy=True) for command in queue)
+            for role, queue in self._delay.items()
+        }
+
+    def close(self) -> None:
+        """Release the GPU env (and the never-stepped CPU model env if it was built)."""
+        self._gpu.close()
+        if self._static_env is not None:
+            self._static_env.close()
+            self._static_env = None
+
+    # --- scripted-oracle model queries --------------------------------------------------
+    def linear_dynamics(self) -> tuple[np.ndarray, np.ndarray]:
+        """The cart-pole linearisation from the task's MJCF (CPU model read, no physics)."""
+        return self._model_env().linear_dynamics()
+
+    def energy_parameters(self) -> tuple[float, float]:
+        """The pendulum energy coefficients from the task's MJCF (CPU model read)."""
+        return self._model_env().energy_parameters()
+
+    def contact_offset(self) -> float:
+        """The toss-catch ball/paddle contact offset (task geometry, no physics)."""
+        return float(self._model_env().contact_offset())
+
+    def paddle_receive_x(self) -> float:
+        """The toss-catch receiving paddle's anticipation x (config geometry)."""
+        return float(self._model_env().paddle_receive_x())
+
+    def paddle_ready_x(self) -> float:
+        """The toss-catch ready-pose paddle centre x (config geometry)."""
+        return float(self._model_env().paddle_ready_x())
+
+    def paddle_ready_tilt(self, side: str) -> float:
+        """The toss-catch ready-pose tilt of one paddle (config geometry)."""
+        return float(self._model_env().paddle_ready_tilt(side))
+
+    def _model_env(self) -> Any:
+        """Build (once) the never-stepped CPU env the static MJCF/geometry queries go through.
+
+        The GPU backend builds its own model from the same MJCF, so these values are
+        model-derived constants (masses/inertias/paddle geometry), not physics results; the
+        CPU instance is never reset or stepped.
+        """
+        if self._static_env is None:
+            from callosum.experiments.coop_tasks import make_coop_env
+
+            self._static_env = make_coop_env(
+                self.task, config=self.config, partner_mode=self.partner_mode
+            )
+        return self._static_env
+
+    # --- render-state bookkeeping -------------------------------------------------------
+    def _sample_randomization(self, episode_seed: int) -> Any:
+        """Sample the episode's randomness with the CPU env's samplers (same seed/fields)."""
+        from callosum.experiments.coop_tasks.logic import (
+            sample_episode_randomization,
+            sample_toss_randomization,
+        )
+
+        sampler = sample_toss_randomization if self.task == "toss" else sample_episode_randomization
+        return sampler(
+            self.config.randomization,
+            control_dt=self.config.control_dt,
+            max_control_steps=self.config.max_control_steps,
+            seed=episode_seed,
+        )
+
+    def _refresh_state(self, observations: dict[str, Any], *, fresh_episode: bool) -> None:
+        """Rebuild the demo `state()` dict from the GPU observation of the current step.
+
+        Args:
+            observations: The env's observations, `{role: (1, obs_dim) CUDA tensor}`; the
+                `left` role's shared/goal blocks carry the whole task state.
+            fresh_episode: True right after `reset` (initialise the pendulum tracker),
+                False after a control step (advance it).
+        """
+        values = observations[AGENT_KEYS[0]][0].tolist()
+        shared = values[self._slices["shared"]]
+        goal = values[self._slices["goal"]]
+        state: dict[str, float] = {"step": float(self._step_index)}
+        if self.task == "cartpole":
+            state.update(zip(self._spec.shared_fields, (float(value) for value in shared)))
+            state["target_x"] = float(self.config.target_x)
+        elif self.task == "pendulum":
+            angle, angvel = float(shared[0]), float(shared[1])
+            target = float(self.config.target_amplitude)
+            if fresh_episode or self._pendulum is None:
+                self._pendulum = _PendulumTracker.reset(angle)
+            else:
+                self._pendulum.update(angle, target)
+            state.update(
+                angle=angle,
+                angvel=angvel,
+                target_amplitude=target,
+                peak_abs_angle=float(self._pendulum.peak_abs_angle),
+                completed_cycles=float(self._pendulum.completed_cycles),
+            )
+        else:
+            state.update(zip(self._spec.shared_fields, (float(value) for value in shared)))
+            state["passes"] = float(goal[0])
+            state["target_passes"] = float(self.config.n_passes)
+            state.update(self._toss_contact_flags())
+        self._state = state
+
+    def _toss_contact_flags(self) -> dict[str, float]:
+        """The toss-catch paddle contact flags of the current world (the CPU state keys).
+
+        The batched GPU env keeps the flags in a Warp-backed tensor that the shared
+        observation does not carry, while the scripted toss oracle reads them for its
+        restitution estimate. The attribute is read defensively and defaults to "no contact"
+        so the ongoing dynamic-paddle physics rework of the toss-catch cannot crash the
+        renderer; the toss GPU demo is not finalised yet (see the render todo).
+        """
+        contact = getattr(self._gpu, "_contact_side", None)
+        if contact is None:  # pragma: no cover - the current GPU env defines it for toss
+            return {side: 0.0 for side in AGENT_KEYS}
+        values = contact[0].tolist()
+        return {side: float(values[index]) for index, side in enumerate(AGENT_KEYS)}
 
 
 # --- action sources -------------------------------------------------------------------------
@@ -901,16 +1333,16 @@ class OracleDemoController:
         self.subtitle = ORACLE_SUBTITLES[task]
         self._oracle = make_oracle(task, config)
 
-    def reset(self, obs: dict[str, np.ndarray]) -> None:
+    def reset(self, obs: DemoObs) -> None:
         """No-op: the oracle has no per-episode state (it reads the env in `act`)."""
         del obs
 
-    def act(self, env: CoopTaskEnv, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    def act(self, env: Any, obs: DemoObs) -> dict[str, np.ndarray]:
         """The oracle's normalised one-sided commands for the next control step."""
         del obs
         return self._oracle.act(env)
 
-    def observe(self, obs: dict[str, np.ndarray]) -> None:
+    def observe(self, obs: DemoObs) -> None:
         """No-op: the oracle needs no observation history."""
         del obs
 
@@ -927,9 +1359,19 @@ class PolicyDemoController:
 
     `predicted` keeps the env at `partner_mode="none"` (the agent cannot see the privileged
     partner block it is asked to predict); `none`/`oracle` map onto themselves.
+
+    On the GPU physics backend the policies, the Bi-JEPA encoder/predictor and the
+    `predicted` history builder are built on the CUDA device and receive the GPU env's
+    observation tensors directly; the CPU backend keeps everything on the CPU unchanged.
     """
 
-    def __init__(self, checkpoint: Path, input_mode: str | None, task: str) -> None:
+    def __init__(
+        self,
+        checkpoint: Path,
+        input_mode: str | None,
+        task: str,
+        device: str = "cpu",
+    ) -> None:
         """Load the checkpoint and build both greedy policies (and the Bi-JEPA builder).
 
         Args:
@@ -937,6 +1379,8 @@ class PolicyDemoController:
             input_mode: `none` / `oracle` / `predicted`, or None to use the checkpoint's own
                 saved mode (see `coop_tasks.eval.resolve_input_mode`).
             task: The `--task` of the render; must match the checkpoint's task.
+            device: Torch device of the policies and the Bi-JEPA builder (`cpu` for the CPU
+                physics backend, `cuda`/`cuda:N` for the GPU one).
 
         Raises:
             ValueError: if the checkpoint cannot be run for this task/input mode.
@@ -956,7 +1400,7 @@ class PolicyDemoController:
         )
 
         self._torch = torch
-        self._batch_obs = coop_eval._batch_obs
+        self._device = torch.device(device)
         self.checkpoint = Path(checkpoint)
         payload = load_checkpoint(self.checkpoint)
         cfg = config_from_payload(payload)
@@ -982,18 +1426,20 @@ class PolicyDemoController:
         self.format = payload.get("format")
         self.policies = make_policies(
             env_mode,
-            "cpu",
+            self._device,
             latent_dim=latent_dim,
             input_size=cfg.env_obs_size,
             action_dim=cfg.action_size,
         )
         load_weights(payload, self.policies, agent_keys=cfg.agent_keys)
         self._builder: Any | None = None
-        bijepa = make_bijepa(cfg, "cpu")
+        bijepa = make_bijepa(cfg, self._device)
         if bijepa is not None:
             load_bijepa_weights(payload, bijepa)
             bijepa.eval()
-            self._builder = LatentInputBuilder(bijepa, device="cpu", agent_keys=cfg.agent_keys)
+            self._builder = LatentInputBuilder(
+                bijepa, device=self._device, agent_keys=cfg.agent_keys
+            )
         self._policy_obs: dict[str, Any] | None = None
         self.title = f"learned policy ({self.input_mode})"
         self.subtitle = (
@@ -1012,16 +1458,31 @@ class PolicyDemoController:
             "latent_dim": self.latent_dim,
             "env_obs_size": self.env_obs_size,
             "action_size": self.action_size,
+            "policy_device": str(self._device),
             "update": self.update,
             "format": self.format,
         }
 
-    def reset(self, obs: dict[str, np.ndarray]) -> None:
+    def _batch_obs(self, obs: DemoObs) -> dict[str, torch.Tensor]:
+        """A single-world observation as a `(1, obs_dim)` float32 batch on the policy device.
+
+        Accepts the CPU backend's numpy observation dict and the GPU backend's CUDA
+        `(1, obs_dim)` tensors, so the two paths share the policy/Bi-JEPA seam unchanged.
+        """
+        batch: dict[str, torch.Tensor] = {}
+        for key, value in obs.items():
+            tensor = value if self._torch.is_tensor(value) else self._torch.as_tensor(value)
+            if tensor.ndim == 1:
+                tensor = tensor.unsqueeze(0)
+            batch[key] = tensor.to(device=self._device, dtype=self._torch.float32)
+        return batch
+
+    def reset(self, obs: DemoObs) -> None:
         """Start a new episode: the policy input is the first observation (history reset)."""
         batch = self._batch_obs(obs)
         self._policy_obs = self._builder.reset(batch) if self._builder is not None else batch
 
-    def act(self, env: CoopTaskEnv, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    def act(self, env: Any, obs: DemoObs) -> dict[str, np.ndarray]:
         """The greedy (distribution mean) action of both policies, clipped to `[-1, 1]`."""
         del env, obs
         if self._policy_obs is None:
@@ -1030,14 +1491,16 @@ class PolicyDemoController:
         for name, policy in zip(self.agent_keys, self.policies):
             with self._torch.no_grad():
                 action = policy.get_action(self._policy_obs[name], deterministic=True)
-            actions[name] = self._torch.clamp(action, -1.0, 1.0).squeeze(0).numpy()
+            actions[name] = self._torch.clamp(action, -1.0, 1.0).squeeze(0).cpu().numpy()
         return actions
 
-    def observe(self, obs: dict[str, np.ndarray]) -> None:
+    def observe(self, obs: DemoObs) -> None:
         """Advance the policy input after a non-terminal step (Bi-JEPA history under `predicted`)."""
         batch = self._batch_obs(obs)
         self._policy_obs = (
-            self._builder.step(batch, self._torch.zeros(1)) if self._builder is not None else batch
+            self._builder.step(batch, self._torch.zeros(1, device=self._device))
+            if self._builder is not None
+            else batch
         )
 
 
@@ -1094,7 +1557,7 @@ class DemoEpisode:
 
 
 def run_episode(
-    env: CoopTaskEnv,
+    env: CoopTaskEnv | GpuDemoEnv,
     controller: DemoController,
     renderer: CoopDemoRenderer | None,
     *,
@@ -1115,6 +1578,8 @@ def run_episode(
 
     The controller seam is `reset(obs)` once, then `act(env, obs)` before every step and
     `observe(obs)` after every non-terminal step (the Bi-JEPA `predicted` input needs it).
+    The env is either a CPU `CoopTaskEnv` or the GPU `GpuDemoEnv`, which share this seam
+    (physics only differs in where the control step runs).
     """
     obs, _reset_info = env.reset(seed=seed)
     controller.reset(obs)
@@ -1551,6 +2016,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="number of episodes of the attempts scene (3-5 makes a good demo)",
     )
     parser.add_argument("--seed", type=int, default=0, help="base episode seed")
+    parser.add_argument(
+        "--backend",
+        choices=("auto",) + PHYSICS_BACKENDS,
+        default="auto",
+        help=(
+            "rollout physics backend: auto (default: warp when a CUDA device is visible, else "
+            "cpu), warp (the rollout steps the batched mujoco_warp GPU env; frames are still "
+            "rendered by EGL on the GPU) or cpu (single-instance MuJoCo, parity/CI)"
+        ),
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="CUDA device of the warp physics backend (default: cuda)",
+    )
     parser.add_argument("--width", type=int, default=640, help="frame width (px)")
     parser.add_argument("--height", type=int, default=480, help="frame height (px)")
     parser.add_argument("--fps", type=int, default=15, help="video frame rate")
@@ -1589,7 +2069,26 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="width of the GIF preview (0 disables the GIF)",
     )
     parser.add_argument("--dry-run", action="store_true", help="rollouts without rendering")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    _resolve_backend(args)
+    return args
+
+
+def _resolve_backend(args: argparse.Namespace) -> None:
+    """Resolve ``--backend auto`` (the GPU-first default on a CUDA host) in place.
+
+    ``auto`` mirrors the evaluator (`callosum.experiments.coop_tasks.eval`): ``warp`` when a
+    CUDA device looks visible, ``cpu`` otherwise. The GPU stack itself is validated later by
+    `require_gpu_stack`, so ``--help`` and the CPU path never import it.
+    """
+    from callosum.experiments.cube_wrench.ppo_config import cuda_visible
+
+    if args.backend == "auto":
+        args.backend = "warp" if cuda_visible() else "cpu"
+    if args.backend == "warp":
+        args.device = args.device or "cuda"
+    else:
+        args.device = None
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -1626,7 +2125,11 @@ def _policy_max_steps(args: argparse.Namespace, env_max_steps: int) -> int:
 
 
 def _load_policy_controller(args: argparse.Namespace) -> PolicyDemoController | None:
-    """Build the learned-policy controller when the scene needs it (clean CLI error)."""
+    """Build the learned-policy controller when the scene needs it (clean CLI error).
+
+    The policies/Bi-JEPA run on the GPU when the rollout physics does (``--backend warp``)
+    and stay on the CPU otherwise, exactly like the evaluator's two backend paths.
+    """
     if args.checkpoint is None:
         return None
     if args.scene not in ("policy-vs-oracle", "attempts"):
@@ -1635,8 +2138,9 @@ def _load_policy_controller(args: argparse.Namespace) -> PolicyDemoController | 
             "(use policy-vs-oracle or attempts)"
         )
         return None
+    device = args.device if args.backend == "warp" else "cpu"
     try:
-        return PolicyDemoController(args.checkpoint, args.input_mode, args.task)
+        return PolicyDemoController(args.checkpoint, args.input_mode, args.task, device=device)
     except (ValueError, OSError) as exc:
         raise SystemExit(f"cannot load checkpoint {args.checkpoint}: {exc}") from exc
 
@@ -1644,11 +2148,41 @@ def _load_policy_controller(args: argparse.Namespace) -> PolicyDemoController | 
 # --- scenes ---------------------------------------------------------------------------------
 
 
-def _make_env(task: str, config: TaskConfig | None, partner_mode: str) -> CoopTaskEnv:
-    """Build one coop env through the package factory (imported lazily for GL/mujoco)."""
+def _make_env(
+    task: str,
+    config: TaskConfig | None,
+    partner_mode: str,
+    args: argparse.Namespace,
+) -> CoopTaskEnv | GpuDemoEnv:
+    """Build one demo env on the requested physics backend (`cpu` or `warp`)."""
+    if args.backend == "warp":
+        if config is None:
+            from callosum.experiments.coop_tasks.config import coop_config
+
+            config = coop_config(task)
+        return GpuDemoEnv(
+            task,
+            config,
+            partner_mode,
+            seed=args.seed,
+            device=args.device or "cuda",
+        )
     from callosum.experiments.coop_tasks import make_coop_env
 
     return make_coop_env(task, config=config, partner_mode=partner_mode)
+
+
+def _backend_metadata(args: argparse.Namespace, env: CoopTaskEnv | GpuDemoEnv) -> dict[str, Any]:
+    """The JSON block recording which physics backend produced a scene's frames."""
+    metadata: dict[str, Any] = {
+        "frame_physics": frame_physics_label(args.backend),
+        "physics_backend": args.backend,
+    }
+    if isinstance(env, GpuDemoEnv):
+        metadata["device"] = env.device
+        metadata["software"] = env.software_versions
+        metadata["cuda_graph"] = env.cuda_graph
+    return metadata
 
 
 def _render_oracle_scene(
@@ -1660,7 +2194,8 @@ def _render_oracle_scene(
 ) -> dict[str, Any]:
     """Render the scripted-oracle success clip; returns its summary block."""
     view = _task_view(args.task)
-    env = _make_env(args.task, config, "none")
+    env = _make_env(args.task, config, "none", args)
+    metadata = _backend_metadata(args, env)
     try:
         max_steps = int(args.max_steps or config.max_control_steps)
         episode = run_episode(
@@ -1694,6 +2229,7 @@ def _render_oracle_scene(
             encoders=encoders,
         )
     return {
+        **metadata,
         "task": args.task,
         "scene": "oracle",
         "seed": args.seed,
@@ -1718,8 +2254,9 @@ def _render_policy_vs_oracle_scene(
 ) -> dict[str, Any]:
     """Render the learned-policy-vs-oracle clip; returns its summary block."""
     view = _task_view(args.task)
-    policy_env = _make_env(args.task, policy_controller.config, policy_controller.env_mode)
-    oracle_env = _make_env(args.task, config, "none")
+    policy_env = _make_env(args.task, policy_controller.config, policy_controller.env_mode, args)
+    oracle_env = _make_env(args.task, config, "none", args)
+    metadata = _backend_metadata(args, oracle_env)
     try:
         oracle_episode = run_episode(
             oracle_env,
@@ -1775,6 +2312,7 @@ def _render_policy_vs_oracle_scene(
         clip["policy_max_steps"] = policy_max_steps
         clips["policy-vs-oracle"] = clip
     return {
+        **metadata,
         "task": args.task,
         "scene": "policy-vs-oracle",
         "seed": args.seed,
@@ -1805,7 +2343,8 @@ def _render_attempts_scene(
     # the privileged partner block; `predicted` stays on `none`).
     env_config = controller.config if is_policy else config
     partner_mode = controller.env_mode if is_policy else "none"
-    env = _make_env(args.task, env_config, partner_mode)
+    env = _make_env(args.task, env_config, partner_mode, args)
+    metadata = _backend_metadata(args, env)
     attempts: list[dict[str, Any]] = []
     clips: dict[str, Any] = {}
     stem = f"coop_{args.task}_{controller.label}"
@@ -1862,6 +2401,7 @@ def _render_attempts_scene(
         env.close()
     successes = sum(1 for attempt in attempts if attempt["success"])
     return {
+        **metadata,
         "task": args.task,
         "scene": "attempts",
         "source": controller.label,
@@ -1923,6 +2463,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Render the requested coop demo artifacts; returns the process exit code."""
     args = parse_args(argv)
     _validate_args(args)
+    if args.backend == "warp":
+        require_gpu_stack()
     _configure_gl()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -1939,13 +2481,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"coop demo render: scene={args.scene} task={args.task} seed={args.seed} "
         f"size={args.width}x{args.height} fps={args.fps} step_stride={args.step_stride} "
         f"target_seconds={args.target_seconds} dry_run={args.dry_run} "
-        f"MUJOCO_GL={os.environ.get('MUJOCO_GL')}"
+        f"frame_physics={frame_physics_label(args.backend)} backend={args.backend} "
+        f"device={args.device} MUJOCO_GL={os.environ.get('MUJOCO_GL')}"
     )
     if policy_controller is not None:
         print(
             f"checkpoint {policy_controller.checkpoint}: input_mode="
             f"{policy_controller.input_mode} env_partner_mode={policy_controller.env_mode} "
             f"latent_dim={policy_controller.latent_dim} update={policy_controller.update} "
+            f"policy_device={policy_controller.metadata()['policy_device']} "
             "(greedy policies)"
         )
 

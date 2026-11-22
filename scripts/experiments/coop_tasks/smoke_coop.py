@@ -35,6 +35,7 @@ import sys
 import numpy as np
 
 from callosum.experiments.coop_tasks import make_coop_env, make_oracle
+from callosum.experiments.coop_tasks.config import coop_config
 
 _ORACLE_SUCCESS_FLOOR = 0.8
 """The scripted oracle must reach (almost) every episode; 0.8 leaves room for local noise."""
@@ -67,7 +68,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--seed", type=int, default=0, help="base episode seed")
-    return parser.parse_args()
+    parser.add_argument(
+        "--occlusion",
+        choices=("none", "partner"),
+        default="none",
+        help=(
+            "hidden-partner observation variant (toss only): 'partner' hides the partner "
+            "paddle from the observation; the scripted oracle reads the env state, so it "
+            "stays a valid solvability check of the occluded task"
+        ),
+    )
+    args = parser.parse_args()
+    if args.occlusion != "none" and args.task != "toss":
+        parser.error("--occlusion is only defined for --task toss")
+    return args
 
 
 def _episode_seed(base_seed: int, env_index: int, episode: int, episodes: int) -> int:
@@ -110,8 +124,9 @@ def run_controller(
     successes: list[float] = []
     steps: list[int] = []
     diagnostics: list[float] = []
+    config = coop_config(args.task, occlusion=args.occlusion) if args.occlusion != "none" else None
     for env_index in range(args.envs):
-        env = make_coop_env(args.task)
+        env = make_coop_env(args.task, config=config)
         try:
             if kind == "random":
                 env.action_space.seed(args.seed + env_index)

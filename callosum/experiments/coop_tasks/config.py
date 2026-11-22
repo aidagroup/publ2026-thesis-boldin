@@ -43,6 +43,7 @@ from callosum.experiments.coop_tasks.logic import (
     TASK_SPECS,
     obs_size,
     task_spec,
+    validate_occlusion,
 )
 
 TASKS = ("cartpole", "pendulum", "toss")
@@ -619,17 +620,21 @@ class TossConfig:
     the ball back, and the team must complete `n_passes` alternating catches without the
     ball touching the floor or leaving the court.
 
-    The paddles are position-controlled (a normalized command is a bounded pose increment;
-    the env moves the kinematic paddle smoothly over the control step, the ideal limit of a
-    stiff position servo) and the ball-racket contact is a physical MuJoCo contact with a
-    randomized restitution/friction. The paddles act in the court plane: x is the axis
-    between the two agents, z is vertical, and the tilt is about world +y (the
-    `pad_tilt` nominal aiming angle throws the ball toward the partner).
+    The paddles are PHYSICAL rigid bodies, each on two prismatic joints (court x and vertical
+    z) and a hinge (the tilt about world +y), driven by three bounded-force position servos.
+    A normalized command is a bounded pose increment of the servo TARGET (with the surfaces
+    frozen), so the plates physically track it instead of teleporting; the ball/plate contact
+    is a physical MuJoCo contact with a randomized restitution/friction, and a stiff pad/pad
+    contact shell pair forbids the two plates to interpenetrate or pass through each other.
+    The paddles act in the court plane: x is the axis between the two agents, z is vertical,
+    and the tilt is about world +y (the `pad_tilt` nominal aiming angle throws the ball
+    toward the partner).
 
     XML-owned physics (`callosum/experiments/coop_tasks/assets/toss_catch.xml`): the ball
-    radius/mass and the paddle half extents. The config owns the timing, gravity, the
-    court/workspace bounds, the paddles' maximum speed/tilt rate, the nominal tilt, the
-    success/failure tolerances and the reward.
+    radius/mass, the paddle half extents and mass/inertia, the servo gains and force limits.
+    The config owns the timing, gravity, the court/workspace (and hence the joint/servo
+    range), the command speed/tilt-rate limits, the nominal tilt, the success/failure
+    tolerances and the reward.
     """
 
     # --- decision timing -----------------------------------------------------------------
@@ -668,9 +673,16 @@ class TossConfig:
     pad_max_z: float = 1.35
     """Highest paddle-centre height (m)."""
 
-    pad_start_z: float = 0.30
+    pad_start_z: float = 0.22
     """Initial / ready paddle-centre height (m), low so a missing agent's paddle is not in
-    the ball's flight path."""
+    the ball's flight path.
+
+    This is the initial state of the PHYSICAL servoed paddles (`TossConfig.pad_inner_x +
+    toss_catch._READY_X_OFFSET` is their ready x): with the 0.6 m plates rotated by the
+    nominal 44-degree tilt, a ready pose at 0.30 m would put the idle plate's raised edge
+    right in the first throw's descent, so the absent-agent baseline could catch by accident.
+    0.22 m keeps the plate below ~most of the first descent while still leaving ample z
+    travel for the intercept (the paddle can reach 1.35 m at 9 m/s)."""
 
     pad_ready_z: float = 0.60
     """Pre-throw height (m) the scripted oracle moves the receiving paddle to while the ball
@@ -680,9 +692,10 @@ class TossConfig:
     """Court x (m) of the receiving paddle's pre-throw anticipation pose (mirrored)."""
 
     pad_speed: float = 9.0
-    """Maximum paddle translation speed (m/s); a normalized command maps to a pose increment
-    of at most `pad_speed * control_dt`. The env interpolates the paddle pose over the
-    physics substeps, so this is a smooth (non-teleporting) motion."""
+    """Command-limited paddle speed (m/s): a normalized command advances the servo TARGET by
+    at most `pad_speed * control_dt` per control step. The actual plate motion is the
+    bounded-force position servo's response to that target (never a joint teleport); the
+    servo is stiff enough to settle within ~one control step at the default timing."""
 
     pad_tilt_rate: float = 3.0
     """Maximum paddle tilt rate (rad/s)."""
@@ -701,7 +714,7 @@ class TossConfig:
     max_passes: int = 12
     """Sanity cap of `n_passes` (the episode budget must contain several passes)."""
 
-    min_pass_interval_steps: int = 3
+    min_pass_interval_steps: int = 4
     """Minimum number of control steps between two counted passes (>= 1).
 
     The physics runs `control_every` substeps per control step, and one ball/paddle impact
@@ -709,7 +722,13 @@ class TossConfig:
     ball chattering between the two paddle faces near the court centre) could be counted as
     a series of passes. A counted pass also requires the ball to be on the contacting
     paddle's own half of the court (`logic.toss_ball_on_side`), i.e. the ball has really
-    flown across the centre to the partner."""
+    flown across the centre to the partner.
+
+    The tightened default is 4 control steps (0.16 s at the default `control_dt`). The gate
+    only rejects contact chatter: the held-out successes of the current policies/oracle need
+    >= 28 control steps for the three passes (~14 steps per real pass), so a 4-step interval
+    cannot reject a legitimate pass. The GPU parity/oracle step-count check still has to be
+    repeated after the toss-contact physics rework."""
 
     success_floor_margin: float = 0.02
     """Clearance (m) above `floor_z` the ball must keep on the success step.
@@ -738,6 +757,24 @@ class TossConfig:
     # --- fallback seed ----------------------------------------------------------------------
     seed: int = 0
     """Seed used when `reset(seed=None)` (advances by one episode per reset)."""
+
+    # --- observation visibility variant (hidden-partner regime) -----------------------------
+    occlusion: str = "none"
+    """Partner-occlusion variant of the observation (`PLAN.md` "Hidden-partner regime").
+
+    `"none"` (the default) is the full shared block: the ball state and BOTH paddles'
+    position/velocity/tilt, exactly the pre-regime `TossCatch-v0` layout (26 fields under
+    `partner_mode="none"`, 36 under `"oracle"`). `"partner"` hides the PARTNER paddle's six
+    fields from the shared block while keeping the four ball fields and the agent's OWN six
+    paddle fields, so each agent still sees its own paddle, the ball, its private
+    parameters/action/goal/time but not the partner paddle pose/velocity/tilt (20 fields
+    under `"none"`, 30 under `"oracle"`; the privileged partner block of `"oracle"` is
+    unchanged). This is the `OccludedToss-v0` hidden-partner variant: `none` is then a
+    hidden-partner baseline, `oracle` the privileged upper bound and `predicted` (Bi-JEPA)
+    has to recover the partner latent from the agent's own history.
+
+    The other coop tasks have no per-agent shared fields, so this flag only exists on
+    `TossConfig`; the trainer accepts `--occlusion` only for `--task toss`."""
 
     # --- derived / identity ---------------------------------------------------------------
     task: str = "toss"
@@ -774,6 +811,7 @@ class TossConfig:
 
     def __post_init__(self) -> None:
         _validate_common(self)
+        validate_occlusion(self.occlusion)
         if not 0 < self.floor_z < self.pad_min_z:
             raise ValueError(
                 f"floor_z must be in (0, pad_min_z) = (0, {self.pad_min_z}), got {self.floor_z}"
@@ -821,8 +859,11 @@ class TossConfig:
                 f"(0, {self.pad_min_z - self.floor_z}), got {self.success_floor_margin}"
             )
         # Each pass needs at least a couple of control steps of flight; the budget must
-        # contain the whole rally with a margin. The pass gate's interval is the tightest
-        # lower bound on the step count of a valid rally.
+        # contain the whole rally with a margin. The runtime rule is the tightest lower
+        # bound on the step count of a valid rally: `n_passes * max(4, interval + 1)`
+        # (a chatter counts at most one pass per `interval` control steps, and 4 control
+        # steps is the floor of a single real pass), so a slow rally cannot fit a task
+        # whose gate is too tight for the budget.
         steps_per_pass = max(4, self.min_pass_interval_steps + 1)
         if self.n_passes * steps_per_pass > self.max_control_steps:
             raise ValueError(
@@ -863,15 +904,31 @@ def coop_config(task: str, **overrides: object) -> CartPoleConfig | PendulumConf
     return TASK_CONFIGS[task](**overrides)
 
 
-def coop_obs_size(task: str, partner_mode: str) -> int:
-    """Width of one agent's flat observation of `task` under `partner_mode`."""
+def coop_obs_size(task: str, partner_mode: str, occlusion: str = "none") -> int:
+    """Width of one agent's flat observation of `task` under `partner_mode`/`occlusion`.
+
+    The occlusion variant shrinks the shared block for the toss-catch task (the partner
+    paddle's six fields are hidden); the other tasks are unaffected because their shared
+    block has no per-agent fields.
+
+    Args:
+        task: One of `TASKS`.
+        partner_mode: `"none"` or `"oracle"`.
+        occlusion: `"none"` or `"partner"` (`TossConfig.occlusion`).
+
+    Returns:
+        The flat observation width (`26`/`20` for toss under none, `36`/`30` under oracle).
+    """
     if partner_mode not in PARTNER_MODES:
         raise ValueError(f"partner_mode must be one of {PARTNER_MODES}, got {partner_mode!r}")
-    return obs_size(task_spec(task), partner_mode)
+    return obs_size(task_spec(task), partner_mode, occlusion=occlusion)
 
 
 def coop_action_size(task: str) -> int:
-    """Width of one agent's action of `task` (1 for the one-sided tasks, 3 for the toss)."""
+    """Width of one agent's action of `task` (1 for the one-sided tasks, 3 for the toss).
+
+    The occlusion variant only hides observation fields, so the action width is unchanged.
+    """
     return task_spec(task).action_dim
 
 

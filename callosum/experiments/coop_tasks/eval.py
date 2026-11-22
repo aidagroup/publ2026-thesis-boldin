@@ -224,6 +224,21 @@ def summarize(records: list[EpisodeRecord], infos: list[dict], task: str) -> dic
         summary["p10_success_steps"] = (
             float(success_steps[len(success_steps) // 10]) if success_steps else None
         )
+        # Physical-paddle evidence: the plates are servo-driven rigid bodies now, so a held-out
+        # report must show that their contact shells never let them interpenetrate. The
+        # geometry is the SAT measure of `paddle_model.paddle_pair_geometry` (0 penetration
+        # means no overlap); `pad_min_gap` is a lower bound of the measured plate distance.
+        if "pad_penetration" in infos[0]:
+            summary["max_pad_penetration"] = float(
+                np.max([info["pad_penetration"] for info in infos])
+            )
+            summary["mean_pad_contact_steps"] = float(
+                np.mean([info["pad_contact_steps"] for info in infos])
+            )
+            summary["episodes_with_pad_contact"] = float(
+                np.mean([1.0 if info["pad_contact_steps"] > 0.0 else 0.0 for info in infos])
+            )
+            summary["min_pad_gap"] = float(np.min([info["pad_min_gap"] for info in infos]))
     return summary
 
 
@@ -321,6 +336,9 @@ def main(argv: list[str] | None = None) -> int:
     input_mode = resolve_input_mode(payload, args)
     env_mode, latent_dim = check_checkpoint_compat(payload, input_mode)
     env_config = cfg.coop_env_config()
+    # The hidden-partner variant is part of the run config (TossConfig.occlusion); the
+    # checkpoint records it, so the report states which observation layout it was judged on.
+    occlusion = str(getattr(env_config, "occlusion", "none"))
     device = torch.device(args.device)
     policies = make_policies(
         env_mode,
@@ -341,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     infos: list[dict] = []
     print(
         f"eval {args.checkpoint} | task {cfg.task} | input_mode {input_mode} (env "
-        f"partner_mode {env_mode}) | backend {args.backend} | "
+        f"partner_mode {env_mode}, occlusion {occlusion}) | backend {args.backend} | "
         f"policy input {cfg.env_obs_size + latent_dim} | "
         f"{args.episodes} episodes from held-out seed {args.seed + EVAL_SEED_OFFSET} | "
         "greedy policies",
@@ -380,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         "task": cfg.task,
         "input_mode": input_mode,
         "partner_mode": env_mode,
+        "occlusion": occlusion,
         "backend": args.backend,
         "policy_input_size": cfg.env_obs_size + latent_dim,
         "latent_dim": latent_dim,

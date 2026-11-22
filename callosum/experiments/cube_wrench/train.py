@@ -859,7 +859,11 @@ def check_checkpoint_compat(payload: dict, input_mode: str) -> tuple[str, int]:
             f"{input_mode!r} needs partner_mode={env_mode!r}"
         )
     task = checkpoint_task(payload)
-    expected_obs = task_obs_size(task, env_mode)
+    # The toss-catch hidden-partner variant (`TossConfig.occlusion="partner"`) shrinks the env
+    # observation, so the width recorded in the checkpoint must be checked against the SAME
+    # occlusion layout the run was trained under (old checkpoints have no key -> "none").
+    occlusion = str((payload.get("config") or {}).get("occlusion", "none"))
+    expected_obs = task_obs_size(task, env_mode, occlusion)
     saved_task = (payload.get("config") or {}).get("task")
     if saved_task is not None and saved_task != task:  # pragma: no cover - defensive
         raise ValueError(f"checkpoint records task={saved_task!r} but its config says {task!r}")
@@ -867,7 +871,7 @@ def check_checkpoint_compat(payload: dict, input_mode: str) -> tuple[str, int]:
     if saved_obs is not None and int(saved_obs) != expected_obs:
         raise ValueError(
             f"checkpoint policies take observations of width {saved_obs} but partner_mode "
-            f"{env_mode!r} observations are {expected_obs} wide"
+            f"{env_mode!r} with occlusion {occlusion!r} observations are {expected_obs} wide"
         )
     has_bijepa = payload.get("bijepa") is not None
     if input_mode == "predicted":
@@ -1194,7 +1198,8 @@ def train(
     env_label = "CubeWrench-v0" if cfg.task == "cube" else f"coop:{cfg.task}"
     print(
         f"run {run_dir} | {env_label} | input_mode {cfg.input_mode} (env partner_mode "
-        f"{cfg.partner_mode}) | backend {cfg.backend} | randomization {cfg.randomization} | "
+        f"{cfg.partner_mode}, occlusion {cfg.occlusion}) | backend {cfg.backend} | "
+        f"randomization {cfg.randomization} | "
         f"device {device} | torch {torch.__version__} | obs "
         f"{cfg.env_obs_size} + latent {latent_dim} = policy input "
         f"{cfg.policy_input_size} -> act {action_size}",

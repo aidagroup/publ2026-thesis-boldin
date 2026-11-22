@@ -216,9 +216,13 @@ def _pass_count(
     ball_x: float = 0.5,
     step: int = 10,
     last_step: int = -1,
-    interval: int = 3,
+    interval: int = 4,
 ) -> int:
-    """One `toss_pass_count` call with the test defaults (a right-side contact on its half)."""
+    """One `toss_pass_count` call with the test defaults (a right-side contact on its half).
+
+    The default interval is the config default (`TossConfig.min_pass_interval_steps == 4`),
+    so these rule tests exercise the tightened gate the envs actually use.
+    """
     return toss_pass_count(
         passes,
         last_side,
@@ -255,12 +259,12 @@ def test_toss_pass_count_requires_the_ball_over_the_centre() -> None:
 def test_toss_pass_count_enforces_the_min_interval() -> None:
     # First pass at control step 10.
     assert _pass_count(0, None, "right", step=10) == 1
-    for step in (10, 11, 12):
+    for step in (10, 11, 12, 13):
         assert _pass_count(1, "right", "left", ball_x=-0.5, step=step, last_step=10) == 1, (
             f"a pass {step - 10} control step(s) after the previous one must be rejected"
         )
     # Exactly `min_interval_steps` control steps later the next pass counts.
-    assert _pass_count(1, "right", "left", ball_x=-0.5, step=13, last_step=10) == 2
+    assert _pass_count(1, "right", "left", ball_x=-0.5, step=14, last_step=10) == 2
     # A fresh episode (`last_pass_step=-1`) has no interval gate.
     assert _pass_count(0, None, "left", ball_x=-0.5, step=0, last_step=-1) == 1
 
@@ -268,7 +272,7 @@ def test_toss_pass_count_enforces_the_min_interval() -> None:
 def test_toss_rapid_alternating_contacts_cannot_race_the_pass_counter() -> None:
     """The exploit sentinel: a ball chattering across the centre every step counts slowly."""
     passes, last_side, last_step = 0, None, -1
-    interval = 3
+    interval = 4
     for step in range(12):
         side = "left" if step % 2 == 0 else "right"
         ball_x = -0.05 if side == "left" else 0.05
@@ -419,7 +423,9 @@ def test_toss_config_defaults_match_the_task_spec() -> None:
     assert 300 <= cfg.max_control_steps <= 400
     assert cfg.action_size == 3
     assert cfg.n_passes == 3
-    assert cfg.min_pass_interval_steps == 3
+    assert cfg.min_pass_interval_steps == 4
+    # The tightened gate must still fit the episode budget with the documented bound.
+    assert cfg.n_passes * max(4, cfg.min_pass_interval_steps + 1) <= cfg.max_control_steps
     assert 0 < cfg.success_floor_margin < cfg.pad_min_z - cfg.floor_z
     assert 0 < cfg.pad_tilt < cfg.pad_tilt_limit < math.pi / 2
     assert cfg.pad_min_z < cfg.pad_start_z < cfg.pad_max_z
@@ -437,3 +443,139 @@ def test_toss_config_defaults_match_the_task_spec() -> None:
         cfg.agent_authority(2)
     with pytest.raises(ValueError, match="side must be one of"):
         cfg.paddle_x_range("middle")
+
+
+# --- physical paddle model (pure, no simulator) -------------------------------------------
+
+
+def test_paddle_projection_half_extents_are_the_rotated_box_footprint() -> None:
+    """The x/z projection of a rotated plate follows `hx |cos| + hz |sin|` (and vice versa)."""
+    from callosum.experiments.coop_tasks.paddle_model import projected_half_x, projected_half_z
+
+    half_x, half_z = 0.30, 0.03
+    assert projected_half_x(0.0, half_x, half_z) == pytest.approx(half_x)
+    assert projected_half_z(0.0, half_x, half_z) == pytest.approx(half_z)
+    quarter = math.pi / 2.0
+    assert projected_half_x(quarter, half_x, half_z) == pytest.approx(half_z)
+    assert projected_half_z(quarter, half_x, half_z) == pytest.approx(half_x)
+    tilt = math.radians(44.0)
+    assert projected_half_x(tilt, half_x, half_z) == pytest.approx(
+        half_x * abs(math.cos(tilt)) + half_z * abs(math.sin(tilt))
+    )
+    # Mirroring the tilt (the two paddles' nominal tilts) does not change the footprint.
+    assert projected_half_x(tilt, half_x, half_z) == pytest.approx(
+        projected_half_x(-tilt, half_x, half_z)
+    )
+
+
+def test_servo_target_is_a_clipped_increment_of_the_previous_target() -> None:
+    """A command moves the servo target by at most the per-step limit and stays in range."""
+    from callosum.experiments.coop_tasks.paddle_model import PaddleTarget, servo_target
+
+    current = PaddleTarget(x=0.30, z=0.22, tilt=math.radians(-44.0))
+    # A zero command keeps the exact target: this is what lets the servo hold the plate.
+    assert (
+        servo_target(
+            current,
+            np.zeros(3),
+            max_step=0.36,
+            max_dtilt=0.12,
+            x_range=(0.05, 1.05),
+            z_range=(0.10, 1.35),
+            tilt_limit=math.radians(60.0),
+        )
+        == current
+    )
+    # A full command moves exactly one step and cannot leave the workspace/tilt limits.
+    moved = servo_target(
+        current,
+        np.ones(3),
+        max_step=0.36,
+        max_dtilt=0.12,
+        x_range=(0.05, 1.05),
+        z_range=(0.10, 1.35),
+        tilt_limit=math.radians(60.0),
+    )
+    assert moved.x == pytest.approx(0.30 + 0.36)
+    assert moved.z == pytest.approx(0.22 + 0.36)
+    assert moved.tilt == pytest.approx(current.tilt + 0.12)
+    clipped = servo_target(
+        PaddleTarget(x=0.99, z=1.30, tilt=math.radians(59.0)),
+        np.array([1.0, 1.0, 1.0]),
+        max_step=0.36,
+        max_dtilt=0.12,
+        x_range=(0.05, 1.05),
+        z_range=(0.10, 1.35),
+        tilt_limit=math.radians(60.0),
+    )
+    assert clipped.x == pytest.approx(1.05)
+    assert clipped.z == pytest.approx(1.35)
+    assert clipped.tilt == pytest.approx(math.radians(60.0))
+    with pytest.raises(ValueError, match="shape"):
+        servo_target(
+            current,
+            np.zeros(2),
+            max_step=0.36,
+            max_dtilt=0.12,
+            x_range=(0.05, 1.05),
+            z_range=(0.10, 1.35),
+            tilt_limit=math.radians(60.0),
+        )
+
+
+def test_target_projection_keeps_the_two_plates_apart() -> None:
+    """The command-level projection separates overlapping target pairs and leaves the rest."""
+    from callosum.experiments.coop_tasks.paddle_model import (
+        PADDLE_CONTACT_MARGIN,
+        PaddleTarget,
+        project_targets_apart,
+        projected_half_x,
+    )
+
+    cfg = coop_config("toss")
+    half_x, half_z = 0.30, 0.03
+    kwargs = {
+        "half_x": half_x,
+        "half_z": half_z,
+        "left_x_range": cfg.paddle_x_range("left"),
+        "right_x_range": cfg.paddle_x_range("right"),
+    }
+    left = PaddleTarget(x=-0.27, z=0.22, tilt=math.radians(44.0))
+    right = PaddleTarget(x=0.27, z=0.22, tilt=math.radians(-44.0))
+    kept_left, kept_right = project_targets_apart(left, right, **kwargs)
+    assert (kept_left, kept_right) == (left, right)  # the ready pose is already separated
+    # A pair of targets both driven to the court centre is projected back apart.
+    inward_left = PaddleTarget(x=-0.06, z=0.30, tilt=math.radians(44.0))
+    inward_right = PaddleTarget(x=0.06, z=0.30, tilt=math.radians(-44.0))
+    moved_left, moved_right = project_targets_apart(inward_left, inward_right, **kwargs)
+    required = (
+        projected_half_x(moved_left.tilt, half_x, half_z)
+        + projected_half_x(moved_right.tilt, half_x, half_z)
+        + PADDLE_CONTACT_MARGIN
+    )
+    assert moved_right.x - moved_left.x >= required - 1e-12
+    assert moved_left.x >= cfg.paddle_x_range("left")[0] - 1e-12
+    assert moved_right.x <= cfg.paddle_x_range("right")[1] + 1e-12
+    # Plates at clearly different heights cannot touch, so no projection is applied.
+    low = PaddleTarget(x=-0.06, z=0.12, tilt=math.radians(44.0))
+    high = PaddleTarget(x=0.06, z=1.20, tilt=math.radians(-44.0))
+    assert project_targets_apart(low, high, **kwargs) == (low, high)
+
+
+def test_paddle_pair_geometry_reports_penetration_and_separation() -> None:
+    """The SAT measure: coincident plates penetrate, separated ones report a positive gap."""
+    from callosum.experiments.coop_tasks.paddle_model import (
+        PaddleTarget,
+        paddle_pair_geometry,
+    )
+
+    half_x, half_z = 0.30, 0.03
+    pose = PaddleTarget(x=0.0, z=0.30, tilt=0.0)
+    penetration, separation = paddle_pair_geometry(pose, pose, half_x=half_x, half_z=half_z)
+    assert separation == 0.0
+    assert penetration == pytest.approx(2.0 * half_z)  # the thinnest separating axis
+    left = PaddleTarget(x=-0.27, z=0.22, tilt=math.radians(44.0))
+    right = PaddleTarget(x=0.27, z=0.22, tilt=math.radians(-44.0))
+    penetration, separation = paddle_pair_geometry(left, right, half_x=half_x, half_z=half_z)
+    assert penetration == 0.0
+    assert separation > 0.05  # the ready pose keeps a clear gap between the idle plates

@@ -1,7 +1,8 @@
 """Step-by-step parity check: the CPU `VecCoopEnv` loop vs the batched `CoopBatchGPU`.
 
 The GPU backend re-implements the CPU `CoopTaskEnv` control step in tensor algebra (latency
-queues, start-delay suppression, one-sided force/torque scaling, the toss-catch paddle pose
+queues, start-delay suppression, one-sided force/torque scaling, the toss-catch paddle servo
+targets/visual state
 interpolation, the `control_every` physics substeps, the observation layout, the success/
 failure/reward rules, the per-episode hidden damping or contact parameters, and the auto-reset
 of the finished worlds). This script is the proof that the two paths are the same environment:
@@ -90,6 +91,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="action source: zero (default, strictest), random commands or the scripted oracle",
     )
     parser.add_argument("--device", default="cuda", help="CUDA device of the GPU env")
+    parser.add_argument(
+        "--occlusion",
+        choices=("none", "partner"),
+        default="none",
+        help=(
+            "hidden-partner observation variant (toss only): 'partner' hides the partner "
+            "paddle from the shared block, so the compared observations are 20/30 wide "
+            "instead of 26/36"
+        ),
+    )
     parser.add_argument(
         "--max-control-steps",
         type=int,
@@ -202,6 +213,15 @@ def run_parity(args: argparse.Namespace) -> int:
 
     torch.manual_seed(args.seed)
     config = coop_config(args.task)
+    if args.occlusion != "none":
+        if args.task != "toss":
+            raise ValueError(
+                f"--occlusion {args.occlusion!r} is only defined for --task toss (the other "
+                "tasks have no per-agent shared fields)"
+            )
+        import dataclasses
+
+        config = dataclasses.replace(config, occlusion=args.occlusion)
     if args.max_control_steps is not None:
         import dataclasses
 
@@ -241,7 +261,8 @@ def run_parity(args: argparse.Namespace) -> int:
 
     print(
         f"parity: task={args.task} controller={args.controller} partner_mode={args.partner_mode} "
-        f"worlds={num_worlds} steps={args.steps} seed={args.seed} device={args.device} "
+        f"occlusion={getattr(config, 'occlusion', 'none')} worlds={num_worlds} "
+        f"steps={args.steps} seed={args.seed} device={args.device} "
         f"max_control_steps={config.max_control_steps} graph={gpu_env.cuda_graph} "
         f"| {gpu_env.software_versions()}",
         flush=True,

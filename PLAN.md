@@ -99,6 +99,26 @@ Bi-JEPA `predicted` не даёт выигрыша (см. `docs/results-coop-sui
   пересечения ракеток и детерминизм; oracle sanity ≥0.8. После этого — переобучение всех
   toss-чекпоинтов и перерендер демо.
 
+**Статус 2026-11-21 (локально, под недоступен):** реализовано.
+- `assets/toss_catch.xml`: две динамические плиты (0.6×0.6×0.06 м, 0.8 кг) на slide(x)+slide(z)+
+  hinge(y), 6 `<position>`-сервоприводов с ограниченными силами (`kp/kv`, forcerange); контакты
+  мяч↔плита (soft, рандомизируются на reset) и плита↔плита (отдельные жёсткие collision-shells,
+  `contype/conaffinity`), MOCAP удалён (`nmocap=0`).
+- `toss_catch.py`: команда `(dx,dz,dtheta)` двигает ЦЕЛЬ серво (накопление на target, не на
+  измеренной позе → серво держит плиту, саг ~1 мм), 3 servo-target'а на сторону, контактный
+  учёт pass'ов сохранён; добавлен модуль `paddle_model.py` (чистая геометрия/проекция целей:
+  target-пара раздвигается, если плиты загоняют друг друга; SAT-диагностика перекрытия).
+  Ready-поза: `pad_start_z 0.30 → 0.22`, `_READY_X_OFFSET=0.22` (`|x|=0.27`, зазор плит 6.7 см).
+- `env_gpu.py`: ctrl-моторы per world (`data.ctrl`), те же target/проекция/контакты, CUDA graph
+  без mocap-банков; pass-счётчик и pad-контакты через warp-ядра; диагностика `pad_min_gap/
+  pad_penetration/pad_contact_steps` в terminal info.
+- `oracle.py`: планирование в target-space, `reach_margin 0.10→0.02`, `catch_clearance 0.10→0.08`,
+  антиципация по `|vx|==0` (устраняет физический размах плиты из-за flip-flop цели).
+- Локальные проверки (CPU 256 эп., мак): oracle **0.891**, only-left **0.012**, max
+  `pad_penetration == 0`, min SAT-gap 0.27 м; `pytest` (кроме чужого occlusion-теста) и ruff чисты.
+- **Не проверено (нужен под):** GPU parity CPU↔GPU (zero/oracle), детерминизм GPU, throughput,
+  smoke/обучение 3 режима × 3 сида × 250 апдейтов, eval 128 × 3 базы; + перерендер демо.
+
 ### OccludedToss-v0 (быстрый эксперимент)
 - Новый режим `occlusion="partner"` для `TossCatch-v0`: каждый агент видит **свою** ракетку, мяч,
   свои параметры/действие/цель/время, но **не видит ракетку партнёра** (её позу/скорость/тильт).
@@ -109,6 +129,26 @@ Bi-JEPA `predicted` не даёт выигрыша (см. `docs/results-coop-sui
   `env_gpu.CoopBatchGPU`, parity CPU↔GPU, тесты на отсутствие утечки партнёрских полей.
 - Протокол: GPU-only (`--backend warp`), 3 режима × 3 сида, **250 и 500 апдейтов** (проверка
   сходимости/асимптотики), eval 128 эпизодов × 3 held-out базы.
+
+**Статус 2026-11-21 (локально, под недоступен):** реализовано, GPU-прогонов ещё не было.
+- `logic.py`: `OCCLUSION_MODES`, `CoopTaskSpec.shared_field_owners` (мяч — оба, `*_pad_*` — свой),
+  `shared_fields_for`/`shared_field_indices`, `obs_fields`/`obs_size`/`build_observation`/
+  `task_obs_size` с `occlusion`; `"none"` байт-в-байт прежний layout. Ширины: toss 26→20 (`none`),
+  36→30 (`oracle`); partner-блок oracle НЕ маскируется (верхняя граница).
+- `config.py`: `TossConfig.occlusion: "none"|"partner"` (валидация), `coop_obs_size(..., occlusion)`.
+- `base.py`: CPU-env читает вариант из конфига, маска в obs, `info["occlusion_partner"]`.
+- `env_gpu.py` (toss-physical): та же маска в батчевой сборке (`shared_field_indices` на роль,
+  per-role валидация `observation_blocks`), `occlusion_partner` в terminal info.
+- `__init__.py`: зарегистрирован `TossCatchOccluded-v0` (`make_occluded_toss_env`).
+- Тренер: `WrenchPPOConfig.occlusion` (`--occlusion` только для `--task toss`), `env_obs_size`/
+  `coop_env_config`/`check_checkpoint_compat` учитывают вариант; eval пишет `occlusion` в JSON;
+  parity-скрипт и `smoke_coop.py` получили `--occlusion`.
+- Локальные проверки: `pytest -q` **729 passed, 27 skipped**; ruff/format чисты; тесты
+  `test_toss_occlusion_logic.py` (pure+CPU env, 24) и `test_toss_occlusion_trainer.py` (9) —
+  утечки партнёрской ракетки нет, CPU env/vec-env дают masked-obs, checkpoint-compat по варианту.
+- **Не проверено (нужен под):** GPU parity CPU↔GPU под occlusion (zero/oracle), детерминизм,
+  обучение 3 режима × 3 сида × {250,500} апдейтов, eval 128 × 3 базы, разрыв `oracle−none` /
+  `predicted−none`.
 
 ### Docking-v0 (кандидат на новый эксперимент, спека)
 - Два «космических корабля» (chaser/target) в 2D/3D с ньютоновской динамикой и дискретными

@@ -69,7 +69,10 @@ from callosum.experiments.coop_tasks.config import (
     coop_config,
     coop_obs_size,
 )
-from callosum.experiments.coop_tasks.logic import AGENT_KEYS as COOP_AGENT_KEYS
+from callosum.experiments.coop_tasks.logic import (
+    AGENT_KEYS as COOP_AGENT_KEYS,
+)
+from callosum.experiments.coop_tasks.logic import OCCLUSION_MODES, validate_occlusion
 from callosum.experiments.cube_wrench.config import (
     RANDOMIZATION_PRESETS,
     WrenchCubeConfig,
@@ -149,8 +152,8 @@ def _resolve_runtime_defaults(values: dict, explicit: set[str]) -> tuple[dict, s
     return values, explicit
 
 
-def task_obs_size(task: str, partner_mode: str) -> int:
-    """Width of one agent's flat env observation of `task` under `partner_mode`.
+def task_obs_size(task: str, partner_mode: str, occlusion: str = "none") -> int:
+    """Width of one agent's flat env observation of `task` under `partner_mode`/`occlusion`.
 
     Single place the trainer, the checkpoint-compatibility check and the evaluators ask for
     a task's observation width (the cube via `_wrench_logic.obs_size`, the coop tasks via
@@ -159,18 +162,22 @@ def task_obs_size(task: str, partner_mode: str) -> int:
     Args:
         task: One of `TASKS`.
         partner_mode: `"none"` or `"oracle"`.
+        occlusion: `"none"` or `"partner"` (the toss-catch hidden-partner variant); the cube
+            has no occlusion variant, so only `"none"` is accepted for it.
 
     Returns:
         The flat observation width.
 
     Raises:
-        ValueError: for an unknown task.
+        ValueError: for an unknown task or an occlusion the task does not support.
     """
     if task not in TASKS:
         raise ValueError(f"task must be one of {TASKS}, got {task!r}")
     if task == "cube":
+        if occlusion != "none":
+            raise ValueError(f"the cube task has no occlusion variant, got occlusion={occlusion!r}")
         return obs_size(partner_mode)
-    return coop_obs_size(task, partner_mode)
+    return coop_obs_size(task, partner_mode, occlusion=occlusion)
 
 
 def task_action_size(task: str) -> int:
@@ -237,6 +244,16 @@ class WrenchPPOConfig:
     also fixes the env observation width (`obs_size(partner_mode)`: 26 or 35). The third
     ablation arm, `predicted`, is not an env mode: it is `partner_mode="none"` plus
     `use_bijepa=True` (see :attr:`input_mode`)."""
+    occlusion: str = "none"
+    """Hidden-partner observation variant of the toss-catch task (`PLAN.md` "Hidden-partner
+    regime"): `"none"` (default) is the full shared block (the ball and BOTH paddles),
+    `"partner"` hides the partner paddle's pose/velocity/tilt from the shared block while
+    keeping the ball, the agent's own paddle and the privileged `oracle` partner block. It is
+    the `OccludedToss-v0` variant and is only defined for `task="toss"`: the `none`/`oracle`
+    arms then train/evaluate on the occluded observation (20/30 fields instead of 26/36) and
+    `predicted` is `partner_mode="none"` + `use_bijepa=True` + `occlusion="partner"`. The
+    cube, cart-pole and pendulum tasks reject it (their shared block has no per-agent
+    fields)."""
     num_envs: int = 128
     """Envs stepped in one Python loop per control step (the plan's training range is
     64-256; the vectorisation is a loop, see `callosum.experiments.cube_wrench.vec_env`)."""
@@ -323,6 +340,13 @@ class WrenchPPOConfig:
         validate_partner_mode(self.partner_mode)
         if self.task not in TASKS:
             raise ValueError(f"task must be one of {TASKS}, got {self.task!r}")
+        validate_occlusion(self.occlusion)
+        if self.occlusion != "none" and self.task != "toss":
+            raise ValueError(
+                "occlusion is only defined for --task toss (the other tasks have no "
+                f"per-agent shared fields), got task={self.task!r}, "
+                f"occlusion={self.occlusion!r}"
+            )
         if self.backend not in BACKENDS:
             raise ValueError(f"backend must be one of {BACKENDS}, got {self.backend!r}")
         if self.randomization not in RANDOMIZATION_PRESETS:
@@ -439,7 +463,7 @@ class WrenchPPOConfig:
         10/16 (pendulum); see `coop_obs_size`. The policy input under `predicted` appends
         `latent_dim` to this width.
         """
-        return task_obs_size(self.task, self.partner_mode)
+        return task_obs_size(self.task, self.partner_mode, self.occlusion)
 
     @property
     def action_size(self) -> int:
@@ -487,6 +511,8 @@ class WrenchPPOConfig:
         """
         if self.task == "cube":
             raise ValueError("coop_env_config() is only defined for the coop tasks")
+        if self.task == "toss":
+            return coop_config(self.task, occlusion=self.occlusion)
         return coop_config(self.task)
 
     @property
@@ -520,6 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices={
             "task": TASKS,
             "partner_mode": PARTNER_MODES,
+            "occlusion": OCCLUSION_MODES,
             "backend": BACKENDS,
             "randomization": RANDOMIZATION_PRESETS,
         },
